@@ -20,6 +20,7 @@
 #include "backend.hpp"
 #include "cgen.hpp"
 #include "infer.hpp"
+#include "jit/codegen.hpp"
 #include "tirbuild.hpp"
 
 extern char** environ;
@@ -310,13 +311,34 @@ int run_module(tir::Module& M, const Options& opts_in) {
         return 0;
     }
     uint64_t T1 = now_us();
+    bool use_jit = opts.engine == Engine::Jit && !opts.emit_c && (opts.jit_mode != 0 || opts.dump_asm);
+    if (use_jit) {
+        std::string why = jitcg::unsupported(M);
+        if (!why.empty()) {
+            if (opts.jit_mode == 2) {
+                if (opts.verbose) std::fprintf(stderr, "epq: jit: unsupported %s; using the C engine\n", why.c_str());
+                use_jit = false;
+            } else {
+                std::fprintf(stderr, "epq: jit: unsupported %s (use --engine=aot or --engine=auto)\n", why.c_str());
+                return 2;
+            }
+        }
+    }
+    if (use_jit) {
+        jitcg::JitConfig jc;
+        jc.time = opts.time;
+        jc.dump_asm = opts.dump_asm;
+        jc.stats = opts.jit_stats;
+        jc.verbose = opts.verbose;
+        if (opts.verbose) std::fprintf(stderr, "epq: passes %llu us\n", (unsigned long long)(T1 - Tb));
+        return jitcg::run(M, jc);
+    }
     std::string c = emit_c(M);
     uint64_t T2 = now_us();
     if (opts.emit_c) {
         write_all(1, c);
         return 0;
     }
-    // Engine::Jit falls back to the C backend until the JIT exists.
     std::string path = compile_cached(c, opts.verbose);
     if (path.empty()) return 2;
     void* h = dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL);
