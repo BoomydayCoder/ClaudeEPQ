@@ -651,10 +651,19 @@ public:
     }
 
     // Definite assignment (for zero-initialisation): bits = assigned locals.
-    using Bits = std::vector<uint64_t>;
-    static void set_all(Bits& b) { std::fill(b.begin(), b.end(), ~0ull); }
+    // Fixed-size bit set (functions with more locals skip the analysis and
+    // zero-initialise everything).
+    static constexpr size_t kDaWords = 8;
+    struct Bits {
+        uint64_t w[kDaWords];
+        uint64_t& operator[](size_t i) { return w[i]; }
+        uint64_t operator[](size_t i) const { return w[i]; }
+    };
+    static void set_all(Bits& b) {
+        for (auto& x : b.w) x = ~0ull;
+    }
     static void band(Bits& a, const Bits& b) {
-        for (size_t i = 0; i < a.size(); ++i) a[i] &= b[i];
+        for (size_t i = 0; i < kDaWords; ++i) a.w[i] &= b.w[i];
     }
     void da(const Node* n, Bits& b) {
         switch (n->op) {
@@ -699,7 +708,8 @@ public:
             set_all(b);
             return;
         case Op::InlineBlock: {
-            Bits ex(b.size(), ~0ull);
+            Bits ex;
+            set_all(ex);
             da_blocks.push_back({n->a, &ex});
             da(n->kids[0], b);
             da_blocks.pop_back();
@@ -749,7 +759,9 @@ public:
         ctx_next_ = 0;
         ctx_stack_.clear();
         out_bytes = 0;
-        L.assign(F->locals.size(), LocalInfo{});
+        L.clear();
+        L.reserve(F->locals.size() + 32);
+        L.resize(F->locals.size());
         for (size_t i = 0; i < F->locals.size(); ++i) {
             Type t = F->locals[i].type;
             L[i].fn = t.k == TK::Fn;
@@ -764,10 +776,12 @@ public:
         prepass(F->body, 0);
         std::sort(call_pos.begin(), call_pos.end());
         hot_calls = !call_pos.empty();
-        {
-            Bits b((F->locals.size() + 63) / 64 + 1, 0);
+        if (F->locals.size() <= 64 * kDaWords) {
+            Bits b{};
             for (uint32_t p : F->params) b[p >> 6] |= 1ull << (p & 63);
             da(F->body, b);
+        } else {
+            for (size_t i = 0; i < F->locals.size(); ++i) L[i].needs_init = true;
         }
         // intervals
         for (auto& l : L) {
@@ -880,11 +894,14 @@ public:
         bool x64;
     };
     // Emits the moves and releases every source value.
-    void parallel_move(std::vector<Move> mv) {
-        std::vector<V> srcs;
-        for (auto& m : mv) srcs.push_back(m.src);
+    std::vector<V> pm_srcs_;
+    std::vector<Move*> pm_pend_;
+    std::vector<Move> hc_moves_;
+    void parallel_move(std::vector<Move>& mv) {
+        pm_srcs_.clear();
+        for (auto& m : mv) pm_srcs_.push_back(m.src);
         parallel_move_(mv);
-        for (auto& v : srcs) release(v);
+        for (auto& v : pm_srcs_) release(v);
     }
     void parallel_move_(std::vector<Move>& mv) {
         // stack destinations first (they read sources, write memory)
@@ -905,7 +922,8 @@ public:
             }
         }
         // register-to-register moves
-        std::vector<Move*> pend;
+        std::vector<Move*>& pend = pm_pend_;
+        pend.clear();
         for (auto& m : mv)
             if (m.dst >= 0 && m.src.k == V::REG && m.src.r != m.dst) pend.push_back(&m);
         while (!pend.empty()) {
@@ -947,8 +965,9 @@ public:
         }
     }
     // Call a helper with arguments (released), result register x0 (allocated) or none.
-    V helper_call(int h, std::vector<Move> args, bool has_result) {
-        parallel_move(args);
+    V helper_call(int h, std::initializer_list<Move> args, bool has_result) {
+        hc_moves_.assign(args.begin(), args.end());
+        parallel_move(hc_moves_);
         check_no_temps(helper_name(h));
         call_helper(h);
         if (!has_result) return V::none();
@@ -962,20 +981,21 @@ public:
     }
     void save_regs(uint32_t m) {
         m |= bit(30);
-        std::vector<int> r;
+        int r[32];
+        size_t n = 0;
         for (int i = 0; i < 31; ++i)
-            if (m & bit(i)) r.push_back(i);
-        for (size_t i = 0; i < r.size(); i += 2) {
-            if (i + 1 < r.size()) A->stp(X(r[i]), X(r[i + 1]), pre(sp, -16));
+            if (m & bit(i)) r[n++] = i;
+        for (size_t i = 0; i < n; i += 2) {
+            if (i + 1 < n) A->stp(X(r[i]), X(r[i + 1]), pre(sp, -16));
             else A->str(X(r[i]), pre(sp, -16));
         }
     }
     void restore_regs(uint32_t m) {
         m |= bit(30);
-        std::vector<int> r;
+        int r[32];
+        size_t n = 0;
         for (int i = 0; i < 31; ++i)
-            if (m & bit(i)) r.push_back(i);
-        size_t n = r.size();
+            if (m & bit(i)) r[n++] = i;
         size_t last = (n - 1) & ~(size_t)1;
         for (size_t i = last + 2; i-- > 0;) {
             if (i & 1) continue;
@@ -1532,7 +1552,7 @@ public:
         bool neg = n->op == Op::Ne || c == Op::LeI32 || c == Op::GeI32;
         if (li_fast(n)) {
             int h = (n->op == Op::Eq || n->op == Op::Ne) ? H_EQ_LI : H_LT_LI;
-            std::vector<Move> mv{{swap ? 1 : 0, k[0], true}, {swap ? 0 : 1, k[1], true}};
+            std::initializer_list<Move> mv{{swap ? 1 : 0, k[0], true}, {swap ? 0 : 1, k[1], true}};
             V r = helper_call(h, mv, true);
             if (neg) A->eor(W(r.r), W(r.r), (uint64_t)1);
             return r;
@@ -1541,7 +1561,7 @@ public:
         V wb = word_of(n->kids[1]->type, k[1]);
         int h = (n->op == Op::Eq || n->op == Op::Ne) ? H_EQ : H_LT;
         uint32_t da = (uint32_t)n->a, db = (uint32_t)n->b;
-        std::vector<Move> mv{{0, V::im(swap ? db : da), false},
+        std::initializer_list<Move> mv{{0, V::im(swap ? db : da), false},
                              {1, swap ? wb : wa, true},
                              {2, V::im(swap ? da : db), false},
                              {3, swap ? wa : wb, true}};
@@ -1680,7 +1700,7 @@ public:
         V lst;
         if (!lit_inline(n)) {
             check_no_temps("listlit");
-            std::vector<Move> mv{{0, V::im(n->nkids), false}, {1, V::im(esz), false}};
+            std::initializer_list<Move> mv{{0, V::im(n->nkids), false}, {1, V::im(esz), false}};
             lst = helper_call(H_LIST_NEW, mv, true);
         } else {
             // inline bump allocation (epq_alloc + epq_list_new)
@@ -2571,11 +2591,11 @@ public:
                 return;
             }
             if (t.k == TK::Int) {
-                std::vector<Move> mv{{0, x, false}};
+                std::initializer_list<Move> mv{{0, x, false}};
                 helper_call(H_PRINT_INT, mv, false);
             } else {
                 V w = word_of(t, x);
-                std::vector<Move> mv{{0, V::im(n->a), false}, {1, w, true}};
+                std::initializer_list<Move> mv{{0, V::im(n->a), false}, {1, w, true}};
                 helper_call(H_PRINT, mv, false);
             }
             return;
@@ -2613,6 +2633,7 @@ public:
         slot_busy.clear();
         max_slots = nfixed;
         colds.clear();
+        colds.reserve(32);
         for (auto& e : err_label) e = Label{};
     }
     void save_pair_at(int r1, int r2, uint32_t off, bool load) {
@@ -2817,9 +2838,7 @@ public:
 
     void compile_func(const Func& f) {
         F = &f;
-        uint64_t q0 = now_us();
         analyze();
-        uint64_t q1 = now_us();
         // dry run: measure the frame
         dry = true;
         scratch = std::make_unique<Assembler>();
@@ -2849,7 +2868,6 @@ public:
         syms.push_back({A->pos(), f.name});
         gen_body();
         if (used_callee != fixed_callee || max_slots > fixed_slots) bug("dry run mismatch");
-        if (getenv("EPQ_JIT_PROF")) fprintf(stderr, "%s: analyze %llu dry+real %llu\n", f.name.c_str(), (unsigned long long)(q1-q0), (unsigned long long)(now_us()-q1));
         used_callee = fixed_callee;
     }
 
@@ -3006,6 +3024,18 @@ void on_overflow() {
 int run(const Module& m, const JitConfig& cfg) {
     static_assert(sizeof(tir::Desc) == 8, "EDesc layout");
     uint64_t t0 = now_us();
+    if (const char* b = getenv("EPQ_JIT_BENCH")) {  // diagnostic: repeated compiles
+        int n = atoi(b);
+        uint64_t best = UINT64_MAX;
+        for (int i = 0; i < n; ++i) {
+            uint64_t a = now_us();
+            Compiler* X = new Compiler(m);
+            X->compile();
+            best = std::min(best, now_us() - a);
+            delete X;
+        }
+        std::fprintf(stderr, "jit: best of %d compiles: %llu us\n", n, (unsigned long long)best);
+    }
     Compiler* C = new Compiler(m);  // never freed: the process exits
     if (!C->compile()) {
         std::fprintf(stderr, "epq: jit: cannot allocate code memory\n");
