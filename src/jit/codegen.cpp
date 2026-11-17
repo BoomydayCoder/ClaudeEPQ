@@ -181,6 +181,7 @@ struct Ref {
 };
 struct LoopRec {
     uint32_t en, lv, cond_ctx, body_ctx;
+    const tir::Node* node;
 };
 
 struct LocalInfo {
@@ -623,7 +624,7 @@ public:
             break;
         }
         case Op::While: {
-            LoopRec lr{en, 0, ctx_, 0};
+            LoopRec lr{en, 0, ctx_, 0, n};
             size_t h0 = hoist_pending_.size();
             if (!no_hoist_) find_hoists(n);
             size_t h1 = hoist_pending_.size();
@@ -829,6 +830,82 @@ public:
         }
     }
     std::vector<std::pair<int32_t, Bits*>> da_blocks;
+    // Upward-exposed reads of one loop iteration (as da, over canonical ids):
+    // expo_out_ gets every local read before being assigned in the iteration.
+    Bits expo_out_;
+    bool getenv_coarse_loops_ = false;
+    std::vector<std::pair<int32_t, Bits*>> ex_blocks;
+    void loop_exposed(const Node* w) {
+        for (auto& x : expo_out_.w) x = 0;
+        Bits b{};
+        ex(w->kids[0], b);
+        ex(w->kids[1], b);
+        ex(w->kids[2], b);
+    }
+    void ex(const Node* n, Bits& b) {
+        switch (n->op) {
+        case Op::Local: {
+            uint32_t id = canon((uint32_t)n->a);
+            if (!(b[id >> 6] >> (id & 63) & 1)) expo_out_[id >> 6] |= 1ull << (id & 63);
+            return;
+        }
+        case Op::SetLocal: {
+            ex(n->kids[0], b);
+            uint32_t id = canon((uint32_t)n->a);
+            b[id >> 6] |= 1ull << (id & 63);
+            return;
+        }
+        case Op::If: {
+            ex(n->kids[0], b);
+            Bits t = b, e = b;
+            ex(n->kids[1], t);
+            ex(n->kids[2], e);
+            band(t, e);
+            b = t;
+            return;
+        }
+        case Op::While: {
+            ex(n->kids[0], b);
+            Bits t = b;
+            ex(n->kids[1], t);
+            ex(n->kids[2], t);
+            return;
+        }
+        case Op::And:
+        case Op::Or: {
+            ex(n->kids[0], b);
+            Bits t = b;
+            ex(n->kids[1], t);
+            return;
+        }
+        case Op::Return:
+        case Op::Fail:
+        case Op::Coerce:
+            for (uint32_t i = 0; i < n->nkids; ++i) ex(n->kids[i], b);
+            set_all(b);
+            return;
+        case Op::InlineBlock: {
+            Bits exb;
+            set_all(exb);
+            ex_blocks.push_back({n->a, &exb});
+            ex(n->kids[0], b);
+            ex_blocks.pop_back();
+            band(b, exb);
+            return;
+        }
+        case Op::Break:
+            for (size_t i = ex_blocks.size(); i-- > 0;)
+                if (ex_blocks[i].first == n->a) {
+                    band(*ex_blocks[i].second, b);
+                    break;
+                }
+            set_all(b);
+            return;
+        default:
+            for (uint32_t i = 0; i < n->nkids; ++i) ex(n->kids[i], b);
+            return;
+        }
+    }
 
     bool no_const_reg_ = false;
     bool want_const_reg_ = false;  // the parent would materialise this constant with a mov
@@ -1054,8 +1131,11 @@ public:
             if (l.param || l.needs_init) l.lo = 0;
             if (l.refs.empty()) l.hi = 0;
         }
+        bool precise = F->locals.size() <= 64 * kDaWords && !getenv_coarse_loops_;
         for (auto& lp : loops) {
-            for (auto& l : L) {
+            if (precise) loop_exposed(lp.node);
+            for (size_t li = 0; li < L.size(); ++li) {
+                LocalInfo& l = L[li];
                 if (l.fn || l.refs.empty()) continue;
                 // refs inside the loop?
                 const Ref* first = nullptr;
@@ -1068,7 +1148,12 @@ public:
                     }
                 }
                 if (!first) continue;
-                bool uncond_def = first->write && (first->ctx == lp.body_ctx || first->ctx == lp.cond_ctx);
+                // Does the loop read the value an earlier iteration (or the code before
+                // the loop) left behind? Precisely: a read of the local reachable from
+                // the loop top without an assignment in between (upward exposed).
+                bool uncond_def;
+                if (precise && li < F->locals.size()) uncond_def = !(expo_out_[li >> 6] >> (li & 63) & 1);
+                else uncond_def = first->write && (first->ctx == lp.body_ctx || first->ctx == lp.cond_ctx);
                 if (outside || !uncond_def) {
                     l.lo = std::min(l.lo, lp.en);
                     l.hi = std::max(l.hi, lp.lv);
@@ -3853,6 +3938,7 @@ public:
         getenv_always_dry_ = getenv("EPQ_JIT_ALWAYS_DRY") != nullptr;
         getenv_no_coalesce_ = getenv("EPQ_JIT_NO_COALESCE") != nullptr;
         no_hoist_ = getenv("EPQ_JIT_NO_HOIST") != nullptr;
+        getenv_coarse_loops_ = getenv("EPQ_JIT_COARSE_LOOPS") != nullptr;
         for (auto& f : M.funcs) compile_func(*f);
         F = nullptr;
         emit_rec_stubs();
