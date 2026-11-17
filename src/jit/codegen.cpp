@@ -2198,7 +2198,9 @@ public:
 
     void compile_func(const Func& f) {
         F = &f;
+        uint64_t q0 = now_us();
         analyze();
+        uint64_t q1 = now_us();
         // dry run: measure the frame
         dry = true;
         scratch = std::make_unique<Assembler>();
@@ -2228,6 +2230,7 @@ public:
         syms.push_back({A->pos(), f.name});
         gen_body();
         if (used_callee != fixed_callee || max_slots > fixed_slots) bug("dry run mismatch");
+        if (getenv("EPQ_JIT_PROF")) fprintf(stderr, "%s: analyze %llu dry+real %llu\n", f.name.c_str(), (unsigned long long)(q1-q0), (unsigned long long)(now_us()-q1));
         used_callee = fixed_callee;
     }
 
@@ -2320,9 +2323,13 @@ public:
     };
     std::vector<FnInfo> fns_rt;
 
+    uint64_t tm[6] = {};
     bool compile() {
+        tm[0] = now_us();
         if (!region.init()) return false;
+        tm[1] = now_us();
         if (!setup_data()) return false;
+        tm[2] = now_us();
         main_as.reserve(1 << 16);
         func_label.resize(M.funcs.size());
         func_off.assign(M.funcs.size(), 0);
@@ -2331,7 +2338,9 @@ public:
         F = nullptr;
         emit_wrappers();
         emit_helper_stubs();
+        tm[3] = now_us();
         code = region.install(main_as);
+        tm[4] = now_us();
         code_size = main_as.size();
         if (code != region.base()) bug("code not at region base");
         // runtime tables
@@ -2375,9 +2384,14 @@ int run(const Module& m, const JitConfig& cfg) {
         return 2;
     }
     uint64_t t1 = now_us();
-    if (cfg.stats)
+    if (cfg.stats) {
         std::fprintf(stderr, "jit: compile %llu us, code %zu bytes, %zu functions\n", (unsigned long long)(t1 - t0),
                      C->code_size, m.funcs.size());
+        if (cfg.verbose)
+            std::fprintf(stderr, "jit: region %llu us, data %llu us, codegen %llu us, install %llu us\n",
+                         (unsigned long long)(C->tm[1] - C->tm[0]), (unsigned long long)(C->tm[2] - C->tm[1]),
+                         (unsigned long long)(C->tm[3] - C->tm[2]), (unsigned long long)(C->tm[4] - C->tm[3]));
+    }
     if (cfg.dump_asm) {
         std::string s = jit::disassemble(C->code, C->code_size, C->syms, (uint64_t)(uintptr_t)C->code);
         (void)!::write(1, s.data(), s.size());
