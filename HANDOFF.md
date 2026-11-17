@@ -14,7 +14,7 @@ ClaudeEPQ is a new implementation of the EPQ language (original: BoomydayCoder/E
   `--enable-pass=NAME` / `EPQ_ENABLE_PASS`): currently empty.
 - Gates on main (fasttest, `--verify-tir`, -O1 and default flags, also `EPQ_POISON_FREED=1`): 389
   conformance, 50 core, 125 hunt, every `tests/passes/*`, 26 records, 22 rtio (+10 checked by
-  `tests/rtio/run.py`), 14 `tests/integration/progs` (pass-interaction cases) — all pass; TIR
+  `tests/rtio/run.py`), 13 `tests/integration/progs` (pass-interaction cases) — all pass; TIR
   self-tests 21/21; tier-up scenarios 8/8. Differential fuzz: 3,000 programs (clean/mixed/nasty) +
   1,000 with random `EPQ_NO_PASS` subsets: 0 divergences.
 - Benchmarks (C engine, `-t` self time, geomean over 24): passes off 38× the original, default 58×
