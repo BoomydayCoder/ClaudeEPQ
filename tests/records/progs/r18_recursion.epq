@@ -1,0 +1,8 @@
+// recursion at record types
+step := (s, n) => {
+    (n = 0) ? => s;
+    => step([s[0] + n, [n, s[1]]], n - 1);
+};
+r := step([0, []], 4);
+>> r;
+>> r[0];

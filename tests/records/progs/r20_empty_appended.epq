@@ -1,0 +1,8 @@
+// an "empty" of a record-like region that later gets appended to
+cons := (h, t) => { => [h, t]; };
+c := cons(1, cons(2, []));
+>> c;
+e := c[1][1];
+e :+ 5;
+>> e;
+>> c;

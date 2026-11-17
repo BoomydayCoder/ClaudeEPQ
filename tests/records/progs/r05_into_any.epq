@@ -1,0 +1,14 @@
+// records flowing into dynamic values
+r := [1, [2]];
+h := [0];
+h :+ r;
+h :+ [5];
+>> h;
+>> h[1][1];
+z := 3;
+z := r;
+>> z;
+w := [2, [9]];
+d := [w, 4];
+d[1] := 5;
+>> d;

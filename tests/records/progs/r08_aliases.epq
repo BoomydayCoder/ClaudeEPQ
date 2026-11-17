@@ -1,0 +1,14 @@
+// stores through aliases observed through other aliases, a global, a return value
+g := [1, [2], 3];
+keep := [g, g];
+id := (x) => { => x; };
+a := id(g);
+a[0] := 10;
+>> g;
+keep[1][2] := 30;
+>> a;
+setf := (x, v) => { x[1] := v; => 0; };
+setf(keep[0], [4, 4]);
+>> g;
+>> keep;
+>> keep[0] = keep[1];

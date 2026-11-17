@@ -1,0 +1,5 @@
+// invalid comparison reached: Int field against a list
+r := [1, [2]];
+s := [[1], [2]];
+>> r = s;
+>> r < s;
