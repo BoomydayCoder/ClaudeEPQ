@@ -1,0 +1,8 @@
+inner := [1, 2];
+outer := [inner, inner];
+outer[0][0] := [3];
+>> inner; >> outer;
+outer[1] :+ 4;
+>> inner;
+p := outer[1];
+>> p[0][0] + p[2];

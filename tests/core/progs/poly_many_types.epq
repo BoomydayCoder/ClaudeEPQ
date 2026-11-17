@@ -1,0 +1,14 @@
+twice := (f, x) => { => f(f(x)); };
+inc := (n) => { => n + 1; };
+wrap := (v) => { => [v]; };
+>> twice(inc, 5);
+>> twice(wrap, 5);
+>> twice(wrap, [1]);
+first := (l) => { => l[0]; };
+>> first([1, 2]); >> first([[3], 4]); >> first([[[5]]]);
+len := (l) => { => |l|; };
+>> len([]); >> len([1]); >> len([[1], [2]]); >> len(-7);
+swap := (l, i, j) => { t := l[i]; l[i] := l[j]; l[j] := t; };
+a := [1, 2]; b := [[1], [2, 3]]; c := [1, [2]];
+swap(a, 0, 1); swap(b, 0, 1); swap(c, 0, 1); swap(a, 0, 1);
+>> a; >> b; >> c;

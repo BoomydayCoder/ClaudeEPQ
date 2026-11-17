@@ -183,15 +183,17 @@ struct RunJob {
 
 void* run_thread(void* p) {
     RunJob* j = static_cast<RunJob*>(p);
-    static char altstack[1 << 16];
-    stack_t ss;
+    const size_t alt = 1 << 16;
+    void* altstack = mmap(nullptr, alt, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+    stack_t ss, old;
     ss.ss_sp = altstack;
-    ss.ss_size = sizeof altstack;
+    ss.ss_size = alt;
     ss.ss_flags = 0;
-    sigaltstack(&ss, nullptr);
+    bool have_alt = altstack != MAP_FAILED && sigaltstack(&ss, &old) == 0;
     uint64_t t0 = now_us();
     j->rc = j->entry();
     j->us = now_us() - t0;
+    if (have_alt) sigaltstack(&old, nullptr);  // (sanitizers unmap their own one at thread exit)
     return nullptr;
 }
 
