@@ -28,7 +28,6 @@
 
 #include <cstdint>
 #include <memory>
-#include <unordered_map>
 #include <vector>
 
 #include "resolver.hpp"
@@ -62,6 +61,41 @@ struct EVar {
 
 constexpr uint32_t kNone = 0xffffffffu;
 
+// Open-addressing map AST node -> ordinal (built once by infer(), read-only
+// afterwards). Replaces std::unordered_map: one allocation, no per-entry nodes.
+class NodeMap {
+public:
+    void init(size_t n) {
+        size_t cap = 16;
+        while (cap < n * 2) cap <<= 1;
+        keys_.assign(cap, nullptr);
+        vals_.assign(cap, 0);
+        shift_ = 64 - (unsigned)__builtin_ctzll(cap);
+    }
+    void put(const Node* n, uint32_t v) {
+        size_t i = slot(n);
+        while (keys_[i] && keys_[i] != n) i = (i + 1) & (keys_.size() - 1);
+        keys_[i] = n;
+        vals_[i] = v;
+    }
+    uint32_t at(const Node* n) const {
+        size_t i = slot(n);
+        while (keys_[i] != n) {
+            if (!keys_[i]) __builtin_trap();  // not an expression node of any function
+            i = (i + 1) & (keys_.size() - 1);
+        }
+        return vals_[i];
+    }
+
+private:
+    size_t slot(const Node* n) const {
+        return (size_t)(((uint64_t)(uintptr_t)n * 0x9E3779B97F4A7C15ull) >> shift_);
+    }
+    std::vector<const Node*> keys_;
+    std::vector<uint32_t> vals_;
+    unsigned shift_ = 60;
+};
+
 struct Instance {
     uint32_t id = 0;
     DefId def = 0;
@@ -91,7 +125,7 @@ struct Result {
     std::vector<int32_t> generic_of;  // DefId -> generic instance, -1 if not escaped
     std::vector<int32_t> shared_of;   // DefId -> shared instance, -1
     std::vector<uint8_t> escaped;     // DefId -> escaped
-    std::unordered_map<const Node*, uint32_t> ord;  // node -> ordinal within its function
+    NodeMap ord;                      // node -> ordinal within its function (preorder)
     std::vector<uint32_t> nnodes;     // DefId -> number of ordinals
     uint32_t passes = 0;
 

@@ -26,6 +26,10 @@ struct Builder {
     std::vector<int32_t> region_of_root;
     std::vector<int32_t> func_of_inst;
     std::vector<uint32_t> work;
+    // Scratch stack for kid lists under construction. Every builder function
+    // leaves it at the size it found it; across recursion only indices into
+    // it are kept (pushes may reallocate).
+    std::vector<TNode*> stk;
     Func* F = nullptr;
     uint32_t inst = 0;
     uint32_t line = 0;
@@ -91,10 +95,16 @@ struct Builder {
         n->line = line;
         return n;
     }
-    TNode* mkv(Op op, Type t, const std::vector<TNode*>& k) {
-        TNode* n = M.node(op, t, (uint32_t)k.size());
-        for (size_t i = 0; i < k.size(); ++i) n->kids[i] = k[i];
+    TNode* mkv(Op op, Type t, TNode* const* k, size_t nk) {
+        TNode* n = M.node(op, t, (uint32_t)nk);
+        for (size_t i = 0; i < nk; ++i) n->kids[i] = k[i];
         n->line = line;
+        return n;
+    }
+    // Node whose kids are stk[base..]; pops them.
+    TNode* mkv_top(Op op, Type t, size_t base) {
+        TNode* n = mkv(op, t, stk.data() + base, stk.size() - base);
+        stk.resize(base);
         return n;
     }
     TNode* cint(int32_t v) {
@@ -121,39 +131,39 @@ struct Builder {
         if (t.k == TK::Any) return mk(Op::Box, Type::any(), {n});
         internal("impossible coercion", n->line);
     }
-    TNode* fail(Err e, const std::vector<TNode*>& k) {
-        TNode* n = mkv(Op::Fail, Type::bot(), k);
+    TNode* fail(Err e, TNode* const* k, size_t nk) {
+        TNode* n = mkv(Op::Fail, Type::bot(), k, nk);
         n->a = (int32_t)e;
         return n;
     }
+    TNode* fail(Err e, std::initializer_list<TNode*> k) { return fail(e, k.begin(), k.size()); }
     // If some kid has type Bot, the operator is never reached: evaluate the kids
     // up to that one. Returns nullptr when no kid is Bot.
-    TNode* bot_short(const std::vector<TNode*>& k) {
-        for (size_t i = 0; i < k.size(); ++i) {
+    TNode* bot_short(TNode* const* k, size_t nk) {
+        for (size_t i = 0; i < nk; ++i) {
             if (k[i]->type.k == TK::Bot) {
                 if (i == 0) return k[0];
-                std::vector<TNode*> pre(k.begin(), k.begin() + (long)i + 1);
-                return mkv(Op::Comma, Type::bot(), pre);
+                return mkv(Op::Comma, Type::bot(), k, i + 1);
             }
         }
         return nullptr;
     }
-    // Replace every non-constant kid by a temporary assigned in order; returns
-    // the prefix of SetLocal nodes.
-    std::vector<TNode*> spill(std::vector<TNode*>& k) {
-        std::vector<TNode*> pre;
-        for (auto& x : k) {
+    // Replace every non-constant kid by a temporary assigned in order; pushes
+    // the prefix of SetLocal nodes onto stk.
+    void spill(TNode** k, size_t nk) {
+        for (size_t i = 0; i < nk; ++i) {
+            TNode*& x = k[i];
             if (x->op == Op::ConstInt || x->op == Op::ConstFn) continue;
             uint32_t t = M.new_temp(F, x->type);
-            pre.push_back(set_local(t, x));
+            stk.push_back(set_local(t, x));
             x = local(t);
         }
-        return pre;
     }
-    TNode* with_prefix(std::vector<TNode*> pre, TNode* n) {
-        if (pre.empty()) return n;
-        pre.push_back(n);
-        return mkv(Op::Comma, n->type, pre);
+    // Comma(stk[base..], n), or n itself when nothing was pushed.
+    TNode* with_prefix(size_t base, TNode* n) {
+        if (stk.size() == base) return n;
+        stk.push_back(n);
+        return mkv_top(Op::Comma, n->type, base);
     }
     static bool is_list(Type t) { return t.k == TK::List; }
     static bool is_nonint_static(Type t) { return t.k == TK::List || t.k == TK::Fn; }
@@ -205,12 +215,12 @@ struct Builder {
         }
         case NK::Assign: return assign(n, discard);
         case NK::Append: {
-            std::vector<TNode*> k = {expr(n->kids[0]), expr(n->kids[1])};
-            if (TNode* b = bot_short(k)) return b;
+            TNode* k[2] = {expr(n->kids[0]), expr(n->kids[1])};
+            if (TNode* b = bot_short(k, 2)) return b;
             Type l = k[0]->type;
             if (l.k == TK::List) return mk(Op::Append, l, {k[0], coerce(k[1], elem(l))});
             if (l.k == TK::Any) return mk(Op::DynAppend, l, {k[0], coerce(k[1], Type::any())});
-            return fail(Err::OperandList, k);
+            return fail(Err::OperandList, k, 2);
         }
         case NK::Add: case NK::Sub: case NK::Mul: case NK::Div: return arith(n);
         case NK::Eq: case NK::Ne: return equality(n);
@@ -254,10 +264,10 @@ struct Builder {
             return mk(n->kind == NK::And ? Op::And : Op::Or, T, {coerce(a, T), coerce(b, T)});
         }
         case NK::Index: {
-            std::vector<TNode*> k = {expr(n->kids[0]), expr(n->kids[1])};
-            if (TNode* b = bot_short(k)) return b;
+            TNode* k[2] = {expr(n->kids[0]), expr(n->kids[1])};
+            if (TNode* b = bot_short(k, 2)) return b;
             Type l = k[0]->type, i = k[1]->type;
-            if (is_nonint_static(i) || l.k == TK::Int || l.k == TK::Fn) return fail(Err::InvalidOp, k);
+            if (is_nonint_static(i) || l.k == TK::Int || l.k == TK::Fn) return fail(Err::InvalidOp, k, 2);
             if (l.k == TK::List) {
                 TNode* idx = i.k == TK::Int ? k[1] : unbox(k[1], Err::InvalidOp);
                 return mk(Op::Index, elem(l), {k[0], idx});
@@ -268,12 +278,17 @@ struct Builder {
             uint32_t e = R.aux_of(inst, n);
             Type t = Type::list(region(e));
             Type el = elem(t);
-            std::vector<TNode*> k;
-            for (uint32_t i = 0; i < n->nkids; ++i) k.push_back(expr(n->kids[i]));
-            if (TNode* b = bot_short(k)) return b;
-            for (auto& x : k) x = coerce(x, el);
-            TNode* r = mkv(Op::ListLit, t, k);
-            return r;
+            size_t base = stk.size();
+            for (uint32_t i = 0; i < n->nkids; ++i) {
+                TNode* x = expr(n->kids[i]);
+                stk.push_back(x);
+            }
+            if (TNode* b = bot_short(stk.data() + base, n->nkids)) {
+                stk.resize(base);
+                return b;
+            }
+            for (size_t i = base; i < stk.size(); ++i) stk[i] = coerce(stk[i], el);
+            return mkv_top(Op::ListLit, t, base);
         }
         case NK::Call: return call(n);
         default:
@@ -299,14 +314,14 @@ struct Builder {
             return mk(Op::Comma, vt, {set_local(t, v), write_var(tg, local(t)), local(t)});
         }
         // l[i] := v
-        std::vector<TNode*> k = {expr(tg->kids[0]), expr(tg->kids[1]), expr(n->kids[1])};
-        if (TNode* b = bot_short(k)) return b;
+        TNode* k[3] = {expr(tg->kids[0]), expr(tg->kids[1]), expr(n->kids[1])};
+        if (TNode* b = bot_short(k, 3)) return b;
         Type l = k[0]->type, i = k[1]->type, vt = k[2]->type;
-        if (is_nonint_static(i) || l.k == TK::Int || l.k == TK::Fn) return fail(Err::InvalidOp, k);
+        if (is_nonint_static(i) || l.k == TK::Int || l.k == TK::Fn) return fail(Err::InvalidOp, k, 3);
         Type et = l.k == TK::List ? elem(l) : Type::any();
-        std::vector<TNode*> pre;
+        size_t base = stk.size();
         bool keep_v = !discard && vt != et;
-        if (keep_v || (l.k == TK::List && i.k == TK::Any && !is_pure(k[2]))) pre = spill(k);
+        if (keep_v || (l.k == TK::List && i.k == TK::Any && !is_pure(k[2]))) spill(k, 3);
         TNode* st;
         if (l.k == TK::List) {
             TNode* idx = i.k == TK::Int ? k[1] : unbox(k[1], Err::InvalidOp);
@@ -315,29 +330,29 @@ struct Builder {
             st = mk(Op::DynSetIndex, Type::any(), {k[0], k[1], coerce(k[2], Type::any())});
         }
         if (keep_v) {
-            pre.push_back(st);
-            pre.push_back(k[2]);  // the temp holding v
-            return mkv(Op::Comma, vt, pre);
+            stk.push_back(st);
+            stk.push_back(k[2]);  // the temp holding v
+            return mkv_top(Op::Comma, vt, base);
         }
-        return with_prefix(pre, st);
+        return with_prefix(base, st);
     }
 
     TNode* arith(const epq::Node* n) {
-        std::vector<TNode*> k = {expr(n->kids[0]), expr(n->kids[1])};
-        if (TNode* b = bot_short(k)) return b;
+        TNode* k[2] = {expr(n->kids[0]), expr(n->kids[1])};
+        if (TNode* b = bot_short(k, 2)) return b;
         Op op = n->kind == NK::Add ? Op::AddI32 : n->kind == NK::Sub ? Op::SubI32 : n->kind == NK::Mul ? Op::MulI32 : Op::DivI32;
         Type a = k[0]->type, b = k[1]->type;
         if (a.k == TK::Int && b.k == TK::Int) return mk(op, Type::i32(), {k[0], k[1]});
-        if (op != Op::DivI32 && (is_nonint_static(a) || is_nonint_static(b))) return fail(Err::OperandsInt, k);
-        if (op == Op::DivI32 && is_nonint_static(b)) return fail(Err::OperandsInt, k);
+        if (op != Op::DivI32 && (is_nonint_static(a) || is_nonint_static(b))) return fail(Err::OperandsInt, k, 2);
+        if (op == Op::DivI32 && is_nonint_static(b)) return fail(Err::OperandsInt, k, 2);
         TNode* d = mk(Op::DynArith, Type::i32(), {k[0], k[1]});
         d->a = (int32_t)op;
         return d;
     }
 
     TNode* equality(const epq::Node* n) {
-        std::vector<TNode*> k = {expr(n->kids[0]), expr(n->kids[1])};
-        if (TNode* b = bot_short(k)) return b;
+        TNode* k[2] = {expr(n->kids[0]), expr(n->kids[1])};
+        if (TNode* b = bot_short(k, 2)) return b;
         bool ne = n->kind == NK::Ne;
         Type a = k[0]->type, b = k[1]->type;
         if (a.k == TK::Int && b.k == TK::Int) return mk(ne ? Op::NeI32 : Op::EqI32, Type::i32(), {k[0], k[1]});
@@ -352,13 +367,13 @@ struct Builder {
     }
 
     TNode* compare(const epq::Node* n) {
-        std::vector<TNode*> k = {expr(n->kids[0]), expr(n->kids[1])};
-        if (TNode* b = bot_short(k)) return b;
+        TNode* k[2] = {expr(n->kids[0]), expr(n->kids[1])};
+        if (TNode* b = bot_short(k, 2)) return b;
         Op op = n->kind == NK::Lt ? Op::LtI32 : n->kind == NK::Gt ? Op::GtI32 : n->kind == NK::Le ? Op::LeI32 : Op::GeI32;
         Type a = k[0]->type, b = k[1]->type;
         if (a.k == TK::Int && b.k == TK::Int) return mk(op, Type::i32(), {k[0], k[1]});
         if (a.k == TK::Fn || b.k == TK::Fn || (a.k == TK::Int && b.k == TK::List) || (a.k == TK::List && b.k == TK::Int))
-            return fail(Err::InvalidCmp, k);
+            return fail(Err::InvalidCmp, k, 2);
         TNode* r = mk(Op::Cmp, Type::i32(), {k[0], k[1]});
         r->a = (int32_t)M.desc_of(a);
         r->b = (int32_t)M.desc_of(b);
@@ -368,29 +383,41 @@ struct Builder {
 
     TNode* call(const epq::Node* n) {
         const epq::Node* args = n->kids[1];
-        std::vector<TNode*> k;
-        for (uint32_t i = 0; i < args->nkids; ++i) k.push_back(expr(args->kids[i]));
-        k.push_back(expr(n->kids[0]));
-        if (TNode* b = bot_short(k)) return b;
-        Type f = k.back()->type;
+        size_t base = stk.size();
+        for (uint32_t i = 0; i < args->nkids; ++i) {
+            TNode* a = expr(args->kids[i]);
+            stk.push_back(a);
+        }
+        TNode* callee_e = expr(n->kids[0]);
+        stk.push_back(callee_e);
+        // No pushes below: k stays valid.
+        TNode** k = stk.data() + base;
+        size_t nk = stk.size() - base;
+        TNode* r;
+        Type f = callee_e->type;
         uint32_t na = args->nkids;
-        if (f.k == TK::Fn) {
+        if ((r = bot_short(k, nk))) {
+        } else if (f.k == TK::Fn) {
             const Function& fn = P.funcs[f.a];
-            if (fn.params.size() != na) return fail(Err::Arity, k);
-            uint32_t ci = R.aux_of(inst, n);
-            if (ci == infer::kNone || R.insts[ci]->def != f.a) internal("call without instance", n->line);
-            uint32_t fid = func_for(ci);
-            Func* callee = M.funcs[fid].get();
-            for (uint32_t i = 0; i < na; ++i) k[i] = coerce(k[i], callee->locals[callee->params[i]].type);
-            TNode* c = mkv(Op::CallDirect, callee->ret, k);
-            c->a = (int32_t)fid;
-            return c;
-        }
-        if (f.k == TK::Any) {
+            if (fn.params.size() != na) {
+                r = fail(Err::Arity, k, nk);
+            } else {
+                uint32_t ci = R.aux_of(inst, n);
+                if (ci == infer::kNone || R.insts[ci]->def != f.a) internal("call without instance", n->line);
+                uint32_t fid = func_for(ci);
+                Func* callee = M.funcs[fid].get();
+                for (uint32_t i = 0; i < na; ++i) k[i] = coerce(k[i], callee->locals[callee->params[i]].type);
+                r = mkv(Op::CallDirect, callee->ret, k, nk);
+                r->a = (int32_t)fid;
+            }
+        } else if (f.k == TK::Any) {
             for (uint32_t i = 0; i < na; ++i) k[i] = coerce(k[i], Type::any());
-            return mkv(Op::CallDyn, Type::any(), k);
+            r = mkv(Op::CallDyn, Type::any(), k, nk);
+        } else {
+            r = fail(Err::OperandFn, k, nk);
         }
-        return fail(Err::OperandFn, k);
+        stk.resize(base);
+        return r;
     }
 
     // ---- conditions & statements ---------------------------------------------------
@@ -412,7 +439,8 @@ struct Builder {
         return expr(n);
     }
 
-    TNode* seq(std::vector<TNode*> k) { return mkv(Op::Seq, Type::bot(), k); }
+    TNode* seq(std::initializer_list<TNode*> k) { return mkv(Op::Seq, Type::bot(), k.begin(), k.size()); }
+    TNode* seq_top(size_t base) { return mkv_top(Op::Seq, Type::bot(), base); }
 
     TNode* stmt(const epq::Node* n) {
         uint32_t saved = line;
@@ -425,9 +453,12 @@ struct Builder {
     TNode* stmt_(const epq::Node* n) {
         switch (n->kind) {
         case NK::Seq: {
-            std::vector<TNode*> k;
-            for (uint32_t i = 0; i < n->nkids; ++i) k.push_back(stmt(n->kids[i]));
-            return seq(k);
+            size_t base = stk.size();
+            for (uint32_t i = 0; i < n->nkids; ++i) {
+                TNode* s = stmt(n->kids[i]);
+                stk.push_back(s);
+            }
+            return seq_top(base);
         }
         case NK::ExprStmt: return expr(n->kids[0], true);
         case NK::Print: {
@@ -464,15 +495,15 @@ struct Builder {
         const ForEachInfo& fe = P.foreach[(size_t)n->aux];
         const epq::Node* x = n->kids[0];
         uint32_t idx = fe.index_slot, L = fe.list_slot;
-        std::vector<TNode*> pre;
-        pre.push_back(set_local(idx, cint(0)));
+        size_t base = stk.size();
+        stk.push_back(set_local(idx, cint(0)));
         TNode* lv = expr(n->kids[1]);
         if (lv->type.k == TK::Bot) {
-            pre.push_back(lv);
-            return seq(pre);
+            stk.push_back(lv);
+            return seq_top(base);
         }
-        pre.push_back(set_local(L, lv));
-        if (fe.var_preexisted) pre.push_back(write_var(x, cint(0)));
+        stk.push_back(set_local(L, lv));
+        if (fe.var_preexisted) stk.push_back(write_var(x, cint(0)));
         Type lt = F->locals[L].type;
         TNode* c;
         TNode* get;
@@ -500,8 +531,8 @@ struct Builder {
         w->flags |= F_FOREACH;
         w->a = (int32_t)idx;
         w->b = (int32_t)L;
-        pre.push_back(w);
-        return seq(pre);
+        stk.push_back(w);
+        return seq_top(base);
     }
 
     void build_func(uint32_t fid) {
@@ -512,9 +543,11 @@ struct Builder {
         TNode* body = stmt(fn.body);
         if (body->op != Op::Seq) body = seq({body});
         if (!F->is_main && infer::completes(fn.body)) {
-            std::vector<TNode*> k(body->kids, body->kids + body->nkids);
-            k.push_back(mk(Op::Return, Type::bot(), {coerce(cint(0), F->ret)}));
-            body = seq(k);
+            size_t base = stk.size();
+            stk.insert(stk.end(), body->kids, body->kids + body->nkids);
+            TNode* r = mk(Op::Return, Type::bot(), {coerce(cint(0), F->ret)});
+            stk.push_back(r);
+            body = seq_top(base);
         }
         F->body = body;
     }
@@ -529,6 +562,8 @@ struct Builder {
 
     void run() {
         M.prog = &P;
+        stk.reserve(256);
+        M.funcs.reserve(R.insts.size());
         region_of_root.assign(R.evars.size(), -1);
         func_of_inst.assign(R.insts.size(), -1);
         M.defs.resize(P.funcs.size());
