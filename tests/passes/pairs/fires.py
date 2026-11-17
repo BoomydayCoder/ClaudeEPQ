@@ -26,6 +26,9 @@ EXPECT = {
     'tests/passes/pairs/progs/mut_outer_elem.epq': None,  # other, immutable literals are pairs
     'tests/passes/pairs/progs/neg_pop_disq.epq': None,  # other, immutable literals are pairs
     'tests/passes/pairs/progs/three_and_two.epq': None,  # informational
+    'tests/passes/pairs/progs/cond_side_effect.epq': True,
+    'tests/passes/pairs/progs/pop_outer_then_mut.epq': False,
+    'tests/passes/pairs/progs/global_alias_mut.epq': False,
 }
 
 
