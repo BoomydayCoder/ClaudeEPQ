@@ -932,6 +932,8 @@ public:
             if (k->a == 0) return false;
             return !imm12ish(k->a);
         case Op::CheckIndex: return !imm12ish(k->a);
+        case Op::Append: return i == 1 && k->a != 0;  // stored value: str needs a register
+        case Op::ElemStore: case Op::SetIndex: return i == 2 && k->a != 0;
         default: return false;
         }
     }
