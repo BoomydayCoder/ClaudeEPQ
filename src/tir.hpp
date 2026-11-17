@@ -213,7 +213,9 @@ struct Global {
     Type type;
     Sym name = kNoSym;
     bool demoted = false;  // replaced by a local of main (no storage)
-    bool ever_checked = false;  // some GetGlobal of it has F_CHECKED
+    bool ever_checked = false;  // some GetGlobal of it had F_CHECKED when built
+    bool constant = false;      // constants pass: always holds `value` once assigned
+    int32_t value = 0;
 };
 
 struct AllocSiteInfo {
@@ -272,6 +274,10 @@ struct Pass {
     const char* what;
     void (*run)(Module&);
 };
+// Global-variable passes (src/globals.cpp), DESIGN.md §2.6.
+void pass_definite_assignment(Module& m);
+void pass_constants(Module& m);
+void pass_demote_globals(Module& m);
 // Runs the registered passes in order, skipping those named in `disabled`.
 void run_passes(Module& m, const std::vector<std::string>& disabled, bool verbose);
 const std::vector<Pass>& passes();

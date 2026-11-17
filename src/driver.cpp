@@ -178,6 +178,7 @@ void on_fault(int sig, siginfo_t* si, void*) {
 struct RunJob {
     int (*entry)(void);
     int rc;
+    uint64_t us;  // execution time of entry() alone
 };
 
 void* run_thread(void* p) {
@@ -188,11 +189,13 @@ void* run_thread(void* p) {
     ss.ss_size = sizeof altstack;
     ss.ss_flags = 0;
     sigaltstack(&ss, nullptr);
+    uint64_t t0 = now_us();
     j->rc = j->entry();
+    j->us = now_us() - t0;
     return nullptr;
 }
 
-int run_on_big_stack(int (*entry)(void)) {
+int run_on_big_stack(int (*entry)(void), uint64_t* us) {
     struct sigaction sa;
     std::memset(&sa, 0, sizeof sa);
     sa.sa_sigaction = on_fault;
@@ -200,15 +203,19 @@ int run_on_big_stack(int (*entry)(void)) {
     sigaction(SIGSEGV, &sa, nullptr);
     sigaction(SIGBUS, &sa, nullptr);
 
-    RunJob job{entry, 1};
+    RunJob job{entry, 1, 0};
     void* mem = MAP_FAILED;
     size_t size = 0;
-    for (size_t gb : {64, 16, 4, 1}) {
+    for (size_t gb : {8, 4, 1}) {  // mmap cost grows with size: 8 GB ~30 us, 64 GB ~200-700 us
         size = gb << 30;
         mem = mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON | MAP_NORESERVE, -1, 0);
         if (mem != MAP_FAILED) break;
     }
-    if (mem == MAP_FAILED) return entry();
+    if (mem == MAP_FAILED) {
+        run_thread(&job);
+        *us = job.us;
+        return job.rc;
+    }
     mprotect(mem, kGuard, PROT_NONE);
     g_stack_lo = (char*)mem;
     g_stack_size = size;
@@ -216,8 +223,9 @@ int run_on_big_stack(int (*entry)(void)) {
     pthread_attr_init(&attr);
     pthread_attr_setstack(&attr, mem, size);
     pthread_t th;
-    if (pthread_create(&th, &attr, run_thread, &job) != 0) return entry();
-    pthread_join(th, nullptr);
+    if (pthread_create(&th, &attr, run_thread, &job) != 0) run_thread(&job);
+    else pthread_join(th, nullptr);
+    *us = job.us;
     return job.rc;
 }
 
@@ -230,6 +238,7 @@ bool disabled(const Options& o, const char* name) {
 }  // namespace
 
 int run_backend(const Program& prog, const Options& opts) {
+    uint64_t T0 = now_us();
     infer::Config cfg;
     cfg.poly = !opts.mono;
     cfg.dedup = !opts.no_dedup;
@@ -254,7 +263,9 @@ int run_backend(const Program& prog, const Options& opts) {
         write_all(1, s);
         return 0;
     }
+    uint64_t T1 = now_us();
     std::string c = emit_c(M);
+    uint64_t T2 = now_us();
     if (opts.emit_c) {
         write_all(1, c);
         return 0;
@@ -274,11 +285,15 @@ int run_backend(const Program& prog, const Options& opts) {
         return 2;
     }
     uint64_t t0 = now_us();
-    int rc = run_on_big_stack(entry);
-    uint64_t t1 = now_us();
+    if (opts.verbose)
+        std::fprintf(stderr, "epq: infer+tir %llu us, emit-c %llu us, cache+dlopen %llu us\n", (unsigned long long)(T1 - T0),
+                     (unsigned long long)(T2 - T1), (unsigned long long)(t0 - T2));
+    uint64_t exec_us = 0;
+    int rc = run_on_big_stack(entry, &exec_us);
+    if (opts.verbose) std::fprintf(stderr, "epq: run (incl. stack setup) %llu us\n", (unsigned long long)(now_us() - t0));
     if (opts.time) {
         char buf[80];
-        int n = std::snprintf(buf, sizeof buf, "Execution time: %llu microseconds\n", (unsigned long long)(t1 - t0));
+        int n = std::snprintf(buf, sizeof buf, "Execution time: %llu microseconds\n", (unsigned long long)exec_us);
         (void)!::write(2, buf, (size_t)n);
     }
     return rc;

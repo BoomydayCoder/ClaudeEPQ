@@ -244,6 +244,9 @@ void pass_fold(Module& m) {
 }
 
 const std::vector<Pass> kPasses = {
+    {"definite-assignment", "drop Undefined-global checks proven unnecessary (§2.6)", pass_definite_assignment},
+    {"constants", "single-literal globals become constants (§2.6)", pass_constants},
+    {"demote-globals", "globals used only by main become locals of main (§2.6)", pass_demote_globals},
     {"fold", "constant folding of integer arithmetic", pass_fold},
 };
 }  // namespace
