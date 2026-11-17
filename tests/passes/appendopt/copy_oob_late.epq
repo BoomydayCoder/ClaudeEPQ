@@ -1,0 +1,8 @@
+// range runs past the end: the original loop must run and fail at m[3]
+f := (l, m) => {
+  (i := 1; i < 6; i := i + 1;) @ { l :+ m[i]; }
+  => l;
+};
+a := [0];
+>> |a|;
+>> f(a, [10, 20, 30]);

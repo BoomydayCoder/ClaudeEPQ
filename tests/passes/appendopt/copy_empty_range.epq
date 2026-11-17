@@ -1,0 +1,13 @@
+// empty / inverted ranges: no appends, loop variable unchanged
+m := [1, 2, 3];
+l := [];
+i := 7;
+(i < 2) @ { l :+ m[i]; i := i + 1; }
+>> i;
+>> l;
+(i := -5; i < -5; i := i + 1;) @ { l :+ m[i]; }
+>> l;
+i := 3;
+(i < 3) @ { l :+ m[i]; i := i + 1; }
+>> i;
+>> l;

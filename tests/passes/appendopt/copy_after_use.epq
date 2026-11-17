@@ -1,0 +1,12 @@
+// loop variable used after the loop and in a later copy; source modified afterwards
+src := [];
+(i := 0; i < 20; i := i + 1;) @ { src :+ i * i; }
+dst := [];
+p := 5;
+(p < 12) @ { dst :+ src[p]; p := p + 1; }
+>> p;
+(p < |src|) @ { dst :+ src[p]; p := p + 1; }
+>> p;
+src[0] := 1000;
+>> dst;
+>> |dst|;

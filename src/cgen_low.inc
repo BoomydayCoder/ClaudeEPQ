@@ -110,6 +110,19 @@ bool low_E(const Node* n, std::string& r) {
         r = se(k.pre, "((int32_t)((void*)" + k.v[0] + " == (void*)" + k.v[1] + "))");
         return true;
     }
+    // ---- appendopt ----
+    case Op::Reserve: {
+        Kids k = kids(n, 0, 2);
+        r = se(k.pre, "(epq_list_reserve(" + k.v[0] + ", " + k.v[1] + ", " + elem_size(n->kids[0]->type.a) + "), 0)");
+        return true;
+    }
+    case Op::AppendRange: {
+        Kids k = kids(n, 0, 4);
+        r = se(k.pre, "epq_append_range(" + k.v[0] + ", " + k.v[1] + ", " + k.v[2] + ", " + k.v[3] + ", " +
+                          elem_size(n->kids[0]->type.a) + ")");
+        return true;
+    }
+    // ---- end appendopt ----
     default:
         return false;
     }
@@ -139,6 +152,10 @@ bool low_S(const Node* n, int d) {
     case Op::Free:
         ind(d);
         out += "epq_list_free(" + E(n->kids[0]) + ", " + elem_size(n->kids[0]->type.a) + ");\n";
+        return true;
+    case Op::Reserve:  // appendopt
+        ind(d);
+        out += "(void)" + E(n) + ";\n";
         return true;
     default:
         return false;
