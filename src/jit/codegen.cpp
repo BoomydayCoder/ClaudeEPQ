@@ -1254,6 +1254,23 @@ public:
         case Op::ElemLoad: return elem_load(n, want);
         case Op::ElemStore: return elem_store(n);
         case Op::CheckIndex: return check_index(n);
+        case Op::DynIsEmptyList: {
+            // (x & 3) == 0 && ((EList*)x)->len == 0  (epq_is_empty_list)
+            V v = expr(n->kids[0]);
+            if (v.k == V::IMM) return V::im(0);  // a constant word is an int / fn, never a list
+            Reg x = R(v, true);
+            Label no = A->new_label();
+            A->movz(W(16), 1);
+            A->tst(x, (uint64_t)3);
+            A->b(NE, no);
+            A->ldr(W(16), mem(x, 8));
+            A->bind(no);
+            release(v);
+            int d = dest(want);
+            A->cmp(W(16), 0u);
+            A->cset(W(d), EQ);
+            return result(d, want);
+        }
         }
         bug("unknown op");
     }
@@ -2434,6 +2451,29 @@ public:
             }
             break;
         case Op::NotI32: branch(n->kids[0], !sense, target); return;
+        case Op::DynIsEmptyList: {
+            V v = expr(n->kids[0]);
+            if (v.k == V::IMM) {  // a constant word is an int / fn, never a list
+                if (!sense) A->b(target);
+                return;
+            }
+            Reg x = R(v, true);
+            release(v);
+            if (sense) {
+                Label no = A->new_label();
+                A->tst(x, (uint64_t)3);
+                A->b(NE, no);
+                A->ldr(W(16), mem(x, 8));
+                A->cbz(W(16), target);
+                A->bind(no);
+            } else {
+                A->tst(x, (uint64_t)3);
+                A->b(NE, target);
+                A->ldr(W(16), mem(x, 8));
+                A->cbnz(W(16), target);
+            }
+            return;
+        }
         case Op::EqI32:
         case Op::NeI32:
         case Op::LtI32:
@@ -3173,6 +3213,7 @@ bool op_supported(Op o) {
     case Op::PairEq: case Op::PairNe: case Op::PairLt: case Op::PairLe: case Op::PairGt: case Op::PairGe:
     case Op::ListData: case Op::ElemLoad: case Op::ElemStore: case Op::CheckIndex:
     case Op::Free: case Op::SameList: case Op::Nop:
+    case Op::DynIsEmptyList:  // litcmp
         return true;
     default: return false;
     }
