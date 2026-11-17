@@ -1,0 +1,15 @@
+// conditions with side effects / calls; bodies depending on earlier statements
+k := 0;
+bump := () => { k := k + 1; => k; };
+a := 0; b := 0;
+(i := 0; i < 6; i := i + 1;) @ {
+  (bump() > 3) ? a := a + 1;
+  ((x := i * 2) > 4) ? { b := b + x; x := b + 1; a := x + a; }
+  >> [a, b, k];
+}
+l := [3, 1, 2];
+(j := 0; j < 3; j := j + 1;) @ {
+  ((l :+ j)[j] > 1) ? a := a + l[j];
+}
+>> a;
+>> l;

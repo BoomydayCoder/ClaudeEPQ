@@ -1,0 +1,10 @@
+xs := [5, -3, 12, 7, -8, 12, 0, 4, -8];
+mn := xs[0]; mx := xs[0]; mi := 0; cnt := 0;
+(i := 0; i < |xs|; i := i + 1;) @ {
+  v := xs[i];
+  (v < mn) ? { mn := v; mi := i; }
+  (v > mx) ? mx := v;
+  (xs[i] = 12) ? cnt := cnt + 1;
+  (xs[i] < mx) ? mx := mx + xs[i] - xs[i];
+}
+>> [mn, mx, mi, cnt];

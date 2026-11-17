@@ -1,0 +1,9 @@
+// nested And conditions, the inner part evaluated only when the outer holds
+l := [4, 0, 6, 0, 8];
+c := 0;
+(i := 0; i < 7; i := i + 1;) @ {
+  (i < |l| & l[i] != 0 & 24 / l[i] > 3) ? c := c + 24 / l[i] - 24 / l[i] + 1;
+  (i < |l| & l[i] > 5) ? c := c + l[i];
+  (i < 2 | l[0] > 100) ? c := c + 1000;
+}
+>> c;

@@ -1,0 +1,8 @@
+// facts from a loop condition; index valid only inside
+l := [4, 3, 2, 1, 0];
+i := 0;
+(i < |l| & l[i] > 0) @ {
+  (l[i] > 2) ? l[i] := l[i] - 2;
+  i := i + 1;
+}
+>> l; >> i;
