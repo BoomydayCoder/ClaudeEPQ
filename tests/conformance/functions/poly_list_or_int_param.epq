@@ -1,0 +1,9 @@
+describe := (x, isList) => {
+    (isList) ? => [|x|, x];
+    => x * 2;
+};
+>> describe(21, 0);
+>> describe([], 1);
+>> describe([1, 2, 3], 1);
+>> describe(-4, 0);
+>> describe([[1], [2, 3]], 1);

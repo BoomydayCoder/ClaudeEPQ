@@ -1,0 +1,12 @@
+moves := [];
+hanoi := (n, a, b, c) => {
+    (n = 0) ? => 0;
+    hanoi(n - 1, a, c, b);
+    moves :+ [a, c];
+    hanoi(n - 1, b, a, c);
+};
+hanoi(3, 1, 2, 3);
+>> moves;
+moves := [];
+hanoi(10, 1, 2, 3);
+>> |moves|;

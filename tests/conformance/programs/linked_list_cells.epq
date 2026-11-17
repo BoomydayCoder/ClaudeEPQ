@@ -1,0 +1,9 @@
+// cons cells as 2-element lists, nil = []
+cons := (h, t) => { => [h, t]; };
+fromList := (l) => { r := []; (i := |l| - 1; i >= 0; i := i - 1;) @ r := cons(l[i], r); => r; };
+toList := (c) => { out := []; (c != []) @ { out :+ c[0]; c := c[1]; } => out; };
+rev := (c) => { r := []; (c != []) @ { r := cons(c[0], r); c := c[1]; } => r; };
+cl := fromList([1, 2, 3, 4]);
+>> cl;
+>> toList(rev(cl));
+>> toList(fromList([[1], [], [2, [3]]]));

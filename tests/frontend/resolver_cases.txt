@@ -1,0 +1,220 @@
+## Resolver / compile-time error cases (compared with the baseline: same
+## stderr incl. the first error line, same exit code). '%%' separates cases.
+%% undefined at top level
+>> q;
+%% undefined in function body
+f := () => { >> q; };
+%% undefined in never-called nested function
+f := () => { g := () => { >> q; }; };
+%% read before definition inside block
+{ >> y; y := 1; }
+%% top-level read before global assignment is fine
+>> x; x := 1;
+%% local dies at block end
+{ y := 1; } >> y;
+%% local dies at block end inside block
+{ { y := 1; } >> y; }
+%% list literal is a scope
+{ [y := 1]; >> y; }
+%% list literal name visible inside
+{ x := [y := 1, y + 1]; }
+%% top-level list literal assignment is global
+[y := 1]; >> y;
+%% if then branch scope
+{ (1) ? y := 1; >> y; }
+%% if else branch scope
+{ (1) ? ; : y := 1; >> y; }
+%% if condition scope
+{ (y := 1) ? >> y; >> y; }
+%% if condition visible in branches
+{ (y := 1) ? >> y; : >> y; }
+%% while condition scope
+{ (y := 0) @ ; >> y; }
+%% while body scope
+{ (0) @ y := 1; >> y; }
+%% for init scope
+{ (i := 0; i < 1; i := i + 1;) @ ; >> i; }
+%% for init visible in cond step body
+{ (i := 0; i < 1; i := i + 1;) @ >> i; }
+%% for body compiled before step
+{ (i := 0; i < 1; >> s;) @ >> b; }
+%% for step cannot see body local
+{ (i := 0; i < 1; >> k;) @ { k := 1; } }
+%% for step defines local seen nowhere else
+{ (i := 0; i < 1; j := 1;) @ ; >> j; }
+%% for cond before body
+{ (i := 0; c; i := i + 1;) @ >> b; }
+%% foreach var dies
+{ (x : [1]) @ ; >> x; }
+%% top-level foreach var is local
+(x : [1]) @ ; >> x;
+%% top-level foreach var global through body assignment
+(x : [1]) @ x := 2; f := () => { >> x; };
+%% foreach list compiled before var
+{ (x : x) @ ; }
+%% foreach preexisting local
+{ x := 7; (x : [1]) @ ; >> x; }
+%% foreach preexisting global
+x := 7; (x : [1]) @ ; >> x;
+%% foreach body undefined
+(x : [1]) @ >> q;
+%% two foreach loops
+{ (x : [1]) @ (y : [x]) @ >> y; (z : [2]) @ >> z; }
+%% call arguments before callee
+f(a);
+%% call arguments left to right
+g(a, b);
+%% call argument definition visible after
+{ f := (q) => {}; f(c := 1); >> c; }
+%% index assignment order
+{ l[i] := v; }
+%% index assignment order 2
+{ l := [1]; l[i] := v; }
+%% index assignment order 3
+{ l := [1]; i := 0; l[i] := v; }
+%% assignment rhs before target
+{ x := x; }
+%% assignment defines then usable
+{ x := 1; >> x; }
+%% nested assignment defines
+{ a := 1 + (b := 2); >> b; }
+%% and rhs defines
+{ 0 & (d := 1); >> d; }
+%% or rhs defines
+{ 1 | (d := 1); >> d; }
+%% binary operand order
+{ >> a + b; }
+%% binary operand order 2
+{ a := 1; >> a + b; }
+%% unary operand
+{ >> -q; }
+%% abs operand
+{ >> |q|; }
+%% not operand
+{ >> !q; }
+%% append operands
+{ l :+ v; }
+%% index operands
+{ >> l[i]; }
+%% functions cannot see enclosing locals
+{ y := 1; f := () => { >> y; }; }
+%% functions cannot see top-level locals
+(z : [1]) @ { f := () => { >> z; }; }
+%% functions see globals
+g := 1; f := () => { >> g; };
+%% functions see later globals
+f := () => { >> g; }; g := 1;
+%% if branch assignment is not global
+(1) ? g := 1; f := () => { >> g; };
+%% if condition assignment is global
+(g := 1) ? ; f := () => { >> g; };
+%% while body assignment is global
+(0) @ g := 1; f := () => { >> g; };
+%% while condition assignment is global
+(g := 0) @ ; f := () => { >> g; };
+%% block assignment is not global
+{ g := 1; } f := () => { >> g; };
+%% for assignment is not global
+(i := 0; i < 3; i := i + 1;) @ ; f := () => { => i; };
+%% call argument assignment is global
+h := (q) => {}; h(g := 1); f := () => { >> g; };
+%% funclit body assignment is not global
+f := () => { g := 1; }; k := () => { >> g; };
+%% invalid argument list number
+f := (1) => {};
+%% invalid argument list expression
+f := (a, b + 1) => {};
+%% invalid argument list paren paren id ok
+f := ((a)) => { => a; };
+%% invalid argument list assignment
+f := (a := 1) => {};
+%% argument shadows global
+a := 1; f := (a) => {};
+%% argument shadows later global
+f := (a) => {}; a := 1;
+%% argument shadows global in nested
+f := () => { g := (a) => {}; }; a := 1;
+%% duplicate argument
+f := (a, a) => {};
+%% duplicate argument later
+f := (a, b, c, b) => {};
+%% shadow checked before invalid
+a := 1; f := (a, 1) => {};
+%% invalid checked before shadow
+a := 1; f := (1, a) => {};
+%% duplicate before invalid
+f := (b, b, 1) => {};
+%% params visible in body
+f := (a, b) => { => a + b; };
+%% param assigned in body
+f := (a) => { a := 2; => a; };
+%% function local same name as enclosing local
+{ y := 1; f := () => { y := 2; >> y; }; >> y; }
+%% inner function cannot see outer param
+f := (a) => { g := () => { => a; }; };
+%% outer locals restored after inner function
+f := (a) => { g := () => { b := 1; }; => a; };
+%% inner function locals do not leak
+f := (a) => { g := () => { b := 1; }; => b; };
+%% local function recursion is undefined
+{ g := (n) => { => g(n); }; }
+%% global function recursion
+g := (n) => { => g(n); };
+%% error order across statements
+>> p; >> q;
+%% error order function first
+f := () => { >> p; }; >> q;
+%% error order statement then function
+>> q; f := () => { >> p; };
+%% unreachable code still checked
+(0) ? >> q;
+%% after return still checked
+=> 1; >> q;
+%% error in function argument list beats body
+f := (1) => { >> q; };
+%% body error after valid params
+f := (a) => { >> q; };
+%% error inside list literal
+x := [1, q];
+%% error inside call in condition
+(f(q)) ? ;
+%% class literal
+c := #{};
+%% class literal with undefined inside
+c := #{ >> q; };
+%% member access
+x := 1; >> x.y;
+%% member access of undefined
+>> q.y;
+%% static member
+>> .a;
+%% static member assign
+.a := 1;
+%% member assign
+x := 1; x.y := 2;
+%% class after undefined
+>> q; #{};
+%% hidden variables distinct per loop
+(x : [1]) @ (x : [2]) @ >> x;
+%% deeply nested scopes
+{ a := 1; { b := a; { c := b; (c) ? { d := c; } : { e := a; } >> c; } >> b; } >> a; }
+%% deeply nested scopes error
+{ a := 1; { b := a; { c := b; } >> c; } }
+%% while body var not visible in next iteration cond
+{ (x) @ x := 1; }
+%% if cond defines and else uses
+{ (v := 0) ? ; : >> v; }
+%% for init defines function local
+f := () => { (i := 0; i < 2; i := i + 1;) @ >> i; >> i; };
+%% name used as global and local in different functions
+f := () => { t := 1; }; g := () => { >> t; };
+%% assignment to global inside function
+g := 0; f := () => { g := 5; };
+%% foreach var in function
+f := (l) => { (e : l) @ >> e; => e; };
+%% return of undefined
+f := () => { => q; };
+%% print of undefined in step
+{ (i := 0; i < 1; >> i + q;) @ ; }
+%% nested function def ids
+f := () => { g := () => { h := () => { >> q; }; }; };

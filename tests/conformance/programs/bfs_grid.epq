@@ -1,0 +1,18 @@
+grid := [[0, 0, 0, 1], [1, 1, 0, 1], [0, 0, 0, 0], [0, 1, 1, 0]];
+n := |grid|;
+dist := [];
+(i := 0; i < n; i := i + 1;) @ { row := []; (j := 0; j < n; j := j + 1;) @ row :+ -1; dist :+ row; }
+dist[0][0] := 0;
+queue := [[0, 0]]; head := 0;
+dirs := [[1, 0], [-1, 0], [0, 1], [0, -1]];
+(head < |queue|) @ {
+    cur := queue[head]; head := head + 1;
+    (d : dirs) @ {
+        r := cur[0] + d[0]; c := cur[1] + d[1];
+        (r >= 0 & r < n & c >= 0 & c < n) ? (grid[r][c] = 0 & dist[r][c] = -1) ? {
+            dist[r][c] := dist[cur[0]][cur[1]] + 1;
+            queue :+ [r, c];
+        }
+    }
+}
+>> dist;

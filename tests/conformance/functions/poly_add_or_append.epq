@@ -1,0 +1,5 @@
+combine := (a, b, isList) => { (isList) ? => a :+ b; => a + b; };
+>> combine(1, 2, 0);
+>> combine([1], 2, 1);
+>> combine([[1]], [2], 1);
+>> combine(combine([], 5, 1), combine(3, 4, 0), 1);

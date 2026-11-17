@@ -1,0 +1,3 @@
+isEven := (n) => { (n = 0) ? => 1; => isOdd(n - 1); };
+isOdd := (n) => { (n = 0) ? => 0; => isEven(n - 1); };
+>> [isEven(10), isOdd(10), isEven(7), isOdd(7)];

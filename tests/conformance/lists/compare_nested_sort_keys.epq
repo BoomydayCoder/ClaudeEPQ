@@ -1,0 +1,4 @@
+pairs := [[2, 1], [1, 5], [1, 2], [2, 0]];
+best := pairs[0];
+(p : pairs) @ (p < best) ? best := p;
+>> best;

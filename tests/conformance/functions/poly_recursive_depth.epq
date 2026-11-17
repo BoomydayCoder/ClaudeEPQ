@@ -1,0 +1,12 @@
+depth := (x) => {
+    best := 0;
+    (y : x) @ {
+        d := depth(y);
+        (d > best) ? best := d;
+    }
+    => best + 1;
+};
+>> depth([]);
+>> depth([[], []]);
+>> depth([[], [[[]]], [[]]]);
+>> depth([[[[]]]]);

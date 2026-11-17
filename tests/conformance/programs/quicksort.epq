@@ -1,0 +1,26 @@
+qsort := (l) => {
+    (|l| <= 1) ? => l;
+    pivot := l[0];
+    less := []; same := []; more := [];
+    (x : l) @ {
+        (x < pivot) ? less :+ x;
+        : (x = pivot) ? same :+ x;
+        : more :+ x;
+    }
+    out := qsort(less);
+    (x : same) @ out :+ x;
+    (x : qsort(more)) @ out :+ x;
+    => out;
+};
+>> qsort([5, 3, 8, 1, 9, 2, 7, 3, 3, 0, -4]);
+>> qsort([]);
+>> qsort([[2, 1], [1, 9], [1], [], [2]]);
+mod := (a, b) => { => a - b * (a / b); };
+seed := 7;
+rnd := () => { seed := mod(seed * 1103 + 12345, 65536); => seed; };
+big := [];
+(i := 0; i < 300; i := i + 1;) @ big :+ rnd();
+s := qsort(big);
+ok := 1;
+(i := 1; i < |s|; i := i + 1;) @ (s[i - 1] > s[i]) ? ok := 0;
+>> ok; >> |s|; >> s[0]; >> s[299];

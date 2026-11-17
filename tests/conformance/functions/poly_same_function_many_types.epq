@@ -1,0 +1,10 @@
+twice := (f, x) => { => f(f(x)); };
+inc := (x) => { => x + 1; };
+wrap := (x) => { => [x]; };
+pop := (x) => { => -x; };
+>> twice(inc, 5);
+>> twice(wrap, 5);
+>> twice(wrap, [5]);
+>> twice(pop, [1, 2, [3, 4]]);
+>> twice((g) => { => g; }, inc) = inc;
+>> twice(twice((g) => { => g; }, inc), 1);

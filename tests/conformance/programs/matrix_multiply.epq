@@ -1,0 +1,25 @@
+zeros := (r, c) => {
+    m := [];
+    (i := 0; i < r; i := i + 1;) @ { row := []; (j := 0; j < c; j := j + 1;) @ row :+ 0; m :+ row; }
+    => m;
+};
+matmul := (a, b) => {
+    n := |a|; k := |b|; p := |b[0]|;
+    c := zeros(n, p);
+    (i := 0; i < n; i := i + 1;) @
+        (j := 0; j < p; j := j + 1;) @ {
+            s := 0;
+            (t := 0; t < k; t := t + 1;) @ s := s + a[i][t] * b[t][j];
+            c[i][j] := s;
+        }
+    => c;
+};
+ma := [[1, 2, 3], [4, 5, 6]];
+mb := [[7, 8], [9, 10], [11, 12]];
+>> matmul(ma, mb);
+ident := [[1, 0], [0, 1]];
+>> matmul(matmul(ma, mb), ident) = matmul(ma, mb);
+fibm := [[1, 1], [1, 0]];
+acc := ident;
+(i := 0; i < 30; i := i + 1;) @ acc := matmul(acc, fibm);
+>> acc;

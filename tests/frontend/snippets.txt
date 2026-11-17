@@ -1,0 +1,627 @@
+## Hand-written front-end snippets. Cases are separated by lines starting with
+## "%%". Lines starting with "##" before the first case are comments.
+## The harness prefixes every case with "=> 0;" so the baseline never runs it
+## (a top-level return ends the program) while still parsing and compiling it.
+## Expected results are NOT stored: everything is compared with the baseline.
+%% empty program
+
+%% only comments
+// hello
+// world
+%% empty statements
+;;;
+%% simple assignment
+x := 1;
+%% assignment chain right assoc
+x := y := z := 3;
+%% assign then use
+x := 1; >> x;
+%% print and return
+x := 2; >> x + 1; => x;
+%% arithmetic precedence
+x := 1 + 2 * 3 - 4 / 5;
+%% left assoc subtraction
+x := 1 - 2 - 3;
+%% left assoc division
+x := 8 / 4 / 2;
+%% comparisons left assoc
+a := 1; b := 2; c := 3; x := a < b < c;
+%% all comparison operators
+a := 1; b := 2; x := [a = b, a != b, a < b, a > b, a <= b, a >= b];
+%% comparison vs arithmetic
+a := 1; x := a + 1 = 2 * a;
+%% and/or precedence
+a := 1; b := 0; c := 1; x := a | b & c; y := a & b | c;
+%% not looser than comparison
+a := 1; b := 2; x := !a = b;
+%% not and plus
+a := 1; b := 2; x := !a + b;
+%% not and and
+a := 1; b := 2; x := !a & b;
+%% not and or
+a := 1; b := 2; x := !a | b;
+%% not inside rhs of eq
+a := 1; b := 2; c := 3; x := a = !b = c;
+%% not inside plus rhs
+a := 1; b := 2; c := 3; x := a + !b = c;
+%% not inside times rhs then plus
+a := 1; b := 2; c := 3; x := a * !b + c;
+%% double not
+a := 1; x := !!a;
+%% not of append
+a := []; x := !a :+ 1;
+%% unary minus times
+a := 1; b := 2; x := -a * b;
+%% unary minus index
+a := [1]; x := -a[0];
+%% unary minus call
+f := (q) => { => q; }; x := -f(1);
+%% unary minus member
+x := -a.b;
+%% double minus
+a := 1; x := - -a; y := --a;
+%% minus not
+a := 1; b := 2; x := -!a + b;
+%% not minus
+a := 1; b := 2; x := !-a + b;
+%% minus abs
+a := 1; x := -|a|;
+%% minus number literal
+x := -5; y := 3 - -5; z := 3--5;
+%% append basic
+l := []; l :+ 1;
+%% append chain
+l := []; l :+ 1 :+ 2 :+ 3;
+%% append with or
+l := []; a := 1; b := 2; l :+ a | b;
+%% append rhs assignment
+l := []; l :+ x := 1;
+%% assign rhs append
+l := []; x := l :+ 3;
+%% plus then assign
+a := 1; x := 0; y := a + x := 3;
+%% times then assign
+a := 1; x := 0; y := a * x := 3 + 4;
+%% minus then assign
+x := 0; y := -x := 3;
+%% not then assign
+x := 0; y := !x := 3;
+%% index assign
+a := [1, 2]; a[0] := 5;
+%% index assign nested
+a := [[1]]; a[0][0] := 5;
+%% index assign in expr
+a := [1, 2]; b := 1 + a[1] := 7;
+%% paren not idtype
+x := 0; (x) := 1;
+%% paren index is idtype
+a := [1]; (a)[0] := 1;
+%% call result index assign
+f := () => { => [1]; }; f()[0] := 2;
+%% call result not assignable
+f := () => { => [1]; }; f() := 2;
+%% number not assignable
+1 := 2;
+%% list literal indexing assign
+[1, 2][0] := 3;
+%% abs index assign
+a := [1]; |a|[0] := 1;
+%% assign to abs
+a := 1; |a| := 1;
+%% assign to negation
+a := 1; -a := 2;
+%% abs simple
+a := 1; x := |a|;
+%% abs of sum
+a := 1; b := 2; x := |a + b|;
+%% abs of or
+a := 1; b := 2; x := |a | b|;
+%% abs number quirk
+a := 1; x := |a|1|;
+%% abs input quirk
+a := 1; x := |a|<<|;
+%% abs not quirk
+a := 1; b := 2; x := |a|!b|;
+%% abs id then id
+a := 1; b := 2; c := 3; x := |a|b|c|;
+%% abs class quirk
+a := 1; x := |a|#{}|;
+%% abs minus closes
+a := 1; b := 2; x := |a|-b;
+%% abs paren closes then call
+a := 1; b := 2; x := |a|(b);
+%% abs bracket closes then index
+a := 1; x := |a|[0];
+%% abs dot closes
+a := 1; x := |a|.b;
+%% abs bar closes then or
+a := 1; b := 2; x := |a||b|;
+%% nested abs
+a := 1; x := ||a||;
+%% nested abs triple
+a := 1; x := |||a|||;
+%% abs inside abs with or
+a := 1; b := 2; x := ||a| | |b||;
+%% abs containing assignment never closes
+x := |y := 1|;
+%% abs containing assignment never closes 2
+x := |y := 1|2|;
+%% abs containing append never closes
+l := []; x := |l :+ 1|;
+%% abs containing parenthesised assignment
+x := |(y := 1)|;
+%% abs containing parenthesised append
+l := []; x := |(l :+ 1)|;
+%% abs and
+a := 1; b := 2; x := |a & b|;
+%% abs and then or quirk
+a := 1; b := 2; c := 3; x := |a & b|c|;
+%% abs not inside
+a := 1; x := |!a|;
+%% abs not then or
+a := 1; b := 2; x := |!a|b|;
+%% abs minus inside
+a := 1; x := |-a|;
+%% abs minus inside then or
+a := 1; b := 2; x := |-a|b|;
+%% abs comparison
+a := 1; b := 2; x := |a < b|;
+%% abs in statement position
+a := 1; |a|;
+%% abs then semicolon after or
+a := 1; b := 2; |a|b;
+%% abs empty
+x := ||;
+%% abs or chain
+a := 1; b := 2; c := 3; d := 4; x := |a|b|c|d|;
+%% abs then number after close
+a := 1; x := |a| 1;
+%% abs append outside
+l := []; x := |l| :+ 1;
+%% abs list literal inside
+x := |[1, 2]|;
+%% abs list literal after bar
+a := 1; x := |a|[1]|;
+%% abs index inside
+a := [1]; x := |a[0]|;
+%% abs call inside
+f := () => { => 1; }; x := |f()|;
+%% abs funclit inside
+x := |() => { => 1; }|;
+%% abs input inside
+x := |<<|;
+%% abs then dot id
+a := 1; x := |a|.y|;
+%% abs bar then minus
+a := 1; b := 2; x := |a|-b|;
+%% abs bar then paren
+a := 1; b := 2; x := |a|(b)|;
+%% abs then function literal
+x := |a|() => {}|;
+%% if
+a := 1; (a) ? >> 1;
+%% if else
+a := 1; (a) ? >> 1; : >> 2;
+%% if else blocks
+a := 1; (a) ? { >> 1; } : { >> 2; }
+%% dangling else
+a := 1; b := 0; (a) ? (b) ? >> 1; : >> 2;
+%% dangling else two elses
+a := 1; b := 0; (a) ? (b) ? >> 1; : >> 2; : >> 3;
+%% if empty branches
+a := 1; (a) ? ; : ;
+%% if with assignment condition
+(x := 1) ? >> x;
+%% if condition complex
+a := 1; b := 2; (a < b & b > 0) ? >> a;
+%% if then while
+a := 1; (a) ? (a) @ a := 0;
+%% if branch is return
+a := 1; (a) ? => 1;
+%% if missing stmt
+a := 1; (a) ?
+%% if colon without if
+a := 1; >> a; : >> 2;
+%% while
+i := 0; (i < 3) @ i := i + 1;
+%% while block
+i := 0; (i < 3) @ { i := i + 1; }
+%% while empty body
+i := 0; (i) @ ;
+%% while nested
+i := 0; (i < 3) @ (i < 2) @ i := i + 1;
+%% for basic
+(i := 0; i < 3; i := i + 1;) @ >> i;
+%% for block body
+(i := 0; i < 3; i := i + 1;) @ { >> i; }
+%% for empty init
+i := 0; (; i < 3; i := i + 1;) @ ;
+%% for empty step
+(i := 0; i < 3; ;) @ i := i + 1;
+%% for block init
+({ i := 0; } 1; ;) @ ;
+%% for print init
+(>> 1; 0; ;) @ ;
+%% for return init
+f := () => { (=> 1; 0; ;) @ ; };
+%% for if init
+a := 1; ((a) ? >> 1; 0; ;) @ ;
+%% for if else init
+a := 1; ((a) ? >> 1; : >> 2; 0; ;) @ ;
+%% for while init
+a := 0; ((a) @ ; 0; ;) @ ;
+%% for for init
+((i := 0; i < 1; i := i + 1;) @ ; 0; ;) @ ;
+%% for foreach init
+l := [1]; ((x : l) @ ; 0; ;) @ ;
+%% for paren expression init
+a := 1; ((a); 0; ;) @ ;
+%% for paren expression plus init
+a := 1; ((a) + 1; 0; ;) @ ;
+%% for paren call init
+f := (q) => {}; ((f)(1); 0; ;) @ ;
+%% for funclit init
+(() => {}; 0; ;) @ ;
+%% for funclit param init
+((q) => {}; 0; ;) @ ;
+%% for funclit params init
+((p, q) => {}; 0; ;) @ ;
+%% for funclit call init
+((q) => {}(1); 0; ;) @ ;
+%% for doubly nested paren init
+a := 1; (((a)); 0; ;) @ ;
+%% for nested paren if init
+a := 1; (((a) ? ; 0; ;) @ ; 0; ;) @ ;
+%% for step is if
+i := 0; (; i < 3; (i) ? i := i + 1;) @ ;
+%% for step is if else
+i := 0; (; i < 3; (i) ? i := i + 1; : i := 5;) @ ;
+%% for step is block
+i := 0; (; i < 3; { i := i + 1; }) @ ;
+%% for step is while
+i := 0; (; i < 3; (i < 3) @ i := i + 1;) @ ;
+%% for step is for
+i := 0; (; i < 3; (; i < 3; i := i + 1;) @ ;) @ ;
+%% for step paren expr
+i := 0; (; i < 3; (i) + 1;) @ ;
+%% for missing at
+(i := 0; i < 3; i := i + 1;) >> i;
+%% for missing step semicolon
+(i := 0; i < 3; i := i + 1) @ ;
+%% for with three semicolons only
+(;;;) @ ;
+%% for cond missing
+(i := 0; ; ;) @ ;
+%% foreach
+l := [1, 2]; (x : l) @ >> x;
+%% foreach block
+l := [1, 2]; (x : l) @ { >> x; }
+%% foreach expr list
+(x : [1, 2, 3]) @ >> x;
+%% foreach preexisting var
+x := 5; (x : [1]) @ >> x;
+%% foreach missing at
+(x : [1]) ? >> x;
+%% foreach paren var
+((x) : [1]) @ ;
+%% foreach number var
+(1 : [1]) @ ;
+%% foreach in expression
+y := (x : [1]);
+%% foreach nested
+(x : [[1]]) @ (y : x) @ >> y;
+%% paren expression statement
+a := 1; (a);
+%% paren expression statement plus
+a := 1; (a) + 1;
+%% paren expression call
+f := (q) => {}; (f)(1);
+%% paren expression index
+a := [1]; (a)[0];
+%% paren expression index assign
+a := [1]; (a)[0] := 2;
+%% paren chain
+a := 1; ((a));
+%% paren chain plus
+a := 1; ((a) + 1) * 2;
+%% paren then question in expression
+a := 1; x := (a) ? 1;
+%% funclit no params
+f := () => { => 1; };
+%% funclit one param
+f := (a) => { => a; };
+%% funclit two params
+f := (a, b) => { => a + b; };
+%% funclit many params
+f := (a, b, c, d, e) => { => a; };
+%% funclit at statement start
+() => { };
+%% funclit statement start one param
+(a) => { };
+%% funclit statement start params
+(a, b) => { };
+%% funclit immediately called
+x := (a, b) => { => a; }(1, 2);
+%% funclit statement immediately called
+(a, b) => { => a; }(1, 2);
+%% funclit called twice
+x := () => { => () => { => 1; }; }()();
+%% funclit param is expression
+f := (a + 1) => { };
+%% funclit params expression
+f := (a, b + 1) => { };
+%% funclit param is number
+f := (1) => { };
+%% funclit param paren id
+f := ((a)) => { };
+%% funclit duplicate param
+f := (a, a) => { };
+%% funclit param shadows global
+a := 1; f := (a) => { };
+%% funclit param shadows later global
+f := (a) => { }; a := 1;
+%% funclit missing body
+f := (a) => ;
+%% funclit body not block
+f := (a) => a;
+%% funclit trailing comma
+f := (a,) => { };
+%% funclit empty param in middle
+f := (a,,b) => { };
+%% funclit tuple without def
+x := (a, b);
+%% empty parens without def
+x := ();
+%% funclit param assignment
+f := (a := 1) => {};
+%% call no args
+f := () => {}; f();
+%% call args
+f := (a, b) => {}; f(1, 2);
+%% call trailing comma
+f := (a) => {}; f(1,);
+%% call chain
+f := () => {}; f()()();
+%% call of index
+l := [() => {}]; l[0]();
+%% call on number
+1(2);
+%% call on list literal
+[1](2);
+%% call args evaluated before callee
+g(h);
+%% list literal empty
+x := [];
+%% list literal nested
+x := [[], [1, [2, 3]], 4];
+%% list literal trailing comma
+x := [1, 2,];
+%% list literal leading comma
+x := [,1];
+%% list literal index
+x := [1, 2][1];
+%% list with assignment
+x := [y := 1, y];
+%% list scope ends
+x := [y := 1]; >> y;
+%% input
+x := <<;
+%% input arith
+x := << + << * <<;
+%% input as statement
+<<;
+%% print without semicolon
+>> 1
+%% print nothing
+>> ;
+%% return nothing
+=> ;
+%% return expr
+=> 1 + 2;
+%% return in function
+f := () => { => 1; };
+%% def as binary
+x := 1 => 2;
+%% block statement
+{ x := 1; }
+%% nested blocks
+{ { { } } }
+%% block then semicolon
+{ };
+%% unclosed block
+{ x := 1;
+%% extra close
+x := 1; }
+%% class literal
+c := #{ x := 1; };
+%% class literal statement
+#{ };
+%% class without block
+c := # 1;
+%% member get
+a := 1; x := a.b;
+%% member get chain
+a := 1; x := a.b.c;
+%% member call
+a := 1; x := a.b(1);
+%% static get
+x := .a;
+%% static get assign
+.a := 1;
+%% member assign
+a := 1; a.b := 2;
+%% dot number
+x := a.1;
+%% dot alone
+x := .;
+%% invalid characters
+x := 1 $ + 2;
+%% invalid characters run
+x := 1 $$$ + 2;
+%% invalid char adjacent to token
+x := 1 +$2;
+%% invalid char then syntax error
+x := $ ) $;
+%% backslash quote chars
+x := 1; " ' ` ~ ^ % \ ;
+%% underscore start
+_x := 1;
+%% identifier with underscore
+x_1 := 1; >> x_1;
+%% numbers big
+x := 2147483647; y := 2147483648; z := 4294967296; w := 99999999999999999999999;
+%% number then identifier
+x := 12abc;
+%% tokens longest match
+a := 1; b := 2; x := a>=b; y := a<=b; z := a!=b; w := a>b; v := a<b;
+%% print token vs gt
+a := 1; >> a>>1;
+%% input token vs lt
+a := 1; x := a<<1;
+%% not equal vs not
+a := 1; x := a != 1; y := !=1;
+%% def token vs eq
+a := 1; x := a =>1;
+%% assign token vs colon
+x:=1; y :=2; z: =3;
+%% append token
+l := []; l:+1; l :+1;
+%% double equal
+a := 1; x := a == 1;
+%% comment at end without newline
+x := 1; // comment
+%% comment between tokens
+x := // c
+1;
+%% slash slash in expression
+x := 1 // 2;
+;
+%% tabs
+x	:=	1	;
+%% multiple lines positions
+x := 1;
+
+y := 2 +
+  ;
+%% question at expression level
+a := 1; x := a ? 1 : 2;
+%% at at expression level
+a := 1; x := a @ 1;
+%% colon at statement level
+: ;
+%% at sign alone
+@;
+%% hash alone
+#;
+%% while with complex body
+i := 0; (i < 10) @ { (i = 5) ? { i := i + 2; } : i := i + 1; }
+%% if inside for inside while
+i := 0; (i < 2) @ { (j := 0; j < 2; j := j + 1;) @ { (j = 1) ? >> j; } i := i + 1; }
+%% fib function
+fib := (n) => { (n < 2) ? => n; => fib(n - 1) + fib(n - 2); }; >> fib(10);
+%% deep nesting parens
+x := ((((((((((1))))))))));
+%% deep nesting lists
+x := [[[[[[[[[[1]]]]]]]]]];
+%% deep nesting abs
+x := ||||||||1||||||||;
+%% mixed operators soup
+a := 1; b := 2; c := 3; x := a + b * c - a / b < c & !a | b = c :+ 1;
+%% assign in condition of while
+(x := 1) @ x := 0;
+%% foreach over number
+(x : 3) @ ;
+%% statement starting with minus
+a := 1; -a;
+%% statement starting with not
+a := 1; !a;
+%% statement starting with bracket
+[1, 2];
+%% statement starting with number
+5;
+%% statement starting with input
+<< + 1;
+%% statement starting with dot
+.a;
+%% statement starting with hash
+#{} ;
+%% paren then binary then assignment
+a := [1]; (a)[0] + 1;
+%% paren id colon in expression stmt
+a := 1; (a : 1);
+%% for init assign then paren cond
+(i := 0; (i) < 3; i := i + 1;) @ ;
+%% for nested deeply
+((((i := 0; i < 1; i := i + 1;) @ ; 0; ;) @ ; 0; ;) @ ; 0; ;) @ ;
+%% if inside paren expr is error
+x := ((a) ? 1;);
+%% paren semicolon in expression is error
+x := (a; b; c;) @ d;
+%% two expressions
+a := 1; a a;
+%% missing operand
+x := 1 + ;
+%% missing semicolon between statements
+x := 1 y := 2;
+%% unbalanced paren
+x := (1;
+%% unbalanced bracket
+x := [1;
+%% close bracket alone
+x := ];
+%% for with funclit then call cond
+((a) => { => a; }(1); 0; ;) @ ;
+%% if condition funclit
+(() => {}) ? >> 1;
+%% while condition funclit
+((a) => {}) @ ;
+%% call in if cond
+f := () => { => 0; }; (f()) ? >> 1;
+%% if cond is paren paren
+a := 1; ((a)) ? >> 1;
+%% if cond starts with paren then op
+a := 1; ((a) + 1) ? >> 1;
+%% if cond with funclit params
+((a, b) => {}) ? ;
+%% while cond is paren paren
+a := 0; ((a)) @ ;
+%% statement paren paren then semicolon
+a := 1; ((a));
+%% statement paren paren call
+f := (q) => {}; ((f))(1);
+%% statement paren funclit params call
+((a, b) => { })(1, 2);
+%% statement paren abs
+a := 1; (|a|);
+%% statement paren abs or quirk
+a := 1; (|a|1|);
+%% for init abs
+a := 1; (|a|; 0; ;) @ ;
+%% for init list literal
+([1]; 0; ;) @ ;
+%% for init not
+a := 1; (!a; 0; ;) @ ;
+%% for init minus
+a := 1; (-a; 0; ;) @ ;
+%% for init input
+(<<; 0; ;) @ ;
+%% for init number
+(1; 0; ;) @ ;
+%% for init dot
+(.a; 0; ;) @ ;
+%% for init class
+(#{}; 0; ;) @ ;
+%% for init funclit then binary
+(() => {} + 1; 0; ;) @ ;
+%% paren id then assign in stmt
+x := 0; (x := 1);
+%% paren id then assign then if
+x := 0; (x := 1) ? >> x;
+%% paren call then if
+f := () => {}; (f()) ? ;
+%% paren call then while
+f := () => {}; (f()) @ ;
+%% foreach with call list
+f := () => { => [1]; }; (x : f()) @ >> x;
+%% foreach var then colon in nested
+((x : [1]) @ (y : [2]) @ ; 0; ;) @ ;

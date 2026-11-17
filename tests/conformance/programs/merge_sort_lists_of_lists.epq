@@ -1,0 +1,16 @@
+merge := (a, b) => {
+    out := []; i := 0; j := 0;
+    (i < |a| & j < |b|) @ (a[i] <= b[j]) ? { out :+ a[i]; i := i + 1; } : { out :+ b[j]; j := j + 1; }
+    (i < |a|) @ { out :+ a[i]; i := i + 1; }
+    (j < |b|) @ { out :+ b[j]; j := j + 1; }
+    => out;
+};
+sort := (l) => {
+    (|l| <= 1) ? => l;
+    m := |l| / 2; left := []; right := [];
+    (i := 0; i < |l|; i := i + 1;) @ (i < m) ? left :+ l[i]; : right :+ l[i];
+    => merge(sort(left), sort(right));
+};
+>> sort([3, 1, 2]);
+>> sort([[3, 1], [1, 2, 3], [1, 2], [], [3]]);
+>> sort([[[2]], [[1, 5]], [[1]]]);

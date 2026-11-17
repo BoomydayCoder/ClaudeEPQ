@@ -1,0 +1,15 @@
+// RPN: positive ints are pushed; -1 add, -2 sub, -3 mul, -4 div, 0 ends
+st := [];
+t := <<;
+(t != 0) @ {
+    (t > 0) ? st :+ t;
+    : {
+        b := -st; a := -st;
+        (t = -1) ? st :+ a + b;
+        : (t = -2) ? st :+ a - b;
+        : (t = -3) ? st :+ a * b;
+        : st :+ a / b;
+    }
+    t := <<;
+}
+>> st;

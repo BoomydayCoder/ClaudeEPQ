@@ -1,0 +1,9 @@
+g := 1;
+show := () => { => g; };
+>> show();
+g := [g];
+>> show();
+g := show;
+>> g = show;
+g := 0;
+>> show() + 1;

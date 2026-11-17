@@ -1,0 +1,4 @@
+build := (n) => { (n = 0) ? => 0; => [n, build(n - 1)]; };
+>> build(0);
+>> build(1);
+>> build(4);

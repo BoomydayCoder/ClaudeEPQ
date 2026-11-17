@@ -1,0 +1,317 @@
+# ClaudeEPQ — architecture
+
+Goal: run EPQ programs (see `LANGUAGE.md`) as fast as an Apple-Silicon Mac allows, with output identical
+to the original implementation. Target: macOS / ARM64 only. No portability constraints.
+
+## 0. Where the time goes, and the ideas that remove it
+
+The original is a stack bytecode VM. Every value is a 16-byte tagged union pushed and popped through
+`std::vector`; every operator re-checks tags; every global is an `unordered_map` lookup; every call is a
+hash lookup plus three vector pushes; every `<<` and `>>` is a flushed system call.
+
+EPQ is dynamically typed, but almost every real program is *statically typeable*. Five ideas, in order
+of how much they buy:
+
+1. **Whole-program type inference + specialisation.** Infer types before running, clone functions per
+   argument types, and generate code in which an integer is a bare 32-bit register and a list of
+   integers is a bare `int32_t` array. Only values that genuinely cannot be typed carry tags. (§2)
+2. **Compile in-process, in microseconds.** Half the example programs finish in ~20 ms in the original;
+   starting a C compiler costs more than that. So the default engine is our own ARM64 JIT. (§6)
+3. **Know what lists alias.** The inference already groups lists into regions that can never alias each
+   other, and a tiny extra analysis finds lists with a single owner. That lets a loop keep a list's data
+   pointer and length in registers instead of reloading them on every access. (§5.2)
+4. **Pairs are not lists.** `[cost, v]` is this language's only way to write a record. A two-integer list
+   that is never mutated is represented as one 64-bit register, laid out so that the language's
+   lexicographic `<` is a single machine compare. No allocation, no pointer chase. (§5.4)
+5. **Remove unpredictable branches.** Sorting code is dominated by 50/50 branches (~13 cycles per
+   miss). Small conditional bodies are turned into conditional selects. (§5.5)
+
+Then, for programs that run long enough to care, a second tier: emit C, let LLVM optimise it in the
+background, cache the result, and use it on the next run. (§7)
+
+```
+source ─► lexer ─► parser ─► AST ─► resolver ─► inference + specialisation ─► TIR ─► TIR passes ─┬─► ARM64 JIT ─► run
+                                                                                                └─► C ─► cc -O3 ─► cache ─► dlopen
+```
+
+Implementation: C++20, Apple clang, plain `Makefile`, no dependencies. Tooling: Python 3.9 stdlib.
+
+## 1. Front end
+
+- Hand-written lexer and precedence-climbing parser reproducing the bison grammar *including its
+  conflict resolutions* (`LANGUAGE.md` §2). Checked by differential testing against the baseline's `-e`
+  AST dump, which `epq -e` reproduces byte-for-byte.
+- Resolver implements `LANGUAGE.md` §4 exactly. Output: every variable reference bound to `Global(g)` or
+  `Local(fn, slot)`; every function literal gets a `DefId`.
+- **Startup budget:** the whole pipeline up to the first executed instruction must cost well under
+  300 µs for the example programs — an `epq` run of an empty program should be indistinguishable from
+  `/usr/bin/true`. No iostreams, no static constructors, raw `read`/`write`, arenas mapped lazily.
+
+## 2. Type inference
+
+### 2.1 Types
+```
+T ::= Bot | Int | List(e) | Fn(d) | Any          (+ Pair, introduced by §5.4 after inference)
+```
+`e` is an *element variable* — a union-find node that itself has a `T`. `d` is a `DefId`.
+`Bot` = no information yet. `Any` = must be a tagged dynamic value.
+
+A **tvar** is anything with a type: each global; each local, parameter and return value of each function
+*instance*; each element variable; each expression node of each instance.
+
+### 2.2 Constraint: `flow(src → dst)`
+"A value of src may be stored in dst". Solved to a fixpoint with `dst := join(dst, src)`:
+
+| join | result |
+|---|---|
+| `Bot, t` | `t` |
+| `Int, Int` | `Int` |
+| `List(e1), List(e2)` | `List(e1)` and **unify(e1, e2)** — lists are mutable references, so both sides must agree on element representation |
+| `Fn(d), Fn(d)` | `Fn(d)` |
+| anything else | `Any` |
+
+Dynamisation rule (same fixpoint): whenever `dst` is `Any`,
+- `src = List(e)` ⇒ force `e := Any` (recursively, by this same rule);
+- `src = Fn(d)` ⇒ mark `d` *escaped* (it needs a generic entry point, §2.5).
+
+`src` keeps its static type: an `Int` stored into an `Any` slot is boxed at the store.
+
+**Soundness invariant.** Every list object has exactly one element representation, fixed by the element
+variable of its allocation site; every variable that can reference it either has that same (unified)
+element variable or is `Any`, in which case the element variable is `Any`. So a list reachable from a
+dynamic value always has dynamic elements, and generic runtime code needs no per-list layout tags.
+
+**Regions.** Because every flow of a list unifies element variables, an element variable *is* a
+Steensgaard points-to class: two list expressions with different element variables can never refer to
+the same list. §5.2 uses this as free alias analysis.
+
+### 2.3 Transfer rules
+- literal, `<<`, arithmetic, comparisons, `!`, `|x|` → `Int`.
+- `-x`: `x:Int` → `Int`; `x:List(e)` → flow(e → result); `x:Any` → `Any`.
+- `a & b`, `a | b` in *value* position: flow(a → r), flow(b → r). In *condition* position no value exists.
+- `x := v`: flow(v → x); the expression has `v`'s type.
+- `l[i]`: `l:List(e)` → flow(e → r); `l:Any` → `Any`.
+- `l[i] := v`, `l :+ v`: `l:List(e)` → flow(v → e); `l:Any` → flow(v → Any). `:+` has `l`'s type.
+- `[a, b, …]`: fresh `e` per (site, instance); flow(each → e). Each `e` records its allocation sites and
+  their literal lengths (needed by §5.4).
+- function literal: `Fn(d)`.
+- for-each: flow(elem(L) → x); plus flow(Int → x) only when `x` already existed.
+- call `f(args)`: `f:Fn(d)` with matching arity → instance of `d` (§2.4), flow(arg_i → param_i),
+  flow(ret → r); wrong arity → run-time `Invalid arity`; `f:Any` → args flow to `Any`, `r = Any`;
+  `f:Int`/`List` → run-time `Operand must be a function`.
+- `=> v`: flow(v → ret). Falling off the end: flow(Int → ret) if the end is reachable.
+- A local whose first definition may be skipped gets flow(Int → x) and is zero-initialised.
+
+All rules are monotone on a finite-height lattice; rules keyed on an operand's type re-run when it changes.
+
+### 2.4 Specialisation
+A function **instance** is one copy of a body with its own tvars. `swap(l, i, j)` called on a list of
+ints and on a list of pairs gets two instances, each fully static.
+
+- Each call site of each instance gets its own callee instance, except when the callee is already on
+  the instantiation chain (recursion): then that instance is reused.
+- Cap: more than 8 instances of one `d`, or 256 in total → further sites share one merged instance
+  (always sound, only less precise).
+- After the fixpoint, instances with identical resolved types (own tvars and, transitively, callees) are
+  merged by partition refinement.
+
+### 2.5 Dynamic calls
+Each escaped `d` gets one generic instance (all parameters and the return are `Any`). Dynamic call sites
+check the tag and the arity, then call through a table indexed by `DefId`.
+
+### 2.6 Globals
+One tvar per global, shared by all instances. On top of that:
+
+- **Definite assignment** — forward must-analysis over the top level, extended across calls
+  (`S(instance)` = ∩ over its call sites). Reads not proven assigned keep an `Undefined global` check.
+- **Demotion** — a global referenced by no function body is a local of `main`, so it lives in a register.
+  (All five variables of the sieve example are demoted.)
+- **Constants** — a global assigned once, at top level, to a literal, and proven assigned at a read, is
+  that literal.
+
+## 3. Representation
+
+| Static type | Machine representation |
+|---|---|
+| `Int` | `int32_t` in a `w` register |
+| `List(e)` | pointer to a 16-byte header `{ data*, len, cap }`. `data` is `int32_t[]` when `e` is `Int`/`Bot`, 8-byte slots otherwise. Small lists are allocated with their first buffer directly behind the header (one cache line). |
+| `Pair` (§5.4) | one 64-bit register: `(int64)first << 32 \| (uint32)second ^ 0x80000000`. Signed 64-bit compare ≡ lexicographic compare of the two signed ints; equality ≡ `cmp`. |
+| `Fn(d)` | nothing at run time (the target is known) |
+| `Any` | 64-bit tagged word, below |
+
+**Dynamic values.** Integer `v` is `(v << 32) | 1`; a list is its (16-byte-aligned, non-zero) header
+pointer; a function is `(DefId << 32) | 2`. This encoding is chosen so that the common dynamic operations
+are inline and branch-light:
+- both integers? `and t, a, b ; tbz t, #0, slow`
+- add: `a + (b - 1)`; subtract: `(a - b) | 1`; multiply: `(a asr 32) * (b - 1) + 1` — the upper 32 bits
+  wrap exactly like 32-bit arithmetic, the tag survives;
+- compare two integers: plain signed 64-bit compare of the tagged words;
+- truthiness: `word != 1`.
+
+**Memory.** Bump-allocated arenas, no collector (the original never frees either; we use 4 bytes per
+integer element where it uses 16, and none at all for pairs). An outgrown list buffer goes straight back
+to a size-class free list, because buffers are only reachable through their header.
+
+**Stack.** Generated code runs on its own lazily-committed multi-gigabyte stack (the entry stub switches
+`sp`), so recursion depth is bounded by memory as in the original; a guard page turns runaway recursion
+into a clean `Stack overflow` error.
+
+## 4. TIR — typed intermediate representation
+
+A tree per instance; the single input of both backends. Every node has a resolved static type and every
+implicit operation of the source language is explicit:
+
+- conversions: `BoxInt`, `BoxList`, `BoxFn`, `UnboxInt(err)`, …
+- checks: `CheckIndex(i, len)`, `CheckDivisor`, `CheckDefined(g)`, `Fail(err)` (a statically certain type
+  error must still fire at run time, in order, after the preceding side effects);
+- typed operations: `AddI32`, `LtI32`, `LtList(desc)`, `EqList(desc)`, `LtPair`, `PairMake`,
+  `PairField(k)`, `ElemLoad(data, i, width)`, `ElemStore`, `Append`, `PopBack`, `CallDirect(instance)`,
+  `CallDynamic`, `PrintTyped(desc)`, `Select(c, a, b)` …
+- generic operations on `Any` (`DynAdd`, `DynLess`, `DynIndex`, …) with inline integer fast paths;
+- control: `If`, `While`, `For`, `ForEach` (desugared to index form), `Return`, `InlineBlock`;
+- conditions in *branch form* (jump-true / jump-false, short-circuit); 0/1 is materialised only if used.
+
+TIR has two levels. **High TIR** has list operations on list values (`Index(L, i)`, `Len(L)`).
+**Low TIR**, produced by §5.2, exposes header fields as ordinary typed locals (`L.data`, `L.len`,
+`L.cap`) and element accesses as `ElemLoad(dataLocal, i)` + `CheckIndex(i, lenLocal)`. Backends compile
+Low TIR and know nothing about caching: a hoisted length is just another local competing for a register.
+
+`desc` is a static type descriptor, so deep compare / equality / print of a statically typed nested list
+is one runtime call that knows the layout.
+
+## 5. TIR passes — where the speed beyond "typed code" comes from
+
+Run in this order; both backends benefit.
+
+### 5.1 Inlining
+Small non-recursive instances (`swap`, `mod`) are inlined as `InlineBlock`s. Parameters that the callee
+never assigns and whose arguments are variables or constants are substituted rather than copied.
+Enables everything below (and turns `mod(x, 65537)` into a division by a constant).
+
+### 5.2 Header caching — keeping `data`/`len` in registers
+An access `l[i]` naively costs: load `len`, compare, load `data`, load element. The first and third are
+redundant unless something changed the list's header in between. Only three things can: `:+`, unary-minus
+pop, and a call that does either.
+
+- **Mutation summaries.** Each instance gets the set of *regions* (element variables, §2.2) whose headers
+  it may mutate, transitively through calls. Dynamic calls and `Any` appends mutate the `Any` region.
+- **Unique lists.** A local assigned exactly once, from a list literal, and used only as the base of
+  index / length / append / pop or as a return value, has no other name. Nothing but operations on that
+  very variable can change its header.
+- A cached header of variable `L` is invalidated by: assignment to `L`; append/pop on an expression in
+  the same region (unless `L` or the other base is unique and they are different variables); a call
+  whose summary contains `L`'s region (never, if `L` is unique). **Element stores never invalidate.**
+- Placement: at a loop preheader when nothing in the loop invalidates (and `L` is definitely assigned
+  there); otherwise after the defining assignment / invalidation point when at least two uses follow.
+- Appends on a cached unique list update the cached `len` in place and store it through (one store, no
+  reload); only the out-of-line grow path reloads `data`/`cap`.
+- Loop-invariant reads of non-demoted globals are hoisted by the same machinery.
+
+Result: the merge loop of mergesort, the sieve's inner loop and bubblesort's inner loop touch memory
+only for the elements themselves.
+
+### 5.3 Check elision
+With lengths in locals, `CheckIndex(i, len)` is redundant when the same `(i, len)` pair was checked
+earlier on every path with neither changed. Appends never invalidate an in-bounds fact (lists only grow);
+pops do. After inlining `swap`, six checks become two. A loop guard `i < |L|` additionally discharges
+`L[i]` when `i` is a non-negative induction variable whose only update in the loop is `i := i + 1`.
+
+### 5.4 Pair unboxing
+A region is a **pair region** when:
+- every allocation site is a literal with exactly two `Int` elements;
+- no variable or expression of the region is ever the base of `:+`, unary-minus pop, or an index *store*;
+- it never flows into `Any`.
+
+List identity is unobservable in EPQ except through mutation (`=` is deep), so such lists are values.
+Every tvar of the region gets type `Pair` (§3): literals become `PairMake`, `p[0]`/`p[1]` become shifts,
+`p[i]` with variable `i` is a range check plus select, `|p|` is `2`, `<`/`=` are single compares.
+A list of pairs is a flat array of 64-bit words. In Dijkstra the heap, the adjacency lists and every
+`[cost, v]` stop allocating altogether.
+
+### 5.5 If-conversion
+`If(c) { s1; …; sk }` with no else, k ≤ 3, where each `s` is an `Int`/`Pair` local assignment or an element
+store whose bounds are already established before the `If`, and every right-hand side is pure, cheap
+and cannot fail, becomes straight-line code: `c` is evaluated once into a temporary, `x := e` becomes
+`x := Select(c, e, x)` and `A[i] := e` becomes `A[i] := Select(c, e, A[i])`. Sequential semantics are
+preserved statement by statement. The language is single-threaded, so introducing the stores is legal —
+something a C compiler is not allowed to assume. Covers the conditional swap of bubblesort and the
+child selection of heap sift-down.
+
+### 5.6 Local simplification
+Constant folding and propagation, strength reduction (`* 2^k`, `/ 2^k`, other constant divisors by
+multiply-high), reuse of an element value already loaded in the same statement sequence when no store to
+that region intervenes, dead-store and dead-local removal.
+
+## 6. ARM64 JIT (default engine)
+
+One pass over Low TIR per instance, emitting into a `MAP_JIT` region (`pthread_jit_write_protect_np`,
+`sys_icache_invalidate`).
+
+- **Register allocation follows the language's scopes.** Local lifetimes are block-structured, so live
+  ranges form a laminar family and a weighted greedy pass is optimal enough: each local has a weight
+  (uses × 10^loop-depth); entering a scope hands its locals the free registers, heaviest first; leaving
+  releases them; losers get frame slots. Pool: callee-saved `x19–x28`, plus caller-saved `x9–x15` inside
+  regions that contain no calls except cold paths (which save and restore around the call).
+  Only the callee-saved registers actually used are saved in the prologue.
+- **Destination-driven expression codegen** into caller-saved temporaries; immediates folded into
+  `add/sub/cmp`; scaled-register addressing (`ldr w0, [x_data, w_i, uxtw #2]`); `cmp`+`b.cond`, `cbz`,
+  `tbz` fusion from branch-form conditions; `csel`/`csinc` for `Select`.
+- Fast paths inline, cold paths (errors, grow, dynamic slow cases) out of line after the function body.
+  One error stub per kind per function.
+- Direct `bl` between instances (arguments in `x0–x7`); runtime helpers through `blr`.
+- `sdiv` already yields `INT_MIN` for `INT_MIN / -1`; division by zero is a `cbz` to the error stub.
+- The encoder is unit-tested by assembling the same instructions with the system assembler and comparing
+  bytes.
+
+## 7. Second tier: LLVM, in the background, for next time
+
+- **C backend.** Emits one translation unit from the same Low TIR: the runtime plus one `static` function
+  per instance, compiled with `cc -O3 -fwrapv -mcpu=native` into a dylib. Header fields and elements use
+  distinct C types so LLVM's own alias analysis agrees with ours. Because it consumes TIR *after* §5, it
+  gets pair unboxing and if-conversion that LLVM could never derive from C semantics.
+- **Tiering.** A run starts in the JIT immediately. If it is still running after ~20 ms, a detached
+  helper compiles the C version and atomically installs it in `~/.cache/claude-epq/<hash>.dylib` (hash of
+  source text + emitter version + compiler version). The next run of the same source finds the cache,
+  `dlopen`s it, and skips the JIT. `--jit` / `--aot` force one engine; `EPQ_NO_TIERUP=1` disables the
+  background compile.
+- Also the first backend to be written: it is the easiest way to validate the inference and TIR passes
+  before the JIT exists, and JIT-vs-C disagreement pinpoints backend bugs afterwards.
+
+## 8. Runtime
+
+One C source shared by both engines: arenas, list growth, generic operations on `Any`,
+descriptor-driven deep compare / equality / print, error exits (flush stdout, message to stderr, exit 1).
+
+I/O is a first-class performance concern — the original flushes on every `>>` and performs one `write`
+system call per `<<` prompt:
+- output goes to a 64 KB buffer, flushed at exit, before an error, and before a read that would block on
+  an interactive stdin; integers are formatted by a branch-light two-digits-at-a-time routine;
+- input is read in large blocks and parsed by hand.
+
+## 9. Correctness strategy
+
+The original implementation is the oracle.
+
+1. `tests/conformance/` — small programs per feature and per error path, expected output captured from
+   the baseline.
+2. `tools/fuzz.py` — random programs inside the well-defined subset (`LANGUAGE.md` §9), from cleanly
+   typed to deliberately heterogeneous, compared on stdout + exit code across baseline / JIT / C.
+   A separate Python reference interpreter written from the spec guards the generator itself.
+3. Parser differential fuzzing on AST dumps.
+4. Every TIR pass of §5 can be switched off individually (`--no-pass=…`); the fuzzer runs with random
+   subsets disabled, so a wrong answer is attributed to one pass immediately.
+5. The aggressive passes each rest on one stated invariant (§2.2 soundness; §5.2 invalidation rule; §5.4
+   pair-region conditions; §5.5 purity + established bounds). Each gets targeted adversarial tests that
+   try to break exactly that invariant: aliasing through arguments, globals and nested lists; mutation
+   during iteration; pairs that are mutated in one distant place; conditionals whose body would fault.
+
+## 10. Repository layout
+
+```
+docs/      LANGUAGE.md, DESIGN.md
+src/       compiler (front end, inference, TIR, passes, backends, CLI)
+runtime/   shared runtime
+tests/     conformance programs + expected output
+tools/     difftest.py, fuzz.py, bench.py, build_reference.sh
+bench/     benchmark programs and inputs
+```

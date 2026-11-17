@@ -1,0 +1,8 @@
+row := [1];
+(i := 0; i < 10; i := i + 1;) @ {
+    >> row;
+    next := [1];
+    (j := 1; j < |row|; j := j + 1;) @ next :+ row[j - 1] + row[j];
+    next :+ 1;
+    row := next;
+}

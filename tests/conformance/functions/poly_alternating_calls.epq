@@ -1,0 +1,9 @@
+sum := (x, isList) => {
+    (isList) ? { s := 0; (y : x) @ s := s + y; => s; }
+    => x;
+};
+acc := [];
+(i := 0; i < 6; i := i + 1;) @ {
+    (i - i / 2 * 2 = 0) ? acc :+ sum(i, 0); : acc :+ sum([i, i, i], 1);
+}
+>> acc;

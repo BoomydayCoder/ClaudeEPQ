@@ -1,0 +1,2 @@
+isqrt := (n) => { (n < 2) ? => n; x := n; y := (x + 1) / 2; (y < x) @ { x := y; y := (x + n / x) / 2; } => x; };
+>> [isqrt(0), isqrt(1), isqrt(15), isqrt(16), isqrt(1000000), isqrt(2147395600), isqrt(2147395599)];

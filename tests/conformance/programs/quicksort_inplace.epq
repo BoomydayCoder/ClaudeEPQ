@@ -1,0 +1,13 @@
+swap := (l, i, j) => { t := l[i]; l[i] := l[j]; l[j] := t; };
+partition := (l, lo, hi) => {
+    p := l[hi]; i := lo;
+    (j := lo; j < hi; j := j + 1;) @ (l[j] < p) ? { swap(l, i, j); i := i + 1; }
+    swap(l, i, hi);
+    => i;
+};
+qs := (l, lo, hi) => {
+    (lo < hi) ? { m := partition(l, lo, hi); qs(l, lo, m - 1); qs(l, m + 1, hi); }
+};
+d := [9, 4, 7, 1, 8, 2, 2, 6, 0, 5];
+qs(d, 0, |d| - 1);
+>> d;

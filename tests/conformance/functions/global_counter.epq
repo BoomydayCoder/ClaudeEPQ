@@ -1,0 +1,5 @@
+counter := 0;
+tick := () => { counter := counter + 1; => counter; };
+tick(); tick();
+>> tick();
+>> counter;
