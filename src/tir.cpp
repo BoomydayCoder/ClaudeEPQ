@@ -2,6 +2,7 @@
 
 #include <cstdio>
 #include <cstring>
+#include <iterator>
 
 namespace epq::tir {
 
@@ -243,7 +244,7 @@ void pass_fold(Module& m) {
     for (auto& f : m.funcs) f->body = fold(m, f->body);
 }
 
-const std::vector<Pass> kPasses = {
+const Pass kPassList[] = {
     {"definite-assignment", "drop Undefined-global checks proven unnecessary (§2.6)", pass_definite_assignment},
     {"constants", "single-literal globals become constants (§2.6)", pass_constants},
     {"demote-globals", "globals used only by main become locals of main (§2.6)", pass_demote_globals},
@@ -251,10 +252,14 @@ const std::vector<Pass> kPasses = {
 };
 }  // namespace
 
-const std::vector<Pass>& passes() { return kPasses; }
+// Function-local static: no global constructor at start-up.
+const std::vector<Pass>& passes() {
+    static const std::vector<Pass> v(std::begin(kPassList), std::end(kPassList));
+    return v;
+}
 
 void run_passes(Module& m, const std::vector<std::string>& disabled, bool verbose) {
-    for (const Pass& p : kPasses) {
+    for (const Pass& p : kPassList) {
         bool off = false;
         for (auto& d : disabled)
             if (d == p.name) off = true;

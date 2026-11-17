@@ -321,32 +321,44 @@ EPQ_RT_API void epq_list_grow(EList* l, uint32_t esz) {
 }
 
 /* ---- typed list operations ------------------------------------------------- */
+/* The bounds check also tests `data` (never NULL): that makes the data load
+ * execute before the check's (noreturn) exit, so LLVM's LICM may hoist it out
+ * of loops — a load after a conditional exit cannot be speculated. With both
+ * header fields hoisted, the null test is loop-invariant and leaves the loop. */
 EPQ_INLINE int32_t epq_ld_i32(EList* l, int32_t i) {
-    if (EPQ_UNLIKELY((uint32_t)i >= (uint32_t)l->len)) epq_fail(EPQ_E_INDEX_OOB);
-    return ((EI32*)l->data)[i].v;
+    EI32* d = (EI32*)l->data;
+    if (EPQ_UNLIKELY(((uint32_t)i >= (uint32_t)l->len) | (d == 0))) epq_fail(EPQ_E_INDEX_OOB);
+    return d[i].v;
 }
 EPQ_INLINE EAny epq_ld_w(EList* l, int32_t i) {
-    if (EPQ_UNLIKELY((uint32_t)i >= (uint32_t)l->len)) epq_fail(EPQ_E_INDEX_OOB);
-    return ((EW64*)l->data)[i].v;
+    EW64* d = (EW64*)l->data;
+    if (EPQ_UNLIKELY(((uint32_t)i >= (uint32_t)l->len) | (d == 0))) epq_fail(EPQ_E_INDEX_OOB);
+    return d[i].v;
 }
 EPQ_INLINE int32_t epq_st_i32(EList* l, int32_t i, int32_t v) {
-    if (EPQ_UNLIKELY((uint32_t)i >= (uint32_t)l->len)) epq_fail(EPQ_E_INDEX_OOB);
-    ((EI32*)l->data)[i].v = v;
+    EI32* d = (EI32*)l->data;
+    if (EPQ_UNLIKELY(((uint32_t)i >= (uint32_t)l->len) | (d == 0))) epq_fail(EPQ_E_INDEX_OOB);
+    d[i].v = v;
     return v;
 }
 EPQ_INLINE EAny epq_st_w(EList* l, int32_t i, EAny v) {
-    if (EPQ_UNLIKELY((uint32_t)i >= (uint32_t)l->len)) epq_fail(EPQ_E_INDEX_OOB);
-    ((EW64*)l->data)[i].v = v;
+    EW64* d = (EW64*)l->data;
+    if (EPQ_UNLIKELY(((uint32_t)i >= (uint32_t)l->len) | (d == 0))) epq_fail(EPQ_E_INDEX_OOB);
+    d[i].v = v;
     return v;
 }
 EPQ_INLINE EList* epq_push_i32(EList* l, int32_t v) {
-    if (EPQ_UNLIKELY(l->len == l->cap)) epq_list_grow(l, 4);
-    ((EI32*)l->data)[l->len++].v = v;
+    int32_t n = l->len;
+    if (EPQ_UNLIKELY(n == l->cap)) epq_list_grow(l, 4);
+    ((EI32*)l->data)[n].v = v;
+    l->len = n + 1;
     return l;
 }
 EPQ_INLINE EList* epq_push_w(EList* l, EAny v) {
-    if (EPQ_UNLIKELY(l->len == l->cap)) epq_list_grow(l, 8);
-    ((EW64*)l->data)[l->len++].v = v;
+    int32_t n = l->len;
+    if (EPQ_UNLIKELY(n == l->cap)) epq_list_grow(l, 8);
+    ((EW64*)l->data)[n].v = v;
+    l->len = n + 1;
     return l;
 }
 EPQ_INLINE int32_t epq_pop_i32(EList* l) {
