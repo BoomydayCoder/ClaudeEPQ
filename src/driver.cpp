@@ -246,6 +246,7 @@ int run_backend(const Program& prog, const Options& opts) {
     cfg.dedup = !opts.no_dedup;
     infer::Result R;
     infer::infer(prog, cfg, R);
+    uint64_t Ti = now_us();
     if (opts.dump_types) {
         std::string s;
         infer::dump_types(s, R);
@@ -258,6 +259,7 @@ int run_backend(const Program& prog, const Options& opts) {
     bo.constants = !disabled(opts, "constants");
     tir::Module M;
     build_tir(prog, R, bo, M);
+    uint64_t Tb = now_us();
     tir::run_passes(M, opts.no_pass, opts.verbose);
     if (opts.dump_tir) {
         std::string s;
@@ -288,7 +290,8 @@ int run_backend(const Program& prog, const Options& opts) {
     }
     uint64_t t0 = now_us();
     if (opts.verbose)
-        std::fprintf(stderr, "epq: infer+tir %llu us, emit-c %llu us, cache+dlopen %llu us\n", (unsigned long long)(T1 - T0),
+        std::fprintf(stderr, "epq: infer %llu us, build %llu us, passes %llu us, emit-c %llu us, cache+dlopen %llu us\n",
+                     (unsigned long long)(Ti - T0), (unsigned long long)(Tb - Ti), (unsigned long long)(T1 - Tb),
                      (unsigned long long)(T2 - T1), (unsigned long long)(t0 - T2));
     uint64_t exec_us = 0;
     int rc = run_on_big_stack(entry, &exec_us);
