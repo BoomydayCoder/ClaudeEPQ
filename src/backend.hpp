@@ -3,11 +3,11 @@
 // and resolved; the back end owns everything from there on, including the
 // program's exit status and the `-t` "Execution time" line.
 //
-// backend_stub.cpp provides the placeholder implementation; the real back end
-// replaces that file.
+// Implemented in src/driver.cpp.
 #pragma once
 
 #include <string>
+#include <vector>
 
 #include "resolver.hpp"
 
@@ -22,6 +22,14 @@ struct Options {
     bool parse_only = false;     // --parse-only
     bool dump_resolved = false;  // --dump-resolved
     bool frontend_time = false;  // --frontend-time (diagnostic)
+    bool emit_c = false;         // --emit-c: print the generated C, exit
+    bool dump_tir = false;       // --dump-tir
+    bool dump_types = false;     // --dump-types
+    bool mono = false;           // --mono: one instance per function (no call-site specialisation)
+    bool no_dedup = false;       // --no-dedup
+    bool verbose = false;        // --verbose: compile/cache diagnostics on stderr
+    std::vector<std::string> no_pass;  // --no-pass=NAME (TIR passes and build options:
+                                       // definite-assignment, demote-globals, constants)
     std::string file;            // source path as given on the command line
 };
 

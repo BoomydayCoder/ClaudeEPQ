@@ -25,7 +25,15 @@ void usage(FILE* f, const char* argv0) {
     std::fprintf(f,
                  "Usage: %s [options] FILE        (FILE '-' reads the program from stdin)\n"
                  "Options:\n"
-                 "  --engine=jit|aot   back end (default: jit)\n"
+                 "  --engine=jit|aot   back end (default: jit; the C backend until the JIT exists)\n"
+                 "  --emit-c           print the generated C and exit\n"
+                 "  --dump-tir         print the typed IR and exit\n"
+                 "  --dump-types       print inferred types of globals / instances and exit\n"
+                 "  --no-pass=NAME     disable a TIR pass or build step (fold, definite-assignment,\n"
+                 "                     demote-globals, constants)\n"
+                 "  --mono             one instance per function (no call-site specialisation)\n"
+                 "  --no-dedup         keep identical instances separate\n"
+                 "  --verbose          compile / cache diagnostics on stderr\n"
                  "  -t                 print \"Execution time: N microseconds\" to stderr\n"
                  "  -e                 dump the parsed AST to stderr (format of the original)\n"
                  "  --parse-only       parse (and dump with -e), then exit 0/1 without running\n"
@@ -117,7 +125,21 @@ int main(int argc, char** argv) {
             opts.frontend_time = true;
         } else if (!std::strncmp(a, "--frontend-bench=", 17)) {
             bench_iters = std::atoi(a + 17);
-        } else if (!std::strcmp(a, "--engine=jit")) {
+        } else if (!std::strcmp(a, "--emit-c")) {
+            opts.emit_c = true;
+        } else if (!std::strcmp(a, "--dump-tir")) {
+            opts.dump_tir = true;
+        } else if (!std::strcmp(a, "--dump-types")) {
+            opts.dump_types = true;
+        } else if (!std::strcmp(a, "--mono")) {
+            opts.mono = true;
+        } else if (!std::strcmp(a, "--no-dedup")) {
+            opts.no_dedup = true;
+        } else if (!std::strcmp(a, "--verbose")) {
+            opts.verbose = true;
+        } else if (!std::strncmp(a, "--no-pass=", 10)) {
+            opts.no_pass.push_back(a + 10);
+        } else if (!std::strcmp(a, "--engine=jit") || !std::strcmp(a, "--jit")) {
             opts.engine = Engine::Jit;
         } else if (!std::strcmp(a, "--engine=aot") || !std::strcmp(a, "--aot")) {
             opts.engine = Engine::Aot;
