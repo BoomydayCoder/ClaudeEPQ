@@ -1,0 +1,13 @@
+cnt := 0;
+bump := (n) => { cnt := cnt + n; >> cnt; => cnt * 2; };
+noret := (q, v) => { q :+ v; };
+l := [];
+(i := 0; i < 4; i := i + 1;) @ {
+    bump(i);
+    noret(l, i * i);
+}
+>> l;
+>> noret(l, 9);
+>> l;
+x := bump(10);
+>> x;
