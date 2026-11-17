@@ -1550,7 +1550,28 @@ public:
         Label slow, cont;
         V a, b;  // boxed words, still allocated (caller releases after the slow path is set up)
     };
-    FastCmp fast_cmp(const Node* n) {
+    // A kid statically known to be an integer (Int, or the Box of an Int).
+    static bool static_int(const Node* k) {
+        return k->type.k == TK::Int || (k->op == Op::Box && k->kids[0]->type.k == TK::Int);
+    }
+    // What the non-integer path of an inline (Int|Any) comparison does:
+    //   SLOW_CALL  both sides dynamic: descriptor helper
+    //   SLOW_FALSE / SLOW_TRUE  one side is an integer, the other is not: Eq / Ne
+    //              are decided (different kinds are never equal)
+    //   SLOW_ERR   ... and Cmp raises Invalid comparison
+    //   SLOW_NONE  both integers: no slow path
+    enum { SLOW_NONE, SLOW_CALL, SLOW_FALSE, SLOW_TRUE, SLOW_ERR };
+    int slow_kind(const Node* n) {
+        bool sa = static_int(n->kids[0]), sb = static_int(n->kids[1]);
+        if (sa && sb) return SLOW_NONE;
+        if (!sa && !sb) return SLOW_CALL;
+        if (n->op == Op::Eq) return SLOW_FALSE;
+        if (n->op == Op::Ne) return SLOW_TRUE;
+        return SLOW_ERR;
+    }
+    // Evaluates the kids, branches to `slow` when an operand is not an integer,
+    // then compares the tagged words (flags for f.c).
+    FastCmp fast_cmp(const Node* n, Label slow) {
         V k[2];
         eval_kids(n, 0, 2, k);
         Type ta = n->kids[0]->type, tb = n->kids[1]->type;
@@ -1559,23 +1580,23 @@ public:
         f.c = cond_of(c);
         f.a = boxed_of(ta, k[0]);
         f.b = boxed_of(tb, k[1]);
-        f.slow = A->new_label();
-        f.cont = A->new_label();
-        bool aa = ta.k == TK::Any, ab = tb.k == TK::Any;
-        if (f.a.k == V::IMM && f.b.k == V::IMM) {
-            // both constant ints (cannot happen for Any): compare words directly
+        f.slow = slow;
+        bool ca = !static_int(n->kids[0]), cb = !static_int(n->kids[1]);
+        if (f.a.k == V::IMM && !f.a.own) {
+            // keep the constant on the right-hand side
         }
         Reg ra = R(f.a, true);
-        Reg rb = f.b.k == V::IMM ? xzr : R(f.b, true);
-        if (aa && ab) {
+        bool bimm = f.b.k == V::IMM && f.b.imm >= 0 && f.b.imm < 4096;
+        Reg rb = bimm ? xzr : R(f.b, true);
+        if (ca && cb) {
             A->and_(X(16), ra, rb);
-            A->tbz(X(16), 0, f.slow);
-        } else if (aa) {
-            A->tbz(ra, 0, f.slow);
-        } else if (ab) {
-            A->tbz(rb, 0, f.slow);
+            A->tbz(X(16), 0, slow);
+        } else if (ca) {
+            A->tbz(ra, 0, slow);
+        } else if (cb) {
+            A->tbz(rb, 0, slow);
         }
-        if (f.b.k == V::IMM) A->cmp_imm(ra, f.b.imm);
+        if (bimm) A->cmp(ra, (uint32_t)f.b.imm);
         else A->cmp(ra, rb);
         return f;
     }
@@ -1604,23 +1625,32 @@ public:
             V r = deep_cmp_call(n);
             return r;
         }
-        FastCmp f = fast_cmp(n);
+        int sk = slow_kind(n);
+        Label slow = sk == SLOW_ERR ? err(Err::InvalidCmp) : A->new_label();
+        Label cont = A->new_label();
+        FastCmp f = fast_cmp(n, slow);
         Reg ra = R(f.a, true);
         Reg rb = f.b.k == V::IMM ? X(17) : R(f.b, true);
         int64_t bimm = f.b.k == V::IMM ? f.b.imm : 0;
         bool bimm_p = f.b.k == V::IMM;
         int d = dest(want);
         A->cset(W(d), f.c);
-        A->bind(f.cont);
+        A->bind(cont);
         uint32_t save = live_caller_saved(bit(d));
         save &= ~bit(d);
-        Label slow = f.slow, cont = f.cont;
-        cold(slow, [=, this]() {
-            if (bimm_p) A->load_imm(X(17), bimm);
-            fast_cmp_slow_call(n, ra, rb, save);
-            A->mov(W(d), W(16));
-            A->b(cont);
-        });
+        if (sk == SLOW_CALL) {
+            cold(slow, [=, this]() {
+                if (bimm_p) A->load_imm(X(17), bimm);
+                fast_cmp_slow_call(n, ra, rb, save);
+                A->mov(W(d), W(16));
+                A->b(cont);
+            });
+        } else if (sk == SLOW_FALSE || sk == SLOW_TRUE) {
+            cold(slow, [=, this]() {
+                A->movz(W(d), sk == SLOW_TRUE ? 1 : 0);
+                A->b(cont);
+            });
+        }
         release(f.a);
         release(f.b);
         return result(d, want);
@@ -2203,14 +2233,20 @@ public:
             A->cneg(W(d), W(16), LT);
         }
         A->bind(cont);
-        uint32_t save = live_caller_saved(bit(d));
+        // not an integer: a list (length / pop, as epq_dyn_abs / epq_dyn_neg), else error
         cold(slow, [=, this]() {
-            save_regs(save);
-            A->mov(X(0), x);
-            call_helper(neg ? H_DYN_NEG : H_DYN_ABS);
-            A->mov(X(16), X(0));
-            restore_regs(save);
-            A->mov(X(d), X(16));
+            A->tst(x, (uint64_t)3);
+            A->b(NE, err(Err::IntOrList));
+            if (neg) {
+                A->ldr(W(16), mem(x, 8));
+                A->cbz(W(16), err(Err::ListEmpty));
+                A->sub(W(16), W(16), 1u);
+                A->str(W(16), mem(x, 8));
+                A->ldr(X(17), mem(x, 0));
+                A->ldr(X(d), memr(X(17), W(16), UXTW, true));
+            } else {
+                A->ldr(W(d), mem(x, 8));
+            }
             A->b(cont);
         });
         return result(d, want);
@@ -2392,22 +2428,29 @@ public:
                 return;
             }
             if (cmp_inline(n)) {
-                FastCmp f = fast_cmp(n);
+                int sk = slow_kind(n);
+                Label cont = A->new_label();
+                Label slow = sk == SLOW_ERR ? err(Err::InvalidCmp)
+                           : sk == SLOW_FALSE ? (sense ? cont : target)
+                           : sk == SLOW_TRUE ? (sense ? target : cont)
+                           : A->new_label();
+                FastCmp f = fast_cmp(n, slow);
                 A->b(sense ? f.c : invert(f.c), target);
-                A->bind(f.cont);
+                A->bind(cont);
                 Reg ra = R(f.a, true);
                 Reg rb = f.b.k == V::IMM ? X(17) : R(f.b, true);
                 int64_t bimm = f.b.k == V::IMM ? f.b.imm : 0;
                 bool bimm_p = f.b.k == V::IMM;
                 uint32_t save = live_caller_saved(0);
-                Label cont = f.cont;
-                cold(f.slow, [=, this]() {
-                    if (bimm_p) A->load_imm(X(17), bimm);
-                    fast_cmp_slow_call(n, ra, rb, save);
-                    if (sense) A->cbnz(W(16), target);
-                    else A->cbz(W(16), target);
-                    A->b(cont);
-                });
+                if (sk == SLOW_CALL) {
+                    cold(slow, [=, this]() {
+                        if (bimm_p) A->load_imm(X(17), bimm);
+                        fast_cmp_slow_call(n, ra, rb, save);
+                        if (sense) A->cbnz(W(16), target);
+                        else A->cbz(W(16), target);
+                        A->b(cont);
+                    });
+                }
                 release(f.a);
                 release(f.b);
                 return;
