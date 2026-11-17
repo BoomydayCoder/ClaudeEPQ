@@ -1085,6 +1085,7 @@ public:
     // cannot fail and has the same value in every iteration: it is computed
     // once before the loop (first test included) into a pseudo-local.
     bool no_hoist_ = false;
+    bool no_madd_ = false;
     std::vector<std::pair<const Node*, uint32_t>> hoist_pending_;
     std::unordered_map<const Node*, uint32_t> hoist_mark_;
     std::unordered_map<const Node*, std::vector<std::pair<const Node*, uint32_t>>> hoists_;
@@ -1887,8 +1888,55 @@ public:
         *c = (int32_t)k->a;
         return true;
     }
+    // a*b + c / c + a*b -> madd, c - a*b -> msub (kids evaluated in tree order)
+    bool fusable_mul(const Node* m) {
+        if (m->op != Op::MulI32) return false;
+        if (!hoist_mark_.empty() && !hoist_eval_ && I(m).hoist >= 0) return false;
+        for (int i = 0; i < 2; ++i)
+            if (m->kids[i]->op == Op::ConstInt && !I(m->kids[i]).cref) return false;  // shifts / mul_imm instead
+        return true;
+    }
+    V mul_add(const Node* n, int want) {
+        bool mul_first = n->op == Op::AddI32 && fusable_mul(n->kids[0]);
+        const Node* m = mul_first ? n->kids[0] : n->kids[1];
+        V a, b, c;
+        if (mul_first) {
+            a = expr(m->kids[0]);
+            hold(a, m, 1, 1);
+            hold(a, n, 1, 1);
+            b = expr(m->kids[1]);
+            hold(b, n, 1, 1);
+            c = expr(n->kids[1]);
+        } else {
+            c = expr(n->kids[0]);
+            hold(c, n, 1, 1);
+            a = expr(m->kids[0]);
+            hold(a, m, 1, 1);
+            b = expr(m->kids[1]);
+        }
+        bool sub = n->op == Op::SubI32;
+        if (a.k == V::IMM || b.k == V::IMM) {
+            V pr = arith_vals(Op::MulI32, a, b, -1);
+            return sub ? arith_vals(Op::SubI32, c, pr, want) : arith_vals(Op::AddI32, pr, c, want);
+        }
+        Reg ra = R(a, false), rb = R(b, false);
+        Reg rc = (c.k == V::IMM && (int32_t)c.imm == 0) ? wzr : R(c, false);
+        release(a);
+        release(b);
+        release(c);
+        int d = dest(want);
+        if (sub) A->msub(W(d), ra, rb, rc);
+        else A->madd(W(d), ra, rb, rc);
+        return result(d, want);
+    }
     V arith(const Node* n, int want) {
         if (!hoist_mark_.empty() && !hoist_eval_ && I(n).hoist >= 0) return read_local((uint32_t)I(n).hoist);
+        if (!no_madd_ && ((n->op == Op::AddI32 && (fusable_mul(n->kids[0]) || fusable_mul(n->kids[1]))) ||
+                          (n->op == Op::SubI32 && fusable_mul(n->kids[1])))) {
+            const Node* x;
+            int32_t c;
+            if (!is_srem(n, &x, &c)) return mul_add(n, want);
+        }
         {
             const Node* x;
             int32_t c;
@@ -1907,7 +1955,10 @@ public:
         }
         V k[2];
         eval_kids(n, 0, 2, k);
-        Op op = n->op;
+        return arith_vals(n->op, k[0], k[1], want);
+    }
+    V arith_vals(Op op, V k0, V k1, int want) {
+        V k[2] = {k0, k1};
         if (k[0].k == V::IMM && k[1].k == V::IMM) {
             uint32_t a = (uint32_t)k[0].imm, b = (uint32_t)k[1].imm;
             return V::im((int32_t)(op == Op::AddI32 ? a + b : op == Op::SubI32 ? a - b : a * b));
@@ -4145,6 +4196,7 @@ public:
         getenv_always_dry_ = getenv("EPQ_JIT_ALWAYS_DRY") != nullptr;
         getenv_no_coalesce_ = getenv("EPQ_JIT_NO_COALESCE") != nullptr;
         no_hoist_ = getenv("EPQ_JIT_NO_HOIST") != nullptr;
+        no_madd_ = getenv("EPQ_JIT_NO_MADD") != nullptr;
         no_pushcache_ = getenv("EPQ_JIT_NO_PUSHCACHE") != nullptr;
         getenv_coarse_loops_ = getenv("EPQ_JIT_COARSE_LOOPS") != nullptr;
         for (auto& f : M.funcs) compile_func(*f);

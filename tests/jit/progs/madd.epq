@@ -1,0 +1,9 @@
+// a*b + c, c + a*b, c - a*b (madd / msub) with wrapping, constants and calls in operands.
+f := (x) => { >> x; => x + 1; };
+a := 46341; b := 46342; c := -7;
+>> a * b + c; >> c + a * b; >> c - a * b; >> a * b - c;
+>> f(a) * f(b) + f(c); >> f(c) - f(a) * f(b); >> f(1) + f(2) * f(3);
+s := 0; t := 1;
+(i := 0; i < 100; i := i + 1;) @ { s := s * 1664525 + i * t; t := t - i * s; }
+>> s; >> t;
+>> 3 * 4 + a; >> a - 2 * 3; >> (a + 1) * 5 + b * c;
