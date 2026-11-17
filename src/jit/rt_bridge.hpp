@@ -22,4 +22,7 @@ uint64_t jrt_call_dyn(uint64_t f, int32_t n, const uint64_t* args);
 void* jrt_alloc_slow(size_t n);
 char** jrt_bump_ptr(void);
 char** jrt_bump_end_ptr(void);
+void** jrt_fl_small_ptr(void);
+int32_t jrt_poison_on(void);
+void jrt_list_free(void* l, uint32_t esz);
 }

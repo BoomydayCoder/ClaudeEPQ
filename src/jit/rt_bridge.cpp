@@ -46,5 +46,8 @@ uint64_t jrt_call_dyn(uint64_t f, int32_t n, const uint64_t* args) { return epq_
 void* jrt_alloc_slow(size_t n) { return epq_alloc_slow(n); }
 char** jrt_bump_ptr(void) { return &epq_bump; }
 char** jrt_bump_end_ptr(void) { return &epq_bump_end; }
+void** jrt_fl_small_ptr(void) { return epq_fl_small; }
+int32_t jrt_poison_on(void) { return epq_poison_on(); }
+void jrt_list_free(void* l, uint32_t esz) { epq_list_free(static_cast<EList*>(l), esz); }
 
 }  // extern "C"

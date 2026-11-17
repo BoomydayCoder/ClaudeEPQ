@@ -317,9 +317,7 @@ int run_module(tir::Module& M, const Options& opts_in) {
         jc.dump_asm = opts.dump_asm;
         jc.stats = opts.jit_stats;
         jc.verbose = opts.verbose;
-        if (opts.verbose)
-            std::fprintf(stderr, "epq: infer %llu us, build %llu us, passes %llu us\n", (unsigned long long)(Ti - T0),
-                         (unsigned long long)(Tb - Ti), (unsigned long long)(T1 - Tb));
+        if (opts.verbose) std::fprintf(stderr, "epq: passes %llu us\n", (unsigned long long)(T1 - Tb));
         return jitcg::run(M, jc);
     }
     std::string c = emit_c(M);

@@ -92,6 +92,7 @@ enum Helper : int {
     H_DYN_ABS,
     H_CALL_DYN,
     H_ALLOC_SLOW,
+    H_LIST_FREE,
     H_COUNT
 };
 
@@ -111,12 +112,13 @@ const void* helper_addr(int h) {
     case H_DYN_ABS: return (const void*)&jrt_dyn_abs;
     case H_CALL_DYN: return (const void*)&jrt_call_dyn;
     case H_ALLOC_SLOW: return (const void*)&jrt_alloc_slow;
+    case H_LIST_FREE: return (const void*)&jrt_list_free;
     }
     return nullptr;
 }
 const char* helper_name(int h) {
     static const char* n[] = {"rt_fail", "rt_print_int", "rt_print", "rt_read_int", "rt_list_new", "rt_list_grow",
-                              "rt_eq", "rt_lt", "rt_eq_li", "rt_lt_li", "rt_dyn_neg", "rt_dyn_abs", "rt_call_dyn", "rt_alloc_slow"};
+                              "rt_eq", "rt_lt", "rt_eq_li", "rt_lt_li", "rt_dyn_neg", "rt_dyn_abs", "rt_call_dyn", "rt_alloc_slow", "rt_list_free"};
     return n[h];
 }
 
@@ -177,7 +179,7 @@ struct LocalInfo {
     std::vector<Ref> refs;
 };
 
-bool is64(Type t) { return t.k == TK::List || t.k == TK::Any; }
+bool is64(Type t) { return t.k == TK::List || t.k == TK::Any || t.k == TK::Pair || t.k == TK::Ptr; }
 
 Cond cond_of(Op o) {
     switch (o) {
@@ -220,6 +222,8 @@ public:
     uint32_t bump_off = 0;   // data: &epq_bump (runtime bump pointer; end follows it)
     uint32_t fntab_off = 0;  // data: per DefId {int32 arity, pad, u64 direct generic entry}
     bool bump_adjacent = false;
+    uint32_t fl_off = 0;     // data: &epq_fl_small[0]
+    bool poison = false;     // EPQ_POISON_FREED=1: never inline frees / free-list reuse
 
     std::vector<Label> func_label;
     Label helper_label[H_COUNT];
@@ -489,7 +493,7 @@ public:
         case Op::ListLit: return !lit_inline(n);
         case Op::Eq:
         case Op::Ne:
-        case Op::Cmp: return !cmp_inline(n);
+        case Op::Cmp: return !cmp_inline(n) && !pair_pair(n);
         default: return false;
         }
     }
@@ -544,6 +548,11 @@ public:
             kid(0, depth);
             push_ctx();
             kid(1, depth);
+            pop_ctx();
+            break;
+        case Op::InlineBlock:
+            push_ctx();
+            kid(0, depth);
             pop_ctx();
             break;
         case Op::CallDirect: {
@@ -612,11 +621,28 @@ public:
             for (uint32_t i = 0; i < n->nkids; ++i) da(n->kids[i], b);
             set_all(b);
             return;
+        case Op::InlineBlock: {
+            Bits ex(b.size(), ~0ull);
+            da_blocks.push_back({n->a, &ex});
+            da(n->kids[0], b);
+            da_blocks.pop_back();
+            band(b, ex);
+            return;
+        }
+        case Op::Break:
+            for (size_t i = da_blocks.size(); i-- > 0;)
+                if (da_blocks[i].first == n->a) {
+                    band(*da_blocks[i].second, b);
+                    break;
+                }
+            set_all(b);
+            return;
         default:
             for (uint32_t i = 0; i < n->nkids; ++i) da(n->kids[i], b);
             return;
         }
     }
+    std::vector<std::pair<int32_t, Bits*>> da_blocks;
 
     void analyze() {
         info.clear();
@@ -1007,7 +1033,55 @@ public:
         case Op::If:
         case Op::While:
         case Op::Return:
-        case Op::Print: stmt(n); return V::none();
+        case Op::Print:
+        case Op::InlineBlock:
+        case Op::Break:
+        case Op::Free:
+        case Op::Nop: stmt(n); return V::none();
+        case Op::Select: return select(n, want);
+        case Op::PairMake: return pair_make(n, want);
+        case Op::PairFirst: {
+            V v = expr(n->kids[0]);
+            if (v.k == V::IMM) return V::im((int32_t)((uint64_t)v.imm >> 32));
+            Reg s = R(v, true);
+            release(v);
+            int d = dest(want);
+            A->lsr(X(d), s, 32);
+            return result(d, want);
+        }
+        case Op::PairSecond: {
+            V v = expr(n->kids[0]);
+            if (v.k == V::IMM) return V::im((int32_t)((uint32_t)v.imm ^ 0x80000000u));
+            Reg s = R(v, false);
+            release(v);
+            int d = dest(want);
+            A->eor(W(d), s, (uint64_t)0x80000000u);
+            return result(d, want);
+        }
+        case Op::PairIndex: return pair_index(n, want);
+        case Op::PairEq:
+        case Op::PairNe:
+        case Op::PairLt:
+        case Op::PairLe:
+        case Op::PairGt:
+        case Op::PairGe:
+        case Op::SameList: {
+            Cond c = cmp64(n);
+            int d = dest(want);
+            A->cset(W(d), c);
+            return result(d, want);
+        }
+        case Op::ListData: {
+            V l = expr(n->kids[0]);
+            Reg x = R(l, true);
+            release(l);
+            int d = dest(want);
+            A->ldr(X(d), mem(x, 0));
+            return result(d, want);
+        }
+        case Op::ElemLoad: return elem_load(n, want);
+        case Op::ElemStore: return elem_store(n);
+        case Op::CheckIndex: return check_index(n);
         }
         bug("unknown op");
     }
@@ -1233,7 +1307,7 @@ public:
                 }
             }
         }
-        bool xs = tx == TK::List || tx == TK::Fn, ys = ty == TK::List || ty == TK::Fn;
+        bool xs = tx == TK::List || tx == TK::Fn || tx == TK::Pair, ys = ty == TK::List || ty == TK::Fn || ty == TK::Pair;
         if (xs || ys) {
             release(k[0]);
             release(k[1]);
@@ -1417,7 +1491,19 @@ public:
         A->mov(W(16), W(0));
         restore_regs(save);
     }
+    bool pair_pair(const Node* n) { return n->kids[0]->type.k == TK::Pair && n->kids[1]->type.k == TK::Pair; }
     V deep_cmp_value(const Node* n, int want) {
+        if (pair_pair(n)) {
+            V k[2];
+            eval_kids(n, 0, 2, k);
+            Reg a = R(k[0], true), b = R(k[1], true);
+            A->cmp(a, b);
+            release(k[0]);
+            release(k[1]);
+            int d = dest(want);
+            A->cset(W(d), cond_of(n->op == Op::Cmp ? (Op)n->c : n->op == Op::Eq ? Op::EqI32 : Op::NeI32));
+            return result(d, want);
+        }
         if (!cmp_inline(n)) {
             V r = deep_cmp_call(n);
             return r;
@@ -1454,7 +1540,7 @@ public:
         return (b + 15) & ~15u;
     }
     bool lit_inline(const Node* n) {
-        return bump_adjacent && 16 + lit_bytes(n->nkids, esz_of(n->type.a)) < 4096;
+        return bump_adjacent && 16 + lit_bytes(n->nkids, esz_of(n->type.a)) <= 512;
     }
     V list_lit(const Node* n) {
         uint32_t r = n->type.a;
@@ -1470,12 +1556,21 @@ public:
             uint32_t cap = bytes / esz, cnt = n->nkids;
             int d = talloc();
             uint32_t lo;
+            Label slow = A->new_label(), cont = A->new_label(), bump = A->new_label();
+            // size-class free list first (epq_alloc), then the bump pointer
+            data_addr(X(16), fl_off, &lo);
+            A->ldr(X(16), mem(X(16), lo));
+            A->ldr(X(d), mem(X(16), 8 * (total >> 4)));
+            A->cbz(X(d), bump);
+            A->ldr(X(17), mem(X(d), 0));
+            A->str(X(17), mem(X(16), 8 * (total >> 4)));
+            A->b(cont);
+            A->bind(bump);
             data_addr(X(16), bump_off, &lo);
             A->ldr(X(16), mem(X(16), lo));
             A->ldp(X(d), X(17), mem(X(16), 0));
             A->sub(X(17), X(17), X(d));
             A->cmp(X(17), total);
-            Label slow = A->new_label(), cont = A->new_label();
             A->b(LO, slow);
             A->add(X(17), X(d), total);
             A->str(X(17), mem(X(16), 0));
@@ -1754,6 +1849,246 @@ public:
         return V::reg(dr, true);
     }
 
+    // ---- extension ops
+    // 64-bit compare of two values (Pair order / list identity); returns the condition.
+    Cond cmp64(const Node* n) {
+        V k[2];
+        eval_kids(n, 0, 2, k);
+        Cond c;
+        switch (n->op) {
+        case Op::PairEq: c = EQ; break;
+        case Op::PairNe: c = NE; break;
+        case Op::PairLt: c = LT; break;
+        case Op::PairLe: c = LE; break;
+        case Op::PairGt: c = GT; break;
+        case Op::PairGe: c = GE; break;
+        default: c = EQ; break;  // SameList
+        }
+        if (k[0].k == V::IMM && k[1].k != V::IMM) {
+            std::swap(k[0], k[1]);
+            c = swap_cond(c);
+        }
+        Reg a = R(k[0], true);
+        if (k[1].k == V::IMM && k[1].imm >= 0 && k[1].imm < 4096) {
+            A->cmp(a, (uint32_t)k[1].imm);
+        } else {
+            Reg b = R(k[1], true);
+            A->cmp(a, b);
+        }
+        release(k[0]);
+        release(k[1]);
+        return c;
+    }
+    // Pure condition -> flags (returns the condition that means "true").
+    Cond cond_flags(const Node* c) {
+        switch (c->op) {
+        case Op::PairEq: case Op::PairNe: case Op::PairLt: case Op::PairLe: case Op::PairGt: case Op::PairGe:
+        case Op::SameList: return cmp64(c);
+        case Op::EqI32: case Op::NeI32: case Op::LtI32: case Op::LeI32: case Op::GtI32: case Op::GeI32: {
+            V fold;
+            Cond cc;
+            if (!cmp_i32(c, &cc, &fold)) return cc;
+            A->cmp(wzr, 0u);  // Z set
+            return fold.imm ? EQ : NE;
+        }
+        case Op::NotI32: return invert(cond_flags(c->kids[0]));
+        default: break;
+        }
+        V v = expr(c);
+        Reg r = R(v, false);
+        A->cmp(r, 0u);
+        release(v);
+        return NE;
+    }
+    V select(const Node* n, int want) {
+        Type t = n->type;
+        bool x64 = is64(t);
+        const Node* c = n->kids[0];
+        if (c->op == Op::ConstInt) return expr(c->a ? n->kids[1] : n->kids[2], want);
+        if (t.k == TK::Fn) return V::none();
+        V k[2];
+        k[0] = expr(n->kids[1]);
+        k[1] = expr(n->kids[2]);
+        auto reg_or_zr = [&](V& v) -> Reg {
+            if (v.k == V::IMM && v.imm == 0) return x64 ? xzr : wzr;
+            return R(v, x64);
+        };
+        Reg a = reg_or_zr(k[0]);
+        Reg b = reg_or_zr(k[1]);
+        Cond cc = cond_flags(c);
+        release(k[0]);
+        release(k[1]);
+        int d = dest(want);
+        A->csel(x64 ? X(d) : W(d), a, b, cc);
+        return result(d, want);
+    }
+    V pair_make(const Node* n, int want) {
+        V k[2];
+        eval_kids(n, 0, 2, k);
+        if (k[0].k == V::IMM && k[1].k == V::IMM)
+            return V::im((int64_t)(((uint64_t)(uint32_t)k[0].imm << 32) | ((uint32_t)k[1].imm ^ 0x80000000u)));
+        if (k[1].k == V::IMM) {
+            Reg a = R(k[0], true);
+            release(k[0]);
+            int d = dest(want);
+            A->lsl(X(d), a, 32);
+            uint32_t lo = (uint32_t)k[1].imm ^ 0x80000000u;
+            if (lo) {
+                A->load_imm(X(16), lo);
+                A->orr(X(d), X(d), X(16));
+            }
+            return result(d, want);
+        }
+        Reg b = R(k[1], false);
+        A->eor(W(16), b, (uint64_t)0x80000000u);
+        if (k[0].k == V::IMM) {
+            release(k[1]);
+            int d = dest(want);
+            A->load_imm(X(17), (int64_t)((uint64_t)(uint32_t)k[0].imm << 32));
+            A->orr(X(d), X(16), X(17));
+            return result(d, want);
+        }
+        Reg a = R(k[0], true);
+        release(k[0]);
+        release(k[1]);
+        int d = dest(want);
+        A->orr(X(d), X(16), a, LSL, 32);
+        return result(d, want);
+    }
+    V pair_index(const Node* n, int want) {
+        V k[2];
+        eval_kids(n, 0, 2, k);
+        if (k[1].k == V::IMM) {
+            int32_t i = (int32_t)k[1].imm;
+            if (i != 0 && i != 1) {
+                release(k[0]);
+                A->b(err(Err::IndexOOB));
+                return V::im(0);
+            }
+            if (k[0].k == V::IMM)
+                return V::im(i ? (int32_t)((uint32_t)k[0].imm ^ 0x80000000u) : (int32_t)((uint64_t)k[0].imm >> 32));
+            Reg p = R(k[0], true);
+            release(k[0]);
+            int d = dest(want);
+            if (i) A->eor(W(d), p.w(), (uint64_t)0x80000000u);
+            else A->lsr(X(d), p, 32);
+            return result(d, want);
+        }
+        Reg p = R(k[0], true);
+        Reg i = R(k[1], false);
+        A->cmp(i, 1u);
+        A->b(HI, err(Err::IndexOOB));
+        A->lsr(X(16), p, 32);
+        A->eor(W(17), p.w(), (uint64_t)0x80000000u);
+        release(k[0]);
+        release(k[1]);
+        int d = dest(want);
+        A->csel(W(d), W(17), W(16), EQ);
+        return result(d, want);
+    }
+    Mem elem_at(Reg base, V& i, uint32_t esz) {
+        if (i.k == V::IMM) return mem(base, (int64_t)(int32_t)i.imm * esz);
+        return memr(base, W(i.r), SXTW, true);
+    }
+    V elem_load(const Node* n, int want) {
+        V k[2];
+        eval_kids(n, 0, 2, k);
+        uint32_t esz = esz_of(n->kids[0]->type.a);
+        Reg d0 = R(k[0], true);
+        if (k[1].k != V::IMM) R(k[1], false);
+        Mem m = elem_at(d0, k[1], esz);
+        release(k[0]);
+        release(k[1]);
+        if (n->type.k == TK::Fn) return V::none();
+        int d = dest(want);
+        A->ldr(esz == 4 ? W(d) : X(d), m);
+        return result(d, want);
+    }
+    V elem_store(const Node* n) {
+        V k[3];
+        eval_kids(n, 0, 3, k);
+        uint32_t esz = esz_of(n->kids[0]->type.a);
+        Type vt = n->kids[2]->type;
+        V w = esz == 8 ? word_of(vt, k[2]) : k[2];
+        Reg d0 = R(k[0], true);
+        if (k[1].k != V::IMM) R(k[1], false);
+        Reg s = (w.k == V::IMM && w.imm == 0) ? (esz == 8 ? xzr : wzr) : R(w, esz == 8);
+        A->str(s, elem_at(d0, k[1], esz));
+        release(k[0]);
+        release(k[1]);
+        if (vt.k == TK::Fn) {
+            release(w);
+            return V::none();
+        }
+        return w;  // Int (esz 4) or List/Any/Pair: the word is the value
+    }
+    V check_index(const Node* n) {
+        V k[2];
+        eval_kids(n, 0, 2, k);
+        if (k[0].k == V::IMM && k[1].k == V::IMM) {
+            if ((uint32_t)k[0].imm >= (uint32_t)k[1].imm) A->b(err(Err::IndexOOB));
+            return k[0];
+        }
+        if (k[0].k == V::IMM) {
+            int32_t c = (int32_t)k[0].imm;
+            Reg len = R(k[1], false);
+            if (c < 0) {
+                A->b(err(Err::IndexOOB));
+            } else {
+                A->cmp_imm(len, c);
+                A->b(LS, err(Err::IndexOOB));
+            }
+            release(k[1]);
+            return k[0];
+        }
+        Reg i = R(k[0], false);
+        if (k[1].k == V::IMM) A->cmp_imm(i, (int32_t)k[1].imm);
+        else A->cmp(i, R(k[1], false));
+        A->b(HS, err(Err::IndexOOB));
+        release(k[1]);
+        return k[0];
+    }
+    void free_list(const Node* n) {
+        V v = expr(n->kids[0]);
+        uint32_t esz = esz_of(n->kids[0]->type.a);
+        Reg l = R(v, true);
+        Label slow = A->new_label(), cont = A->new_label();
+        if (!poison) {
+            // inline-buffer list of a small size class: push its block on the free list
+            A->ldr(X(16), mem(l, 0));
+            A->add(X(17), l, 16u);
+            A->cmp(X(16), X(17));
+            A->b(NE, slow);
+            A->ldr(W(16), mem(l, 12));
+            A->lsl(W(16), W(16), esz == 4 ? 2 : 3);
+            A->add(W(16), W(16), 16u);
+            A->and_(W(16), W(16), (uint64_t)~15u);
+            A->cmp(W(16), 512u);
+            A->b(HI, slow);
+            A->lsr(W(16), W(16), 1);  // class * 8
+            uint32_t lo;
+            data_addr(X(17), fl_off, &lo);
+            A->ldr(X(17), mem(X(17), lo));
+            A->add(X(17), X(17), X(16));
+            A->ldr(X(16), mem(X(17), 0));
+            A->str(X(16), mem(l, 0));
+            A->str(l, mem(X(17), 0));
+        } else {
+            A->b(slow);
+        }
+        A->bind(cont);
+        uint32_t save = live_caller_saved(0);
+        cold(slow, [=, this]() {
+            save_regs(save);
+            A->mov(X(0), l);
+            A->movz(W(1), esz);
+            call_helper(H_LIST_FREE);
+            restore_regs(save);
+            A->b(cont);
+        });
+        release(v);
+    }
+
     V dyn_neg_abs(const Node* n, int want) {
         bool neg = n->op == Op::DynNeg;
         V v = expr(n->kids[0]);
@@ -1921,9 +2256,31 @@ public:
             A->b(sense ? c : invert(c), target);
             return;
         }
+        case Op::PairEq:
+        case Op::PairNe:
+        case Op::PairLt:
+        case Op::PairLe:
+        case Op::PairGt:
+        case Op::PairGe:
+        case Op::SameList: {
+            Cond c = cmp64(n);
+            A->b(sense ? c : invert(c), target);
+            return;
+        }
         case Op::Eq:
         case Op::Ne:
         case Op::Cmp:
+            if (pair_pair(n)) {
+                V k[2];
+                eval_kids(n, 0, 2, k);
+                Reg a = R(k[0], true), b = R(k[1], true);
+                A->cmp(a, b);
+                release(k[0]);
+                release(k[1]);
+                Cond c = cond_of(n->op == Op::Cmp ? (Op)n->c : n->op == Op::Eq ? Op::EqI32 : Op::NeI32);
+                A->b(sense ? c : invert(c), target);
+                return;
+            }
             if (cmp_inline(n)) {
                 FastCmp f = fast_cmp(n);
                 A->b(sense ? f.c : invert(f.c), target);
@@ -2062,12 +2419,31 @@ public:
             }
             return;
         }
+        case Op::InlineBlock: {
+            Label end = A->new_label();
+            blocks.push_back({n->a, end});
+            stmt(n->kids[0]);
+            blocks.pop_back();
+            A->bind(end);
+            return;
+        }
+        case Op::Break: {
+            for (size_t i = blocks.size(); i-- > 0;)
+                if (blocks[i].first == n->a) {
+                    A->b(blocks[i].second);
+                    return;
+                }
+            bug("Break outside its InlineBlock");
+        }
+        case Op::Free: free_list(n); return;
+        case Op::Nop: return;
         default:
             if (tir::is_pure(n)) return;
             discard_value(n);
             return;
         }
     }
+    std::vector<std::pair<int32_t, Label>> blocks;
 
     // ------------------------------------------------------------------ functions
     void reset_body_state() {
@@ -2290,7 +2666,9 @@ public:
         for (size_t g = 0; g < G; ++g) gdef_off[g] = (uint32_t)(off++);
         off = (off + 15) & ~(size_t)15;
         bump_off = (uint32_t)off;
-        off += 16;
+        off += 8;
+        fl_off = (uint32_t)off;
+        off += 8;
         fntab_off = (uint32_t)off;
         off += 16 * M.defs.size();
         data_size = (off + 16383) & ~(size_t)16383;
@@ -2305,6 +2683,9 @@ public:
         char** bp = jrt_bump_ptr();
         bump_adjacent = jrt_bump_end_ptr() == bp + 1;
         std::memcpy(data + bump_off, &bp, 8);
+        void** flp = jrt_fl_small_ptr();
+        std::memcpy(data + fl_off, &flp, 8);
+        poison = jrt_poison_on() != 0;
         for (size_t g = 0; g < G; ++g) {
             if (M.globals[g].type.k == TK::Any) {
                 uint64_t one = 1;
