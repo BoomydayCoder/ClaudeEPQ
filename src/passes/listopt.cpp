@@ -125,6 +125,17 @@ struct LO {
             if (b->op == Op::Local && (size_t)b->a < uniq.size() && uniq[(size_t)b->a]) return false;
             return true;
         }
+        case Op::Reserve: case Op::AppendRange: {  // integration (appendopt): header of kid 0's list, like Append
+            const Node* b = x->kids[0];          // (no cache reload after them, so a direct base always kills)
+            if (b->type.k != TK::List || b->type.a != c.r) return false;
+            if (is_base_local(b, c.L)) return true;
+            if (u) return false;
+            if (b->op == Op::Local && (size_t)b->a < uniq.size() && uniq[(size_t)b->a]) return false;
+            return true;
+        }
+        case Op::DynIsEmptyList:  // integration: litcmp / records ops never change a list header
+        case Op::RecLit: case Op::RecNull: case Op::RecGet: case Op::RecSet: case Op::RecLen:
+            return false;
         case Op::CallDirect: {
             if (u) return false;
             const Func& g = *m.funcs[(size_t)x->a];

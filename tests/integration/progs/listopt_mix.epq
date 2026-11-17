@@ -1,0 +1,34 @@
+// listopt x records x appendopt x recur x inline: cached headers vs. other mutators
+l := [1, 2, 3];
+r := [0, l];
+s := 0;
+(i := 0; i < |l|; i := i + 1;) @ {
+  s := s + l[i];
+  (i = 1) ? r[1] :+ 10;
+  (i = 3) ? x := -r[1];
+}
+>> s;
+>> l;
+>> r;
+// bulk copy into a cached list, then index past its old end
+dst := [7];
+src := [1, 2, 3, 4, 5];
+t := dst[0];
+(k := 0; k < |src|; k := k + 1;) @ dst :+ src[k];
+>> dst[5] + t + |dst|;
+(q := 0; q < |dst|; q := q + 1;) @ dst[q] := dst[q] * 2;
+>> dst;
+// tail-call loop popping its list argument while indexing it
+drain := (lst, a2) => { (|lst| = 0) ? => a2; v := lst[|lst| - 1]; y := -lst; => drain(lst, a2 * 3 + v + y); };
+>> drain([4, 5, 6, 7], 0);
+// inlined popper inside a cached loop
+shrink := (z) => { => -z; };
+w := [9, 8, 7, 6, 5];
+acc := 0;
+(j := 0; j < |w|; j := j + 1;) @ { acc := acc + w[j]; (w[j] > 6) ? shrink(w); }
+>> acc;
+>> w;
+// pop through a record field, then read the aliased local
+rr := [w, 1];
+(m := 0; m < 2; m := m + 1;) @ { h := w[0]; y2 := -rr[0]; >> h + |w|; }
+>> w[|w| - 1];
