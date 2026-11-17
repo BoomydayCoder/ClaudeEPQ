@@ -1,0 +1,6 @@
+// Any-typed elements (mixed ints and lists)
+m := [1, [2], 3, [[4]], 5];
+l := [0, []];
+(i := 0; i < 5; i := i + 1;) @ { l :+ m[i]; }
+>> l;
+>> |l|;

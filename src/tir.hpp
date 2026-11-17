@@ -230,6 +230,21 @@ enum class Op : uint8_t {
     Free,       // [l: List(r)]                            statement
     SameList,   // [a: List, b: List] -> Int               pointer identity
     Nop,        // statement
+    // ---- appendopt (src/passes/appendopt.cpp) -----------------------------------
+    // Both ops MUTATE THE HEADER OF l's REGION LIKE Append (other passes: treat them
+    // exactly as an Append to kid 0 — any cached data pointer / length of a list of
+    // that region is stale afterwards). Neither ever touches m's header or any
+    // element of any list other than l's new slots.
+    Reserve,    // [l: List(r), n: Int]  statement. Capacity hint: afterwards cap(l) >=
+                // len(l) + min(max(n, 0), 2^26). Never changes len or contents, never
+                // fails; does nothing if l is NULL (never-assigned local). May MOVE l's
+                // data buffer (frees the old out-of-line buffer like Append's growth).
+    AppendRange,// [l: List(r), m: List(r2), lo: Int, hi: Int] -> Int; elem(r) == elem(r2).
+                // After evaluating the kids: if hi <= lo: does nothing, value 1. Else if
+                // l and m are non-NULL, l != m, 0 <= lo and hi <= len(m): appends
+                // m[lo..hi) to l (bitwise element copy; may move l's data buffer; len(l)
+                // += hi - lo), value 1. Otherwise does nothing, value 0. Never fails.
+                // The pass uses it as If(AppendRange(...), <set loop var>, <original loop>).
 };
 const char* op_name(Op o);
 
@@ -342,7 +357,7 @@ struct Module {
 // No side effects and cannot fail (constants, locals, unchecked globals, pure
 // integer arithmetic of such, Box/Len of such).
 bool is_pure(const Node* n);
-bool is_stmt_op(Op o);  // Seq If While Return Print InlineBlock Break Free Nop
+bool is_stmt_op(Op o);  // Seq If While Return Print InlineBlock Break Free Nop Reserve
 // Element type of a List(r) / Ptr(r) type.
 inline Type elem_of(const Module& m, Type t) { return m.regions[t.a].elem; }
 std::string type_str(const Module& m, Type t);

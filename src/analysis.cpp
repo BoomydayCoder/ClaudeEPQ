@@ -32,6 +32,8 @@ struct Walk {
         switch (n->op) {
         case Op::Append:
         case Op::Pop:
+        case Op::Reserve:      // appendopt: mutate kid 0's header like Append
+        case Op::AppendRange:  // appendopt
             add_mut(F, n->kids[0]->type.a);
             M.regions[n->kids[0]->type.a].header_mutated = true;
             break;
@@ -50,7 +52,9 @@ struct Walk {
         case Op::Local: {
             bool base = parent && idx == 0 &&
                         (parent->op == Op::Index || parent->op == Op::SetIndex || parent->op == Op::Append ||
-                         parent->op == Op::Pop || parent->op == Op::Len);
+                         parent->op == Op::Pop || parent->op == Op::Len ||
+                         parent->op == Op::Reserve || parent->op == Op::AppendRange);  // appendopt
+            if (parent && idx == 1 && parent->op == Op::AppendRange) base = true;  // appendopt: copy source, like an Index base
             bool ret = parent && parent->op == Op::Return;
             if (base || ret) ok_reads[(size_t)n->a]++;
             else bad_reads[(size_t)n->a]++;

@@ -1,0 +1,14 @@
+// 8-byte slots: references are shared exactly as element appends would share them
+m := [[1], [2, 3], [], [4]];
+l := [];
+(i := 0; i < |m|; i := i + 1;) @ { l :+ m[i]; }
+l[1] :+ 99;
+>> m;
+>> l;
+>> l = m;
+d := [[1], [2], [3]];
+e := [[0]];
+(i := 0; i < 3; i := i + 1;) @ { e :+ d[i]; }
+>> e;
+d[1] :+ 5;
+>> e;

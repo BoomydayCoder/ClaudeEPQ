@@ -16,7 +16,7 @@
 //   has_call(n)                 CallDirect / CallDyn anywhere in n
 //   contains_op(n, op)
 //   may_mutate_header(m, n, r)  n may change the header (len/cap/data) of a list of region r:
-//                               Append/Pop on r, Free on r, Dyn{Append,Neg}/CallDyn when r's
+//                               Append/Pop on r, Free on r, Reserve/AppendRange on r (kid 0), Dyn{Append,Neg}/CallDyn when r's
 //                               element type is Any, CallDirect whose callee's summary
 //                               (Func::mutates / mutates_any) covers r. Element stores never do.
 //                               (Summaries are filled by pass_region_info.)
@@ -153,6 +153,7 @@ inline bool may_mutate_header(const Module& m, const Node* n, uint32_t r) {
     walk(n, [&](Node* x, Node*, uint32_t) {
         switch (x->op) {
         case Op::Append: case Op::Pop: case Op::Free:
+        case Op::Reserve: case Op::AppendRange:  // appendopt: header of kid 0's region, like Append
             if (x->kids[0]->type.k == TK::List && x->kids[0]->type.a == r) res = true;
             break;
         case Op::DynAppend: case Op::DynNeg: case Op::CallDyn:
