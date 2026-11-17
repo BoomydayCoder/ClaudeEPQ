@@ -1,0 +1,30 @@
+// a fresh list stored as an element of another (returned) list must survive
+mk := (n) => { a := [n, n + 1]; b := [a]; => b; };
+x := mk(3);
+>> x;
+x[0] :+ 9;
+>> x;
+y := mk(5);
+z := [100, 200, 300, 400];
+>> x;
+>> y;
+>> z;
+// stored with SetIndex and Append into a list that is returned
+mk2 := (n) => { a := [n]; b := [[0], [0]]; b[1] := a; c := [n * 2]; b :+ c; => b; };
+p := mk2(7);
+q := mk2(8);
+w := [1, 2, 3, 4, 5, 6, 7, 8];
+>> p;
+>> q;
+p[1] :+ 1;
+p[2] :+ 2;
+>> p;
+>> q;
+// the value of an assignment expression is the assigned list
+mk3 := () => { a := []; b := [a := [1, 2]]; => b; };
+mk4 := () => { a := []; c := [[0]]; c :+ (a := [3]); => c; };
+mk5 := () => { a := []; b := (a := [4]); => b; };
+u := mk3(); v := mk4(); w := mk5(); s := [9, 9, 9, 9];
+>> [u, v, w];
+u[0] :+ 5; v[1] :+ 6; w :+ 7;
+>> [u, v, w];
