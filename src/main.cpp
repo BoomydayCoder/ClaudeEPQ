@@ -1,6 +1,6 @@
 // ClaudeEPQ command line.
 //
-//   epq [--engine=jit|aot] [-t] [-e] [--parse-only] [--dump-resolved] FILE
+//   epq [--engine=aot|jit|auto] [-t] [-e] [--parse-only] [--dump-resolved] FILE
 //
 // Exit status: 0 ok, 1 syntax / compile / run-time error (as the original),
 // 2 usage error or missing back end.
@@ -32,7 +32,8 @@ void usage(FILE* f, const char* argv0) {
     std::fprintf(f,
                  "Usage: %s [options] FILE        (FILE '-' reads the program from stdin)\n"
                  "Options:\n"
-                 "  --engine=jit|aot   back end (default: jit; the C backend until the JIT exists)\n"
+                 "  --engine=aot|jit|auto  back end: C via cc, cached (default); ARM64 JIT;\n"
+                 "                     auto = JIT, C for programs using ops the JIT lacks\n"
                  "  --emit-c           print the generated C and exit\n"
                  "  --dump-tir         print the typed IR and exit\n"
                  "  --dump-types       print inferred types of globals / instances and exit\n"
@@ -44,6 +45,8 @@ void usage(FILE* f, const char* argv0) {
                  "  --list-passes      list the TIR passes in pipeline order\n"
                  "  --mono             one instance per function (no call-site specialisation)\n"
                  "  --no-dedup         keep identical instances separate\n"
+                 "  --dump-asm         print the JIT's machine code (disassembly) and exit\n"
+                 "  --jit-stats        print JIT compile time and code size to stderr\n"
                  "  --verbose          compile / cache diagnostics on stderr\n"
                  "  -t                 print \"Execution time: N microseconds\" to stderr\n"
                  "  -e                 dump the parsed AST to stderr (format of the original)\n"
@@ -271,6 +274,10 @@ int main(int argc, char** argv) {
             opts.mono = true;
         } else if (!std::strcmp(a, "--no-dedup")) {
             opts.no_dedup = true;
+        } else if (!std::strcmp(a, "--dump-asm")) {
+            opts.dump_asm = true;
+        } else if (!std::strcmp(a, "--jit-stats")) {
+            opts.jit_stats = true;
         } else if (!std::strcmp(a, "--verbose")) {
             opts.verbose = true;
         } else if (!std::strncmp(a, "--no-pass=", 10)) {
@@ -289,6 +296,10 @@ int main(int argc, char** argv) {
             return epq::tir_selftest(a + 15, opts);
         } else if (!std::strcmp(a, "--engine=jit") || !std::strcmp(a, "--jit")) {
             opts.engine = Engine::Jit;
+            opts.jit_mode = 1;
+        } else if (!std::strcmp(a, "--engine=auto")) {
+            opts.engine = Engine::Jit;
+            opts.jit_mode = 2;
         } else if (!std::strcmp(a, "--engine=aot") || !std::strcmp(a, "--aot")) {
             opts.engine = Engine::Aot;
         } else if (a[0] == '-' && a[1] != 0) {

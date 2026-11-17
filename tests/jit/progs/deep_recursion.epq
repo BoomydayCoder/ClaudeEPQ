@@ -1,0 +1,17 @@
+// bounded deep recursion must work (LANGUAGE.md 9.5: at least 10^6)
+sum := (n) => {
+    (n = 0) ? => 0;
+    => n + sum(n - 1);
+};
+>> sum(1000000);
+count := (n, a, b) => {
+    (n = 0) ? => a + b;
+    => count(n - 1, b, a + 1);
+};
+>> count(3000000, 0, 0);
+build := (n, l) => {
+    (n = 0) ? => l;
+    l :+ n;
+    => build(n - 1, l);
+};
+>> |build(2000000, [])|;
