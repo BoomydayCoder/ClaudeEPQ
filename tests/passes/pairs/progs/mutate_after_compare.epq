@@ -1,0 +1,8 @@
+// compare first, mutate later through a different name in a loop
+p := [1, 2];
+q := [1, 2];
+>> p = q;
+r := [p];
+(i := 0; i < 3; i := i + 1;) @ (x : r) @ (i = 2) ? x[1] := 7;
+>> p;
+>> p = q;

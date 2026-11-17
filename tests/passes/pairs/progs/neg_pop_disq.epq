@@ -1,0 +1,9 @@
+// -p on a two-int list is a pop: disqualifies
+p := [1, 2];
+q := [3, 4];
+>> -p;
+>> p;
+>> -p;
+>> p;
+>> q < [3, 5];
+>> -p;

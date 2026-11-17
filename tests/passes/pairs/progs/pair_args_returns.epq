@@ -1,0 +1,16 @@
+// pairs as arguments, returns, globals, for-each variables
+add := (p, q) => { => [p[0] + q[0], p[1] + q[1]]; };
+swp := (p) => { => [p[1], p[0]]; };
+G := [0, 0];
+step := (d) => { G := add(G, d); => G; };
+(i := 0; i < 5; i := i + 1;) @ step([i, 0 - i]);
+>> G;
+>> swp(G);
+>> add(swp(G), G) = [0, 0];
+ps := [[3, 1], [1, 3], [2, 2]];
+best := ps[0];
+(p : ps) @ (swp(p) < swp(best)) ? best := p;
+>> best;
+mxp := (a, b) => { (a > b) ? => a; => b; };
+>> mxp([1, 9], [2, 0]);
+>> mxp([-1, 9], [-1, 10]);

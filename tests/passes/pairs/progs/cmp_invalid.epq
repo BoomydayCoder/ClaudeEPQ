@@ -1,0 +1,6 @@
+// comparing a pair with an int: Invalid comparison (after evaluating both sides)
+p := [1, 2];
+>> 1;
+two := () => { >> 2; => 2; };
+>> two() < p;
+>> 3;
