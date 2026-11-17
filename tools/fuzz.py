@@ -7,7 +7,7 @@ saves and automatically reduces failing cases.
 
   tools/fuzz.py --seed S --count N [--profile clean|mixed|nasty|any]
                 [--engine NAME=CMD ...] [--pyref] [--jobs J] [--timeout T]
-                [--out DIR] [--no-reduce] [--reduce-time SECS]
+                [--out DIR] [--no-reduce] [--reduce-time SECS] [--batch [--batch-chunk N]]
   tools/fuzz.py --self-check --count N [--profile P]     # baseline + pyref only, statistics
   tools/fuzz.py --reduce DIR_OR_FILE [--engine ...]       # reduce an existing failing case
   tools/fuzz.py --emit DIR --seed S --count N             # just write programs (+ .in) to DIR
@@ -113,6 +113,10 @@ def wcase(args):
     engines = _W["engines"]
     src, inp, info = epqgen.generate(seed, profile)
     res, pr = run_all(src, inp, engines, _W["timeout"], _W["pyref"])
+    return verdict(seed, src, inp, info, res, pr, engines)
+
+
+def verdict(seed, src, inp, info, res, pr, engines):
     base = res[engines[0].name]
     out = {"seed": seed, "info": info, "base_class": classify(base), "base_wall": base.wall,
            "lines": src.count("\n")}
@@ -132,6 +136,56 @@ def wcase(args):
             out["outputs"]["pyref"] = {"stdout": pr.stdout, "stderr": pr.stderr, "rc": pr.rc, "status": pr.status}
     out["verdict"] = "fail" if bad else ("suspect" if suspect else "pass")
     return out
+
+
+# --batch: phase 1 in the worker pool (generate, per-process engines, pyref);
+# phase 2 in the parent (every C-backend engine: one `epq --batch` per chunk).
+
+def wcase_pre(args):
+    seed, profile, bdir = args
+    src, inp, info = epqgen.generate(seed, profile)
+    pp = os.path.join(bdir, "s%d.epq" % seed)
+    ip = os.path.join(bdir, "s%d.in" % seed)
+    with open(pp, "w") as f:
+        f.write(src)
+    with open(ip, "w") as f:
+        f.write(inp)
+    # per-process engines only (baseline first); a dict keeps the call shape of run_all
+    res = {}
+    engines = _W["engines"]
+    for i, e in enumerate(engines):
+        t = _W["timeout"] if i == 0 else max(_W["timeout"], 10 * res[engines[0].name].wall + 1)
+        r = epqlib.run_engine(e, pp, stdin_path=ip, timeout=t)
+        res[e.name] = r
+        if i == 0 and (r.timed_out or r.signal is not None or r.truncated):
+            break
+    pr = pyref.run_source_bigstack(src, inp, step_limit=4000000) if _W["pyref"] else None
+    return {"seed": seed, "src": src, "inp": inp, "info": info, "res": res, "pr": pr, "pp": pp, "ip": ip}
+
+
+def batch_cases(a, engines, seeds_profile, ex, bdir):
+    """Yields verdicts for one chunk of (seed, profile) jobs in batch mode."""
+    batch_engs = [e for e in engines[1:] if epqlib.is_batchable(e)]
+    pres = list(ex.map(wcase_pre, [(s, p, bdir) for s, p in seeds_profile], chunksize=2))
+    base = engines[0].name
+    valid = [c for c in pres if not (c["res"][base].timed_out or c["res"][base].signal is not None
+                                     or c["res"][base].truncated)]
+    if valid:
+        t = max([a.timeout] + [10 * c["res"][base].wall + 1 for c in valid])
+        for e in batch_engs:
+            rs = epqlib.run_batch(e, [(c["pp"], c["ip"]) for c in valid], timeout=t, jobs=a.jobs,
+                                  chunk=a.batch_chunk)
+            for c, r in zip(valid, rs):
+                c["res"][e.name] = r
+    for c in pres:
+        try:
+            os.unlink(c["pp"])
+            os.unlink(c["ip"])
+        except OSError:
+            pass
+        # keep the engine order of the report identical to the per-process path
+        res = {e.name: c["res"][e.name] for e in engines if e.name in c["res"]}
+        yield verdict(c["seed"], c["src"], c["inp"], c["info"], res, c["pr"], engines)
 
 
 # ---------------------------------------------------------------------------
@@ -521,9 +575,28 @@ def fuzz(a, engines):
     fails = []
     susp = []
     inval = []
+    if a.batch:
+        per_proc = [engines[0]] + [e for e in engines[1:] if not epqlib.is_batchable(e)]
+        print("batch mode: %s through epq --batch, %d programs per batch"
+              % (", ".join(e.name for e in engines[1:] if epqlib.is_batchable(e)) or "(no C-backend engine)",
+                 a.batch_chunk))
+    else:
+        per_proc = engines
+
+    def results(ex):
+        if not a.batch:
+            yield from ex.map(wcase, jobs_iter(a.seed, a.count, a.profile), chunksize=2)
+            return
+        bdir = os.path.join(TMP, "batch%d" % os.getpid())
+        os.makedirs(bdir, exist_ok=True)
+        allj = list(jobs_iter(a.seed, a.count, a.profile))
+        for c0 in range(0, len(allj), a.batch_chunk):
+            yield from batch_cases(a, engines, allj[c0:c0 + a.batch_chunk], ex, bdir)
+        shutil.rmtree(bdir, ignore_errors=True)
+
     with cf.ProcessPoolExecutor(max_workers=a.jobs, initializer=_winit,
-                                initargs=(engines, a.timeout, a.pyref)) as ex:
-        for r in ex.map(wcase, jobs_iter(a.seed, a.count, a.profile), chunksize=2):
+                                initargs=(per_proc, a.timeout, a.pyref)) as ex:
+        for r in results(ex):
             n += 1
             v = r["verdict"]
             if v == "fail":
@@ -624,6 +697,10 @@ def main(argv=None):
     ap.add_argument("--reduce", metavar="CASE", help="reduce an existing failing case (dir or .epq)")
     ap.add_argument("--suspect", action="store_true", help="with --reduce: keep a pyref-vs-baseline disagreement")
     ap.add_argument("--emit", metavar="DIR", help="only write generated programs to DIR")
+    ap.add_argument("--batch", action="store_true",
+                    help="run C-backend engines through `epq --batch` (one new dylib per chunk instead of one per "
+                         "program; see tools/README.md). The reducer still runs single programs per process")
+    ap.add_argument("--batch-chunk", type=int, default=300, help="programs per epq --batch (default 300)")
     a = ap.parse_args(argv)
     if a.emit:
         return emit(a)
