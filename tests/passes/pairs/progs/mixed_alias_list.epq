@@ -1,0 +1,8 @@
+// two literal sites unified through an outer list; one of them mutated via the outer list
+a := [1, 2];
+b := [3, 4];
+l := [a, b];
+l[0] :+ 5;
+>> a;
+>> b;
+>> l;

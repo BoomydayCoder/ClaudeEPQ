@@ -1,0 +1,18 @@
+// pairs pass should fire: p is an immutable two-int list
+p := [3, -4];
+q := [3, 5];
+>> p;
+>> p[0];
+>> p[1];
+>> |p|;
+>> p = q;
+>> p != q;
+>> p < q;
+>> q < p;
+>> p <= p;
+>> p >= q;
+>> p > q;
+i := 0;
+(i < 2) @ { >> p[i]; i := i + 1; }
+(x : p) @ >> x * 10;
+(p) ? >> 1; : >> 0;

@@ -1,0 +1,5 @@
+// one site with three elements in the same region: not a pair
+mk := (n, a) => { (n) ? => [a, a, a]; => [a, a]; };
+p := mk(0, 1);
+q := mk(1, 2);
+>> p; >> q; >> |p| + |q|; >> p < q; >> q[2];

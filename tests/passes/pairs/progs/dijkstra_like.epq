@@ -1,0 +1,42 @@
+// heap of [cost, v] pairs, adjacency of [v, w] pairs (the dijkstra shape)
+swap := (l, i, j) => { t := l[i]; l[i] := l[j]; l[j] := t; };
+push := (h, v) => {
+  h :+ v; i := |h| - 1;
+  (i > 0) @ { p := (i - 1) / 2; (h[i] >= h[p]) ? => 0; swap(h, i, p); i := p; }
+};
+pop := (h) => {
+  (|h| = 1) ? => -h;
+  m := h[0]; h[0] := -h; i := 0; n := |h|;
+  (1) @ {
+    a := 2 * i + 1; b := a + 1; s := i;
+    (a < n & h[a] < h[s]) ? s := a;
+    (b < n & h[b] < h[s]) ? s := b;
+    (s = i) ? => m;
+    swap(h, i, s); i := s;
+  }
+};
+main := () => {
+N := 40;
+adj := [];
+(i := 0; i < N; i := i + 1;) @ adj :+ [];
+s := 7;
+(e := 0; e < 160; e := e + 1;) @ {
+  s := (s * 1103 + 12345) - ((s * 1103 + 12345) / 65536) * 65536;
+  u := s - (s / N) * N; v := (s / 7) - ((s / 7) / N) * N; w := (s / 3) - ((s / 3) / 97) * 97 - 20;
+  adj[u] :+ [v, w * w]; adj[v] :+ [u, w * w];
+}
+dist := [];
+(i := 0; i < N; i := i + 1;) @ dist :+ -1;
+h := [];
+push(h, [0, 0]);
+(|h| > 0) @ {
+  t := pop(h); d := t[0]; u := t[1];
+  (dist[u] = -1) ? {
+    dist[u] := d;
+    (e : adj[u]) @ (dist[e[0]] = -1) ? push(h, [d + e[1], e[0]]);
+  }
+}
+>> dist;
+>> adj[3];
+};
+main();

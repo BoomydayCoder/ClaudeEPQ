@@ -1,0 +1,15 @@
+// pair compared with a two-element list built by appends (never a pair region)
+p := [1, 2];
+l := [];
+l :+ 1;
+l :+ 2;
+>> p = l;
+>> l = p;
+>> p < l;
+l :+ 0;
+>> p < l;
+>> l < p;
+>> p = l;
+q := [1, 3];
+>> p < q;
+>> [p, q] = [l, q];

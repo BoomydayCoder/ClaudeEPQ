@@ -1,0 +1,9 @@
+// same function body used with a pair-like literal and with a list that is mutated
+id := (x) => { => x; };
+grow := (x) => { x :+ 9; => x; };
+p := id([1, 2]);
+q := grow(id([3, 4]));
+>> p;
+>> q;
+>> p < q;
+>> |p| + |q|;
