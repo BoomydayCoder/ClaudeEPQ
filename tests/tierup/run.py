@@ -82,7 +82,20 @@ def busy(cache):
     t = os.path.join(cache, "tier")
     if not os.path.isdir(t):
         return False
-    return any(n.endswith(".lock") or ".tmp-" in n for n in os.listdir(t))
+    if any(n.endswith(".lock") or ".tmp-" in n for n in os.listdir(t)):
+        return True
+    # A spawned helper that has not taken its lock yet (exec can be slow on a
+    # loaded machine) leaves no file behind: check the logged helper pids.
+    for l in events(cache, "spawn"):
+        try:
+            pid = int(l[1].rsplit(" pid ", 1)[1])
+            os.kill(pid, 0)
+            return True
+        except (IndexError, ValueError, ProcessLookupError):
+            pass
+        except PermissionError:
+            return True
+    return False
 
 
 def wait_idle(cache, limit=300):
