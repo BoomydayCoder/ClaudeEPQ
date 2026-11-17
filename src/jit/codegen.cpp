@@ -91,6 +91,7 @@ enum Helper : int {
     H_DYN_NEG,
     H_DYN_ABS,
     H_CALL_DYN,
+    H_ALLOC_SLOW,
     H_COUNT
 };
 
@@ -109,12 +110,13 @@ const void* helper_addr(int h) {
     case H_DYN_NEG: return (const void*)&jrt_dyn_neg;
     case H_DYN_ABS: return (const void*)&jrt_dyn_abs;
     case H_CALL_DYN: return (const void*)&jrt_call_dyn;
+    case H_ALLOC_SLOW: return (const void*)&jrt_alloc_slow;
     }
     return nullptr;
 }
 const char* helper_name(int h) {
     static const char* n[] = {"rt_fail", "rt_print_int", "rt_print", "rt_read_int", "rt_list_new", "rt_list_grow",
-                              "rt_eq", "rt_lt", "rt_eq_li", "rt_lt_li", "rt_dyn_neg", "rt_dyn_abs", "rt_call_dyn"};
+                              "rt_eq", "rt_lt", "rt_eq_li", "rt_lt_li", "rt_dyn_neg", "rt_dyn_abs", "rt_call_dyn", "rt_alloc_slow"};
     return n[h];
 }
 
@@ -215,6 +217,9 @@ public:
     size_t data_size = 0;
     std::vector<uint32_t> gval_off, gdef_off;
     bool data_near = false;
+    uint32_t bump_off = 0;   // data: &epq_bump (runtime bump pointer; end follows it)
+    uint32_t fntab_off = 0;  // data: per DefId {int32 arity, pad, u64 direct generic entry}
+    bool bump_adjacent = false;
 
     std::vector<Label> func_label;
     Label helper_label[H_COUNT];
@@ -480,10 +485,8 @@ public:
         case Op::CallDirect:
         case Op::CallDyn:
         case Op::Print:
-        case Op::Input:
-        case Op::ListLit:
-        case Op::DynNeg:
-        case Op::DynAbs: return true;
+        case Op::Input: return true;
+        case Op::ListLit: return !lit_inline(n);
         case Op::Eq:
         case Op::Ne:
         case Op::Cmp: return !cmp_inline(n);
@@ -964,16 +967,8 @@ public:
             return result(d, want);
         }
         case Op::DynArith: return dyn_arith(n, want);
-        case Op::DynNeg: {
-            V v = expr(n->kids[0]);
-            std::vector<Move> mv{{0, v, true}};
-            return helper_call(H_DYN_NEG, mv, true);
-        }
-        case Op::DynAbs: {
-            V v = expr(n->kids[0]);
-            std::vector<Move> mv{{0, v, true}};
-            return helper_call(H_DYN_ABS, mv, true);
-        }
+        case Op::DynNeg:
+        case Op::DynAbs: return dyn_neg_abs(n, want);
         case Op::DynNot: {
             V v = expr(n->kids[0]);
             Reg s = R(v, true);
@@ -1452,12 +1447,54 @@ public:
     // ---- lists
     uint32_t esz_of(uint32_t rg) { return M.elem_is_i32(rg) ? 4 : 8; }
 
+    // epq_list_new(n, esz) sizes (runtime/epq_rt.h)
+    static uint32_t lit_bytes(uint32_t n, uint32_t esz) {
+        uint32_t b = n * esz;
+        if (b < 16) b = 16;
+        return (b + 15) & ~15u;
+    }
+    bool lit_inline(const Node* n) {
+        return bump_adjacent && 16 + lit_bytes(n->nkids, esz_of(n->type.a)) < 4096;
+    }
     V list_lit(const Node* n) {
         uint32_t r = n->type.a;
         uint32_t esz = esz_of(r);
-        check_no_temps("listlit");
-        std::vector<Move> mv{{0, V::im(n->nkids), false}, {1, V::im(esz), false}};
-        V lst = helper_call(H_LIST_NEW, mv, true);
+        V lst;
+        if (!lit_inline(n)) {
+            check_no_temps("listlit");
+            std::vector<Move> mv{{0, V::im(n->nkids), false}, {1, V::im(esz), false}};
+            lst = helper_call(H_LIST_NEW, mv, true);
+        } else {
+            // inline bump allocation (epq_alloc + epq_list_new)
+            uint32_t bytes = lit_bytes(n->nkids, esz), total = 16 + bytes;
+            uint32_t cap = bytes / esz, cnt = n->nkids;
+            int d = talloc();
+            uint32_t lo;
+            data_addr(X(16), bump_off, &lo);
+            A->ldr(X(16), mem(X(16), lo));
+            A->ldp(X(d), X(17), mem(X(16), 0));
+            A->sub(X(17), X(17), X(d));
+            A->cmp(X(17), total);
+            Label slow = A->new_label(), cont = A->new_label();
+            A->b(LO, slow);
+            A->add(X(17), X(d), total);
+            A->str(X(17), mem(X(16), 0));
+            A->bind(cont);
+            A->add(X(17), X(d), 16u);
+            A->load_imm(X(16), (int64_t)(((uint64_t)cap << 32) | cnt));
+            A->stp(X(17), X(16), mem(X(d), 0));
+            uint32_t save = live_caller_saved(bit(d));
+            cold(slow, [=, this]() {
+                save_regs(save);
+                A->movz(W(0), total);
+                call_helper(H_ALLOC_SLOW);
+                A->mov(X(16), X(0));
+                restore_regs(save);
+                A->mov(X(d), X(16));
+                A->b(cont);
+            });
+            lst = V::reg(d, true);
+        }
         for (uint32_t i = 0; i < n->nkids; ++i) {
             hold(lst, n, i, n->nkids - 1);
             const Node* k = n->kids[i];
@@ -1717,6 +1754,37 @@ public:
         return V::reg(dr, true);
     }
 
+    V dyn_neg_abs(const Node* n, int want) {
+        bool neg = n->op == Op::DynNeg;
+        V v = expr(n->kids[0]);
+        Reg x = R(v, true);
+        release(v);
+        int d = dest(want);
+        Label slow = A->new_label(), cont = A->new_label();
+        A->tbz(x, 0, slow);
+        if (neg) {
+            A->and_(X(16), x, ~(uint64_t)1);
+            A->neg(X(16), X(16));
+            A->orr(X(d), X(16), (uint64_t)1);
+        } else {
+            A->asr(X(16), x, 32);
+            A->cmp(W(16), 0u);
+            A->cneg(W(d), W(16), LT);
+        }
+        A->bind(cont);
+        uint32_t save = live_caller_saved(bit(d));
+        cold(slow, [=, this]() {
+            save_regs(save);
+            A->mov(X(0), x);
+            call_helper(neg ? H_DYN_NEG : H_DYN_ABS);
+            A->mov(X(16), X(0));
+            restore_regs(save);
+            A->mov(X(d), X(16));
+            A->b(cont);
+        });
+        return result(d, want);
+    }
+
     // ---- calls
     V call_direct(const Node* n) {
         const Func* callee = M.funcs[(size_t)n->a].get();
@@ -1745,6 +1813,30 @@ public:
 
     V call_dyn(const Node* n) {
         uint32_t na = n->nkids - 1;
+        if (na <= 8) {
+            std::vector<V> v(n->nkids);
+            eval_kids(n, 0, n->nkids, v.data());
+            Reg f = R(v[na], true);
+            A->and_(X(16), f, (uint64_t)3);
+            A->cmp(X(16), 2u);
+            A->b(NE, err(Err::OperandFn));
+            A->lsr(X(16), f, 32);
+            uint32_t lo;
+            data_addr(X(17), fntab_off, &lo);
+            if (lo) A->add(X(17), X(17), lo);
+            A->add(X(17), X(17), X(16), LSL, 4);
+            A->ldr(W(16), mem(X(17), 0));
+            A->cmp(W(16), na);
+            A->b(NE, err(Err::Arity));
+            A->ldr(X(17), mem(X(17), 8));
+            release(v[na]);
+            std::vector<Move> mv;
+            for (uint32_t i = 0; i < na; ++i) mv.push_back(Move{(int)i, v[i], true});
+            parallel_move(mv);
+            check_no_temps("calldyn");
+            A->blr(X(17));
+            return V::reg(talloc_specific(0), true);
+        }
         int base = na ? salloc_n((int)na) : 0;
         V f;
         for (uint32_t i = 0; i < n->nkids; ++i) {
@@ -2193,6 +2285,11 @@ public:
             off += 8;
         }
         for (size_t g = 0; g < G; ++g) gdef_off[g] = (uint32_t)(off++);
+        off = (off + 15) & ~(size_t)15;
+        bump_off = (uint32_t)off;
+        off += 16;
+        fntab_off = (uint32_t)off;
+        off += 16 * M.defs.size();
         data_size = (off + 16383) & ~(size_t)16383;
         if (data_size == 0) data_size = 16384;
         void* hint = region.base() + region.reserved();
@@ -2202,6 +2299,9 @@ public:
         int64_t dist = (int64_t)((uintptr_t)data >> 12) - (int64_t)((uintptr_t)region.base() >> 12);
         int64_t span = (int64_t)(region.reserved() >> 12);
         data_near = dist - span > -(1 << 20) + 16 && dist + span < (1 << 20) - 16;
+        char** bp = jrt_bump_ptr();
+        bump_adjacent = jrt_bump_end_ptr() == bp + 1;
+        std::memcpy(data + bump_off, &bp, 8);
         for (size_t g = 0; g < G; ++g) {
             if (M.globals[g].type.k == TK::Any) {
                 uint64_t one = 1;
@@ -2242,6 +2342,12 @@ public:
             if (wrapper_off[d] >= 0) fns_rt[d].fn = (uint64_t)(uintptr_t)(code + wrapper_off[d]);
         }
         jrt_set_tables(descs_rt.data(), fns_rt.data());
+        for (size_t d = 0; d < M.defs.size(); ++d) {
+            int32_t ar = (int32_t)M.defs[d].arity;
+            uint64_t e = M.defs[d].generic_func >= 0 ? (uint64_t)(uintptr_t)(code + func_off[(size_t)M.defs[d].generic_func]) : 0;
+            std::memcpy(data + fntab_off + 16 * d, &ar, 4);
+            std::memcpy(data + fntab_off + 16 * d + 8, &e, 8);
+        }
         return true;
     }
 };
