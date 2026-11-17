@@ -18,6 +18,7 @@
 #include <string>
 
 #include "backend.hpp"
+#include "batch.hpp"
 #include "frontend.hpp"
 #include "infer.hpp"
 #include "tierup.hpp"  // tier-up hook
@@ -53,6 +54,8 @@ void usage(FILE* f, const char* argv0) {
                  "  --frontend-bench=N run parse..TIR passes N times in process, report per-phase timing\n"
                  "                     (with --parse-only: lex+parse+resolve only)\n"
                  "  --tier-status FILE / --tier-clear   background-compiled cache (src/tierup.hpp)\n"
+                 "  --batch MANIFEST [-j N] [--timeout SEC]\n"
+                 "                     run many programs with one dylib (see src/batch.cpp, tools/README.md)\n"
                  "  -h, --help         this help\n",
                  argv0);
 }
@@ -236,6 +239,10 @@ int frontend_bench(const CompileUnit& src, int iters, const Options& opts) {
 }
 
 int main(int argc, char** argv) {
+    // ---- batch mode (src/batch.cpp) ----
+    for (int i = 1; i < argc; ++i)
+        if (!std::strcmp(argv[i], "--batch") || !std::strncmp(argv[i], "--batch=", 8)) return epq::batch_main(argc, argv);
+    // ---- end batch mode ----
     Options opts;
     int bench_iters = 0;
     bool have_file = false;

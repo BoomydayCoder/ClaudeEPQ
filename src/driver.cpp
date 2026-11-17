@@ -18,6 +18,7 @@
 #include <string>
 
 #include "backend.hpp"
+#include "batch.hpp"
 #include "cgen.hpp"
 #include "infer.hpp"
 #include "tirbuild.hpp"
@@ -97,17 +98,17 @@ int run_cmd(const std::vector<std::string>& args) {
     return WIFEXITED(st) ? WEXITSTATUS(st) : -1;
 }
 
-// Compiles `csrc` into a cached dylib; returns its path or "" on failure.
-std::string compile_cached(const std::string& csrc, bool verbose) {
+// ---- cache key (shared with batch mode, src/batch.cpp) ----
+std::string cc_flags() {
     const char* fl = std::getenv("EPQ_CFLAGS");
-    std::string flags = fl ? fl : kDefaultCFlags;
-    std::string dir;
-    if (const char* d = std::getenv("EPQ_CACHE_DIR"); d && *d) {
-        dir = d;
-    } else {
-        const char* home = std::getenv("HOME");
-        dir = std::string(home ? home : "/tmp") + "/.cache/claude-epq";
-    }
+    return fl ? fl : kDefaultCFlags;
+}
+std::string cache_dir_path() {
+    if (const char* d = std::getenv("EPQ_CACHE_DIR"); d && *d) return d;
+    const char* home = std::getenv("HOME");
+    return std::string(home ? home : "/tmp") + "/.cache/claude-epq";
+}
+std::string cache_hash(const std::string& csrc, const std::string& flags) {
     std::string key = csrc;
     key += '\0';
     key += flags;
@@ -115,7 +116,15 @@ std::string compile_cached(const std::string& csrc, bool verbose) {
     key += kEmitterVersion;
     key += '\0';
     if (const char* np = std::getenv("EPQ_NO_PASS")) key += np;  // (already reflected in csrc; explicit)
-    std::string h = hash_hex(key);
+    return hash_hex(key);
+}
+// ---- end cache key ----
+
+// Compiles `csrc` into a cached dylib; returns its path or "" on failure.
+std::string compile_cached(const std::string& csrc, bool verbose) {
+    std::string flags = cc_flags();
+    std::string dir = cache_dir_path();
+    std::string h = cache_hash(csrc, flags);
     std::string path = dir + "/" + h + ".dylib";
     if (::access(path.c_str(), R_OK) == 0) {
         if (verbose) std::fprintf(stderr, "epq: cache hit %s\n", path.c_str());
@@ -332,6 +341,9 @@ int run_module(tir::Module& M, const Options& opts_in) {
         write_all(1, c);
         return 0;
     }
+    // ---- batch mode (src/batch.cpp): hand the C to the batch parent instead of compiling it ----
+    if (const char* bp = std::getenv(kBatchEmitEnv); bp && *bp) return batch_emit_c(c, bp);
+    // ---- end batch mode ----
     // Engine::Jit falls back to the C backend until the JIT exists.
     std::string path = compile_cached(c, opts.verbose);
     if (path.empty()) return 2;
@@ -360,5 +372,39 @@ int run_module(tir::Module& M, const Options& opts_in) {
     }
     return rc;
 }
+
+// ---- batch mode support (declared in src/batch.hpp, used by src/batch.cpp) ----
+namespace batch {
+std::string cflags() { return cc_flags(); }
+std::string cache_dir() { return cache_dir_path(); }
+std::string hash(const std::string& csrc) { return cache_hash(csrc, cc_flags()); }
+// Same as the tail of run_module: big stack, overflow handler, -t line.
+int run_entry(int (*entry)(void), void (*flush)(void), bool time) {
+    g_flush = flush;
+    uint64_t exec_us = 0;
+    int rc = run_on_big_stack(entry, &exec_us);
+    if (time) {
+        char buf[80];
+        int n = std::snprintf(buf, sizeof buf, "Execution time: %llu microseconds\n", (unsigned long long)exec_us);
+        (void)!::write(2, buf, (size_t)n);
+    }
+    return rc;
+}
+}  // namespace batch
+
+// Child side of batch step A: write the C atomically to `path`, report success.
+int batch_emit_c(const std::string& c, const char* path) {
+    std::string tmp = std::string(path) + ".part";
+    int fd = ::open(tmp.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0) {
+        std::fprintf(stderr, "epq: cannot write %s\n", tmp.c_str());
+        return 2;
+    }
+    write_all(fd, c);
+    ::close(fd);
+    if (::rename(tmp.c_str(), path) != 0) return 2;
+    return 0;
+}
+// ---- end batch mode support ----
 
 }  // namespace epq
