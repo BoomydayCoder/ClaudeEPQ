@@ -100,6 +100,8 @@ enum Helper : int {
     H_EQ_LA,
     H_CMP3_LA,
     H_ALLOC,
+    H_CMP3,
+    H_CMP3_LI,
     H_COUNT
 };
 
@@ -125,13 +127,15 @@ const void* helper_addr(int h) {
     case H_EQ_LA: return (const void*)&jrt_eq_la;
     case H_CMP3_LA: return (const void*)&jrt_cmp3_la;
     case H_ALLOC: return (const void*)&jrt_alloc;
+    case H_CMP3: return (const void*)&jrt_cmp3;
+    case H_CMP3_LI: return (const void*)&jrt_cmp3_li;
     }
     return nullptr;
 }
 const char* helper_name(int h) {
     static const char* n[] = {"rt_fail", "rt_print_int", "rt_print", "rt_read_int", "rt_list_new", "rt_list_grow",
                               "rt_eq", "rt_lt", "rt_eq_li", "rt_lt_li", "rt_dyn_neg", "rt_dyn_abs", "rt_call_dyn", "rt_alloc_slow", "rt_list_free",
-                              "rt_list_reserve", "rt_append_range", "rt_eq_la", "rt_cmp3_la", "rt_alloc"};
+                              "rt_list_reserve", "rt_append_range", "rt_eq_la", "rt_cmp3_la", "rt_alloc", "rt_cmp3", "rt_cmp3_li"};
     return n[h];
 }
 
@@ -1761,6 +1765,142 @@ public:
         Type ta = n->kids[0]->type, tb = n->kids[1]->type;
         return ta.k == TK::List && tb.k == TK::List && M.elem_is_i32(ta.a) && M.elem_is_i32(tb.a);
     }
+    bool rec_rec(const Node* n) {
+        Type ta = n->kids[0]->type, tb = n->kids[1]->type;
+        return ta.k == TK::Rec && tb.k == TK::Rec && (size_t)n->a < M.descs.size() && (size_t)n->b < M.descs.size() &&
+               M.descs[n->a].kind == 5 && M.descs[n->b].kind == 5;
+    }
+    // ---- typed record comparison functions (out of line, emitted after the
+    // program's functions): x0 = a, x1 = b -> w0 (eq: 0/1; three-way: -1/0/1).
+    struct RecStub {
+        bool eq;
+        Type a, b;
+        uint32_t da, db;
+        Label l;
+    };
+    std::vector<RecStub> rec_stubs_;
+    Label rec_stub(bool eq, Type a, Type b, uint32_t da, uint32_t db) {
+        if (dry) return dummy;
+        for (auto& s : rec_stubs_)
+            if (s.eq == eq && s.a == a && s.b == b && s.da == da && s.db == db) return s.l;
+        rec_stubs_.push_back(RecStub{eq, a, b, da, db, main_as.new_label()});
+        return rec_stubs_.back().l;
+    }
+    void emit_rec_stubs() {
+        for (size_t i = 0; i < rec_stubs_.size(); ++i) {
+            RecStub st = rec_stubs_[i];
+            A->align(8);
+            A->bind(st.l);
+            syms.push_back({A->pos(), std::string(st.eq ? "rec_eq" : "rec_cmp3") + std::to_string(i)});
+            emit_rec_stub(st);
+        }
+    }
+    void emit_rec_stub(const RecStub& st) {
+        const tir::Region& ra = M.regions[st.a.a];
+        const tir::Region& rb = M.regions[st.b.a];
+        uint32_t ka = ra.rec_len, kb = rb.rec_len;
+        bool dyn = ra.nullable || rb.nullable;
+        Label lneg = A->new_label(), lpos = A->new_label(), lzero = A->new_label(), lone = A->new_label(),
+              lret = A->new_label(), lanull = A->new_label(), linv = A->new_label();
+        A->stp(X(29), X(30), pre(sp, -32));
+        A->stp(X(19), X(20), mem(sp, 16));
+        A->mov(X(19), X(0));
+        A->mov(X(20), X(1));
+        if (dyn) {
+            A->cbz(X(19), lanull);
+            A->cbz(X(20), st.eq ? lzero : lpos);
+        }
+        uint32_t k = std::min(ka, kb);
+        bool skip_fields = st.eq && ka != kb;
+        auto generic = [&](int h, uint32_t fda, uint32_t fdb, uint32_t off) {
+            A->ldr(X(1), mem(X(19), off));
+            A->ldr(X(3), mem(X(20), off));
+            li(W(0), fda);
+            li(W(2), fdb);
+            call_helper(h);
+        };
+        for (uint32_t j = 0; j < k && !skip_fields; ++j) {
+            Type fa = ra.fields[j], fb = rb.fields[j];
+            uint32_t fda = M.descs[st.da + 1 + j].elem, fdb = M.descs[st.db + 1 + j].elem;
+            uint32_t off = 8 * j;
+            bool ia = fa.is_int_like(), ib = fb.is_int_like();
+            if (ia && ib) {
+                A->ldr(W(0), mem(X(19), off));
+                A->ldr(W(1), mem(X(20), off));
+                A->cmp(W(0), W(1));
+                if (st.eq) {
+                    A->b(NE, lzero);
+                } else {
+                    A->b(LT, lneg);
+                    A->b(GT, lpos);
+                }
+            } else if (fa.k == TK::Any || fb.k == TK::Any) {
+                generic(st.eq ? H_EQ : H_CMP3, fda, fdb, off);
+                if (st.eq) A->cbz(W(0), lzero);
+                else A->cbnz(W(0), lret);
+            } else if (fa.k == TK::Fn || fb.k == TK::Fn) {
+                if (!st.eq) A->b(linv);
+                else if (!(fa.k == TK::Fn && fb.k == TK::Fn && fa.a == fb.a)) A->b(lzero);
+            } else if (fa.k == TK::Pair && fb.k == TK::Pair) {
+                A->ldr(X(0), mem(X(19), off));
+                A->ldr(X(1), mem(X(20), off));
+                A->cmp(X(0), X(1));
+                if (st.eq) {
+                    A->b(NE, lzero);
+                } else {
+                    A->b(LT, lneg);
+                    A->b(GT, lpos);
+                }
+            } else if (ia || ib) {  // an int against a list
+                A->b(st.eq ? lzero : linv);
+            } else if (fa.k == TK::Pair || fb.k == TK::Pair) {
+                generic(st.eq ? H_EQ : H_CMP3, fda, fdb, off);
+                if (st.eq) A->cbz(W(0), lzero);
+                else A->cbnz(W(0), lret);
+            } else if (fa.k == TK::List && fb.k == TK::List && M.elem_is_i32(fa.a) && M.elem_is_i32(fb.a)) {
+                A->ldr(X(0), mem(X(19), off));
+                A->ldr(X(1), mem(X(20), off));
+                call_helper(st.eq ? H_EQ_LI : H_CMP3_LI);
+                if (st.eq) A->cbz(W(0), lzero);
+                else A->cbnz(W(0), lret);
+            } else if (fa.k == TK::Rec && fb.k == TK::Rec && M.descs[fda].kind == 5 && M.descs[fdb].kind == 5) {
+                Label sub = rec_stub(st.eq, fa, fb, fda, fdb);
+                A->ldr(X(0), mem(X(19), off));
+                A->ldr(X(1), mem(X(20), off));
+                A->bl(sub);
+                if (st.eq) A->cbz(W(0), lzero);
+                else A->cbnz(W(0), lret);
+            } else {
+                generic(st.eq ? H_EQ : H_CMP3, fda, fdb, off);
+                if (st.eq) A->cbz(W(0), lzero);
+                else A->cbnz(W(0), lret);
+            }
+        }
+        // all compared positions equal
+        if (st.eq) A->b(ka == kb ? lone : lzero);
+        else A->b(ka > kb ? lpos : ka < kb ? lneg : lzero);
+        if (dyn) {  // a is null (the empty list)
+            A->bind(lanull);
+            A->cbz(X(20), st.eq ? lone : lzero);
+            A->b(st.eq ? lzero : lneg);
+        }
+        A->bind(lneg);
+        A->movn(W(0), 0);
+        A->b(lret);
+        A->bind(lpos);
+        A->bind(lone);
+        A->movz(W(0), 1);
+        A->b(lret);
+        A->bind(lzero);
+        A->movz(W(0), 0);
+        A->bind(lret);
+        A->ldp(X(19), X(20), mem(sp, 16));
+        A->ldp(X(29), X(30), post(sp, 32));
+        A->ret();
+        A->bind(linv);
+        A->movz(W(0), (uint32_t)Err::InvalidCmp);
+        A->b(ext_helper(H_FAIL));
+    }
     bool la_fast(const Node* n) {
         Type ta = n->kids[0]->type, tb = n->kids[1]->type;
         return ta.k == TK::List && tb.k == TK::List && M.regions[ta.a].elem.k == TK::Any && M.regions[tb.a].elem.k == TK::Any;
@@ -1772,6 +1912,23 @@ public:
         Op c = n->op == Op::Cmp ? (Op)n->c : n->op;
         bool swap = c == Op::GtI32 || c == Op::LeI32;
         bool neg = n->op == Op::Ne || c == Op::LeI32 || c == Op::GeI32;
+        if (rec_rec(n)) {  // records: typed comparison function (as the C backend's epq_rq / epq_rc)
+            bool eq = n->op == Op::Eq || n->op == Op::Ne;
+            Label st = rec_stub(eq, n->kids[0]->type, n->kids[1]->type, (uint32_t)n->a, (uint32_t)n->b);
+            std::initializer_list<Move> mv{{0, k[0], true}, {1, k[1], true}};
+            hc_moves_.assign(mv.begin(), mv.end());
+            parallel_move(hc_moves_);
+            check_no_temps("record compare");
+            A->bl(st);
+            V r = V::reg(talloc_specific(0), true);
+            if (eq) {
+                if (n->op == Op::Ne) A->eor(W(0), W(0), (uint64_t)1);
+            } else {
+                A->cmp(W(0), 0u);
+                A->cset(W(0), cond_of(c));
+            }
+            return r;
+        }
         if (la_fast(n)) {  // litcmp: epq_eq_la / epq_cmp3_la(a, b) <op> 0, as the C backend
             if (n->op == Op::Eq || n->op == Op::Ne) {
                 std::initializer_list<Move> mv{{0, k[0], true}, {1, k[1], true}};
@@ -3456,6 +3613,7 @@ public:
         getenv_no_coalesce_ = getenv("EPQ_JIT_NO_COALESCE") != nullptr;
         for (auto& f : M.funcs) compile_func(*f);
         F = nullptr;
+        emit_rec_stubs();
         emit_wrappers();
         emit_helper_stubs();
         patch_calls();
