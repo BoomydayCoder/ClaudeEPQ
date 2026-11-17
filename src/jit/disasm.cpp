@@ -45,17 +45,15 @@ std::string disassemble(const void* code, size_t bytes,
     const uint8_t* p = static_cast<const uint8_t*>(code);
     for (size_t i = 0; i < bytes; i += 4) {
         auto [a, b] = at.equal_range(i);
-        for (auto it = a; it != b; ++it) fprintf(f, "%s:\n", it->second.c_str());
+        for (auto it = a; it != b; ++it) fprintf(f, ".globl %s\n%s:\n", it->second.c_str(), it->second.c_str());
         uint32_t w;
         std::memcpy(&w, p + i, 4);
         fprintf(f, "  .long 0x%08x\n", w);
     }
     fclose(f);
-    char adj[64];
-    snprintf(adj, sizeof adj, "--adjust-vma=0x%llx", (unsigned long long)base_addr);
     std::string q = "'" + std::string(d.data()) + "'";
     std::string out = run_capture("clang -c -x assembler " + q + "/code.s -o " + q + "/code.o 2>&1 && "
-                                  "objdump -d --no-show-raw-insn " + std::string(adj) + " " + q + "/code.o 2>&1");
+                                  "objdump -d --no-show-raw-insn " + q + "/code.o 2>&1");
     unlink(s.c_str());
     unlink(o.c_str());
     rmdir(d.data());
@@ -63,7 +61,17 @@ std::string disassemble(const void* code, size_t bytes,
     size_t k = out.find("Disassembly of section");
     if (k == std::string::npos) return "disassembly failed: " + out;
     size_t nl = out.find('\n', k);
-    return nl == std::string::npos ? out : out.substr(nl + 1);
+    out = nl == std::string::npos ? out : out.substr(nl + 1);
+    // objdump names offset 0 after the section-start symbol "ltmp0"; use ours.
+    auto first = at.find(0);
+    if (first != at.end())
+        for (size_t i; (i = out.find("ltmp0")) != std::string::npos;) out.replace(i, 5, first->second);
+    if (base_addr) {
+        char hdr[64];
+        snprintf(hdr, sizeof hdr, "; offsets relative to 0x%llx\n", (unsigned long long)base_addr);
+        out = hdr + out;
+    }
+    return out;
 }
 
 } // namespace jit

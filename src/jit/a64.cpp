@@ -316,9 +316,7 @@ void Assembler::cmp_imm(Reg n, int64_t v) {
     Reg z = zr(n);
     if (v >= 0 && v < 4096) { addsub_imm(1, 1, z, n, uint32_t(v), false); return; }
     if (v >= 0 && (v & 0xfff) == 0 && v < (1 << 24)) { addsub_imm(1, 1, z, n, uint32_t(v >> 12), true); return; }
-    // cmn would give identical N/Z/V but a different C flag, so only for v != min
-    // and only through the register form below when the caller needs carry; we
-    // keep it exact: use cmn only when -v is small (C differs only for v == 0).
+    // cmn n, #-v sets exactly the same NZCV as cmp n, #v for v != 0 (tested).
     if (v < 0 && v > -4096) { addsub_imm(0, 1, z, n, uint32_t(-v), false); return; }
     if (n.id == 16 && !n.is_sp) fatal("cmp_imm: source may not be x16");
     Reg t = n.x ? X(16) : W(16);

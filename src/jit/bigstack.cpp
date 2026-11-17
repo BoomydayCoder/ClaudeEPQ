@@ -1,5 +1,6 @@
 #include "bigstack.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <csignal>
 #include <cstring>
@@ -87,7 +88,7 @@ void install_overflow_handler() {
 }
 
 bool BigStack::create(size_t max_bytes, size_t guard) {
-    for (size_t sz = max_bytes; sz >= (size_t(1) << 30); sz /= 2) {
+    for (size_t sz = max_bytes, lo = std::min(max_bytes, size_t(4) << 30); sz >= lo; sz /= 2) {
         void* p = mmap(nullptr, sz, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON | MAP_NORESERVE, -1, 0);
         if (p == MAP_FAILED) continue;
         if (mprotect(p, guard, PROT_NONE) != 0) { munmap(p, sz); return false; }

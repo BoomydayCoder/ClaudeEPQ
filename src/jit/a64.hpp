@@ -148,6 +148,7 @@ public:
     void neg(Reg d, Reg m, Shift sh = LSL, int amt = 0) { sub(d, zr(d), m, sh, amt); }
     void negs(Reg d, Reg m, Shift sh = LSL, int amt = 0) { subs(d, zr(d), m, sh, amt); }
     // Any constant (mod 2^width); uses x16/w16 when it cannot be encoded directly.
+    // With set_flags / cmp_imm, NZCV is exactly that of adds/subs by the constant.
     void add_imm(Reg d, Reg n, int64_t v, bool set_flags = false);
     void sub_imm(Reg d, Reg n, int64_t v, bool set_flags = false) { add_imm(d, n, -v, set_flags); }
     void cmp_imm(Reg n, int64_t v);
@@ -301,6 +302,8 @@ public:
     void call_abs(const void* fn);  // movz/movk x16 + blr x16
 
     void nop() { emit(0xD503201Fu); }
+    void mrs_nzcv(Reg t) { emit(0xD53B4200u | rz(t.xr())); }
+    void msr_nzcv(Reg t) { emit(0xD51B4200u | rz(t.xr())); }
     void brk(uint32_t imm16) { emit(0xD4200000u | (imm16 & 0xffff) << 5); }
     void udf(uint32_t imm16) { emit(imm16 & 0xffff); }
 

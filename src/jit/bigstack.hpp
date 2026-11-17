@@ -1,8 +1,10 @@
 // A very large, lazily committed stack for generated code.
 //
-// create() reserves the largest size it can (64 GB down to 4 GB) with an
-// anonymous PROT_READ|WRITE mapping; the kernel commits pages only when touched,
-// so the reservation is nearly free. The lowest `guard` bytes are PROT_NONE.
+// create() reserves `max_bytes` (halving down to 4 GB on failure) with an
+// anonymous PROT_READ|WRITE mapping; the kernel commits pages only when touched.
+// The kernel grants up to 16 TB, but the reservation cost grows ~1-2 us per GB
+// (page-table setup), so the default is 16 GB (~20 us; 250M 64-byte frames).
+// The lowest `guard` bytes are PROT_NONE.
 // run() switches sp to the top of the stack, calls fn(arg), switches back.
 //
 // Overflow: a SIGSEGV/SIGBUS handler running on an alternate signal stack
@@ -10,7 +12,9 @@
 // of a live BigStack; if so it calls the overflow callback (which must not
 // return: the runtime prints "Stack overflow" and _exit(1)s). Any other fault is
 // handed to the previously installed handler / default action, so it crashes
-// normally. Generated frames must be smaller than the guard (no stack probing).
+// normally. Generated frames must be smaller than the guard (1 MB; no stack
+// probing). At exit, prefer _exit / skip the destructor: munmap of a large
+// reservation costs about as much as creating it.
 #pragma once
 #include <cstddef>
 #include <cstdint>
@@ -22,7 +26,7 @@ using OverflowCallback = void (*)();
 class BigStack {
 public:
     // Reserve the largest stack available up to `max_bytes`; false on failure.
-    bool create(size_t max_bytes = size_t(64) << 30, size_t guard = size_t(16) << 20);
+    bool create(size_t max_bytes = size_t(16) << 30, size_t guard = size_t(1) << 20);
     ~BigStack();
 
     // Run fn(arg) on this stack (on the calling thread) and return its result.
