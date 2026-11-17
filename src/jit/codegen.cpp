@@ -2753,11 +2753,42 @@ public:
         if (v->op == Op::Local && L[(size_t)v->a].x64 != is64(F->ret)) return nullptr;
         return v;
     }
+    // Body tail `If(c, T, {}); Return(v)` with simple c and v: `if (!c) return v`
+    // runs before the prologue, and the body then starts with T (c known true).
+    const Node* tail_return_value(uint32_t k) {
+        const Node* b = F->body;
+        if (b->nkids != k + 2) return nullptr;
+        const Node* s = b->kids[k];
+        const Node* r = b->kids[k + 1];
+        if (s->op != Op::If || r->op != Op::Return) return nullptr;
+        const Node* e = s->kids[2];
+        if (!(e->op == Op::Seq && e->nkids == 0)) return nullptr;
+        if (!simple_param_expr(s->kids[0], true)) return nullptr;
+        if (F->ret.k == TK::Fn || F->ret.k == TK::Bot) return nullptr;
+        const Node* v = r->kids[0];
+        if (!simple_param_expr(v, false)) return nullptr;
+        if (v->op == Op::Local && L[(size_t)v->a].x64 != is64(F->ret)) return nullptr;
+        return v;
+    }
+    bool tail_if_true_ = false;  // body statement `skip` is an If whose condition is known true
+    void early_ret(V r, bool x64) {
+        if (r.k == V::IMM) {
+            if (x64) li(X(0), r.imm);
+            else li(W(0), (int32_t)r.imm);
+        } else {
+            Reg src = R(r, x64);
+            if (src.id != 0) A->mov(x64 ? X(0) : W(0), src);
+        }
+        release(r);
+        A->ret();
+    }
     uint32_t early_returns() {
+        tail_if_true_ = false;
         if (F->is_main || !hot_calls || F->body->op != Op::Seq) return 0;
         uint32_t k = 0;
         while (k < F->body->nkids && early_return_value(F->body->kids[k])) ++k;
-        if (!k) return 0;
+        const Node* tail = tail_return_value(k);
+        if (!k && !tail) return 0;
         early_ = true;
         uint32_t argregs = 0;
         for (size_t i = 0; i < F->params.size() && i < 8; ++i) argregs |= bit((int)i);
@@ -2784,6 +2815,13 @@ public:
             A->ret();
             A->bind(skip);
         }
+        if (tail) {
+            Label go = A->new_label();
+            branch(F->body->kids[k]->kids[0], true, go);
+            early_ret(expr(tail), x64);
+            A->bind(go);
+            tail_if_true_ = true;
+        }
         early_ = false;
         temp_free = temp_pool;
         return k;
@@ -2794,7 +2832,10 @@ public:
         uint32_t skip = early_returns();
         emit_prologue();
         entry_moves();
-        if (skip) {
+        if (tail_if_true_) {
+            stmt(F->body->kids[skip]->kids[1]);
+            for (uint32_t i = skip + 1; i < F->body->nkids; ++i) stmt(F->body->kids[i]);
+        } else if (skip) {
             for (uint32_t i = skip; i < F->body->nkids; ++i) stmt(F->body->kids[i]);
         } else {
             stmt(F->body);

@@ -26,3 +26,17 @@ ack := (m, n) => {
 };
 >> ack(2, 3);
 >> ack(3, 3);
+// tail shape: `(c) ? { ... }  => v;` -- `if (!c) return v` before the frame
+tak := (x, y, z) => {
+    (y < x) ? => tak(tak(x - 1, y, z), tak(y - 1, z, x), tak(z - 1, x, y));
+    => z;
+};
+>> tak(12, 6, 3);
+cnt := 0;
+adj := (a, b) => {
+    (a > b) ? { cnt := cnt + 1; a := adj(a - 7, b) + 100; }
+    => a - b;
+};
+>> adj(50, 3);
+>> adj(1, 3);
+>> cnt;
