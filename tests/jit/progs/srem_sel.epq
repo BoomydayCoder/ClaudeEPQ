@@ -1,0 +1,18 @@
+// x - x / c * c (inlined mod) as srem / bit tests; one comparison feeding several selects.
+mod := (a, b) => { => a - b * (a / b); };
+vals := [0, 1, -1, 7, -7, 8, -8, 2147483647, -2147483647 - 1, 12345, -12345, 65536, -65537];
+(v : vals) @ {
+  >> [mod(v, 2), mod(v, -2), mod(v, 8), mod(v, -16), mod(v, 1), mod(v, -1), mod(v, 7), mod(v, -2147483647 - 1), mod(v, 65537)];
+  x := v;
+  (x - x / 2 * 2 = 0) ? >> 1; : >> 0;
+  (x - x / 4 * 4 != 0) ? >> 11; : >> 10;
+  (x - x / -8 * -8 = 0) ? >> 21; : >> 20;
+  (x - x / 3 * 3 = 0) ? >> 31; : >> 30;
+}
+best := 0; bi := 0; bj := 5; s := 0;
+(i := 0; i < 40; i := i + 1;) @ {
+  w := mod(i * 7919, 41);
+  (w > best) ? { best := w; bi := i; bj := 0; }
+  s := s + best * 3 + bi + bj;
+}
+>> [best, bi, bj, s];

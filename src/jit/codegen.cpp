@@ -1652,8 +1652,40 @@ public:
 
     // ---- integer arithmetic
     static int32_t wrap(int64_t v) { return (int32_t)(uint32_t)(uint64_t)v; }
+    // x - (x / c) * c (the inlined `mod`) with x a local and c a non-zero constant
+    static bool is_srem(const Node* n, const Node** x, int32_t* c) {
+        if (n->op != Op::SubI32) return false;
+        const Node* a = n->kids[0];
+        const Node* m = n->kids[1];
+        if (a->op != Op::Local || m->op != Op::MulI32) return false;
+        const Node* d = m->kids[0];
+        const Node* k = m->kids[1];
+        if (d->op != Op::DivI32) std::swap(d, k);
+        if (d->op != Op::DivI32 || k->op != Op::ConstInt) return false;
+        if (d->kids[0]->op != Op::Local || d->kids[0]->a != a->a) return false;
+        if (d->kids[1]->op != Op::ConstInt || d->kids[1]->a != k->a || (int32_t)k->a == 0) return false;
+        *x = a;
+        *c = (int32_t)k->a;
+        return true;
+    }
     V arith(const Node* n, int want) {
         if (!hoist_mark_.empty() && !hoist_eval_ && I(n).hoist >= 0) return read_local((uint32_t)I(n).hoist);
+        {
+            const Node* x;
+            int32_t c;
+            if (is_srem(n, &x, &c)) {
+                V v = expr(x);
+                if (v.k == V::IMM) {
+                    int32_t a = (int32_t)v.imm;
+                    return V::im(c == -1 ? 0 : a % c);
+                }
+                Reg r = R(v, false);
+                release(v);
+                int d = dest(want);
+                A->srem_imm(W(d), r, c);
+                return result(d, want);
+            }
+        }
         V k[2];
         eval_kids(n, 0, 2, k);
         Op op = n->op;
@@ -2601,20 +2633,64 @@ public:
         default: return false;
         }
     }
-    bool fuse_cond_select(const Node* a, const Node* b) {
-        if (a->op != Op::SetLocal || b->op != Op::SetLocal) return false;
+    // Returns how many statements after kids[i] were consumed (0: no fusion).
+    // One select: its a/b may be any pure expressions (evaluated before the
+    // comparison). Several selects on the same t: a/b must be locals or
+    // constants (their evaluation leaves the flags alone); one comparison.
+    static bool is_sel_of(const Node* b, int32_t t, bool simple) {
+        if (b->op != Op::SetLocal) return false;
         const Node* sel = b->kids[0];
-        if (sel->op != Op::Select || sel->kids[0]->op != Op::Local || sel->kids[0]->a != a->a || sel->type.k == TK::Fn) return false;
+        if (sel->op != Op::Select || sel->kids[0]->op != Op::Local || sel->kids[0]->a != t || sel->type.k == TK::Fn) return false;
+        if (b->a == t) return false;
+        if (!simple) return true;
+        for (int j = 1; j <= 2; ++j)
+            if (sel->kids[j]->op != Op::Local && sel->kids[j]->op != Op::ConstInt) return false;
+        return true;
+    }
+    uint32_t fuse_cond_select(const Node* seq, uint32_t i) {
+        const Node* a = seq->kids[i];
+        if (a->op != Op::SetLocal) return 0;
         const Node* c = a->kids[0];
-        if (!flag_cond_op(c->op) || !calm(c)) return false;
+        if (!flag_cond_op(c->op) || !calm(c)) return 0;
         uint32_t t = (uint32_t)a->a;
         const LocalInfo& l = L[t];
-        if (l.alias >= 0 || l.param || l.needs_init || l.refs.size() != 2 || l.fn) return false;
-        if (canon((uint32_t)b->a) == t) return false;
-        select_cond_ = c;
-        stmt(b);
-        select_cond_ = nullptr;
-        return true;
+        if (l.alias >= 0 || l.param || l.needs_init || l.fn) return 0;
+        uint32_t cnt = 0;
+        while (i + 1 + cnt < seq->nkids && is_sel_of(seq->kids[i + 1 + cnt], (int32_t)t, true)) ++cnt;
+        if (cnt >= 2 && l.refs.size() == 1 + cnt) {
+            for (uint32_t j = 0; j < cnt; ++j)
+                if (canon((uint32_t)seq->kids[i + 1 + j]->a) == t) return 0;
+            Cond cc = cond_flags(c);
+            for (uint32_t j = 0; j < cnt; ++j) {
+                const Node* b = seq->kids[i + 1 + j];
+                const Node* sel = b->kids[0];
+                bool x64 = is64(sel->type);
+                uint32_t x = canon((uint32_t)b->a);
+                V k[2] = {expr(sel->kids[1]), expr(sel->kids[2])};
+                auto reg_or_zr = [&](V& v) -> Reg {
+                    if (v.k == V::IMM && v.imm == 0) return x64 ? xzr : wzr;
+                    return R(v, x64);
+                };
+                Reg ra = reg_or_zr(k[0]);
+                Reg rb = reg_or_zr(k[1]);
+                release(k[0]);
+                release(k[1]);
+                if (L[x].fn) continue;
+                int d = L[x].reg >= 0 ? L[x].reg : talloc();
+                A->csel(x64 ? X(d) : W(d), ra, rb, cc);
+                if (L[x].reg < 0) store_local(x, V::reg(d, true));
+            }
+            return cnt;
+        }
+        if (i + 1 < seq->nkids && is_sel_of(seq->kids[i + 1], (int32_t)t, false) && l.refs.size() == 2) {
+            const Node* b = seq->kids[i + 1];
+            if (canon((uint32_t)b->a) == t) return 0;
+            select_cond_ = c;
+            stmt(b);
+            select_cond_ = nullptr;
+            return 1;
+        }
+        return 0;
     }
     V select(const Node* n, int want) {
         Type t = n->type;
@@ -3072,6 +3148,30 @@ public:
                 release(v);
                 return;
             }
+            const Node* sx;
+            int32_t sc;
+            if ((n->op == Op::EqI32 || n->op == Op::NeI32) && (b->op == Op::ConstInt && b->a == 0) && is_srem(a, &sx, &sc) &&
+                sc != INT32_MIN && ((sc < 0 ? -sc : sc) & ((sc < 0 ? -sc : sc) - 1)) == 0 && (sc < 0 ? -sc : sc) > 1) {
+                // x % 2^k == 0  <=>  low k bits of x are 0 (also for negative x)
+                V v = expr(sx);
+                uint32_t mask = (uint32_t)(sc < 0 ? -sc : sc) - 1;
+                if (v.k == V::IMM) {
+                    bool z = ((uint32_t)v.imm & mask) == 0;
+                    if (z == ((n->op == Op::EqI32) == sense)) A->b(target);
+                    return;
+                }
+                Reg r = R(v, false);
+                bool jz = (n->op == Op::EqI32) == sense;
+                if (mask == 1) {
+                    if (jz) A->tbz(r, 0, target);
+                    else A->tbnz(r, 0, target);
+                } else {
+                    A->tst(r, (uint64_t)mask);
+                    A->b(jz ? EQ : NE, target);
+                }
+                release(v);
+                return;
+            }
             if ((n->op == Op::EqI32 || n->op == Op::NeI32) && (b->op == Op::ConstInt && b->a == 0)) {
                 V v = expr(a);
                 if (v.k == V::IMM) {
@@ -3193,9 +3293,12 @@ public:
         switch (n->op) {
         case Op::Seq:
             for (uint32_t i = 0; i < n->nkids; ++i) {
-                if (i + 1 < n->nkids && fuse_cond_select(n->kids[i], n->kids[i + 1])) {
-                    ++i;
-                    continue;
+                if (i + 1 < n->nkids) {
+                    uint32_t k = fuse_cond_select(n, i);
+                    if (k) {
+                        i += k;
+                        continue;
+                    }
                 }
                 stmt(n->kids[i]);
             }
