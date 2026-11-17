@@ -199,6 +199,7 @@ struct LocalInfo {
     bool is_const = false;  // pseudo-local holding a large constant used in loops
     int64_t cval = 0;
     int alias = -1;  // coalesced into this local (result temporaries, see coalesce())
+    bool reg_only = false;  // optional pseudo-local: no frame slot when no register is free
     std::vector<Ref> refs;
 };
 
@@ -630,6 +631,21 @@ public:
             LoopRec lr{en, 0, ctx_, 0, n};
             bool outermost = outer_loop_ == nullptr;
             if (outermost) outer_loop_ = n;
+            int32_t pc_list = -1;
+            uint32_t pc_ids[3] = {0, 0, 0};
+            if (!no_pushcache_ && push_active_.empty()) {
+                pc_list = push_candidate(n);
+                if (pc_list >= 0) {
+                    for (int q = 0; q < 3; ++q) {
+                        LocalInfo pl;
+                        pl.reg_only = true;
+                        pl.x64 = q == 2;
+                        L.push_back(pl);
+                        pc_ids[q] = (uint32_t)L.size() - 1;
+                    }
+                    push_active_.push_back(PushCache{pc_list, pc_ids[0], pc_ids[1], pc_ids[2], esz_of(F->locals[(size_t)pc_list].type.a)});
+                }
+            }
             size_t h0 = hoist_pending_.size();
             if (!no_hoist_) find_hoists(n);
             size_t h1 = hoist_pending_.size();
@@ -647,6 +663,15 @@ public:
                 L[id].refs.insert(L[id].refs.begin(), Ref{en, ctx_, true});
                 L[id].refs.push_back(Ref{lr.lv, ctx_, false});
                 hoists_[n].push_back(hoist_pending_[h]);
+            }
+            if (pc_list >= 0) {
+                for (int q = 0; q < 3; ++q) {
+                    LocalInfo& pl = L[pc_ids[q]];
+                    pl.refs.insert(pl.refs.begin(), Ref{en, ctx_, true});
+                    pl.refs.push_back(Ref{lr.lv, ctx_, false});
+                }
+                push_loops_[n] = push_active_.back();
+                push_active_.pop_back();
             }
             if (outermost) {
                 outer_loop_ = nullptr;
@@ -705,6 +730,14 @@ public:
             call_pos.push_back(n->op == Op::ListLit ? en : lv);
         }
         if (!risky_ && n->nkids > 1) note_risk(n);
+        if (n->op == Op::Append && !push_active_.empty() && n->kids[0]->op == Op::Local &&
+            n->kids[0]->a == push_active_.back().list) {
+            const PushCache& pc = push_active_.back();
+            for (uint32_t id : {pc.len, pc.cap, pc.data}) {
+                L[id].refs.push_back(Ref{en, ctx_, false});
+                L[id].weight += wdepth(depth);
+            }
+        }
         NInfo ni{en, lv, call, cref, self_hoist};
         if (!hoist_mark_.empty()) {
             auto it = hoist_mark_.find(n);
@@ -1103,8 +1136,82 @@ public:
         mark_written(w);
         for (uint32_t i = 0; i < w->nkids; ++i) hoist_walk(w->kids[i]);
     }
+    // ---- append loops: length / capacity / data of the list in registers ----
+    // A loop whose only use of lists of region r is Append(Local l, v) on one
+    // list local l (not written in the loop), that calls nothing, returns
+    // nothing and breaks only to blocks inside it, keeps len, cap and data of l
+    // in registers: each append is cmp / b.eq grow / str / add; len is stored
+    // back when the loop ends and before a grow (an error ends the program).
+    struct PushCache {
+        int32_t list;
+        uint32_t len, cap, data, esz;
+    };
+    bool no_pushcache_ = false;
+    std::vector<PushCache> push_active_;  // prepass: candidate of the loop being visited
+    std::unordered_map<const Node*, PushCache> push_loops_;
+    const PushCache* push_cur_ = nullptr;  // codegen: active cache
+    static bool region_type(Type t, uint32_t r) { return (t.k == TK::List || t.k == TK::Ptr) && t.a == r; }
+    bool push_scan(const Node* n, int32_t& l, uint32_t& r, std::vector<int32_t>& labels) {
+        switch (n->op) {
+        case Op::CallDirect: case Op::CallDyn: case Op::Print: case Op::Input: case Op::Reserve: case Op::AppendRange:
+        case Op::Return: case Op::DynIndex: case Op::DynSetIndex: case Op::DynAppend: case Op::DynNeg: case Op::DynAbs:
+        case Op::Eq: case Op::Ne: case Op::Cmp: case Op::Free: case Op::SameList:
+            return false;
+        case Op::Append: {
+            const Node* b = n->kids[0];
+            if (b->op != Op::Local || b->type.k != TK::List) return false;
+            if (l < 0) {
+                l = (int32_t)b->a;
+                r = b->type.a;
+            } else if (b->a != l) {
+                return false;
+            }
+            return push_scan(n->kids[1], l, r, labels);
+        }
+        case Op::Break: {
+            for (int32_t x : labels)
+                if (x == n->a) return true;
+            return false;
+        }
+        case Op::InlineBlock: {
+            labels.push_back(n->a);
+            bool ok = push_scan(n->kids[0], l, r, labels);
+            labels.pop_back();
+            return ok;
+        }
+        default: break;
+        }
+        for (uint32_t i = 0; i < n->nkids; ++i)
+            if (!push_scan(n->kids[i], l, r, labels)) return false;
+        return true;
+    }
+    // second walk (the list is known now): no other node of l's region, no other use of l
+    bool push_check(const Node* n, int32_t l, uint32_t r) {
+        if (n->op == Op::Append && n->kids[0]->op == Op::Local && n->kids[0]->a == l)
+            return push_check(n->kids[1], l, r);
+        if (region_type(n->type, r)) return false;
+        if (n->op == Op::SetLocal && n->a == l) return false;
+        if (n->op == Op::Local && n->a == l) return false;
+        for (uint32_t i = 0; i < n->nkids; ++i)
+            if (!push_check(n->kids[i], l, r)) return false;
+        return true;
+    }
+    int32_t push_candidate(const Node* w) {
+        int32_t l = -1;
+        uint32_t r = 0;
+        std::vector<int32_t> labels;
+        for (uint32_t i = 0; i < w->nkids; ++i)
+            if (!push_scan(w->kids[i], l, r, labels)) return -1;
+        if (l < 0 || (size_t)l >= F->locals.size()) return -1;
+        for (uint32_t i = 0; i < w->nkids; ++i)
+            if (!push_check(w->kids[i], l, r)) return -1;
+        return l;
+    }
     void analyze() {
         info.reset(count_nodes(F->body));
+        push_active_.clear();
+        push_loops_.clear();
+        push_cur_ = nullptr;
         hoist_pending_.clear();
         hoist_mark_.clear();
         hoists_.clear();
@@ -1229,7 +1336,7 @@ public:
                 busy[(size_t)pick].push_back({l.lo, l.hi});
                 if (pick >= 19) callee_used |= bit(pick);
                 else caller_locals |= bit(pick);
-            } else if (!l.is_const) {
+            } else if (!l.is_const && !l.reg_only) {
                 l.slot = nfixed++;
             }
         }
@@ -2497,7 +2604,10 @@ public:
     void push(Reg l, Reg v, uint32_t esz) {
         Label top = A->here();
         Label grow = A->new_label();
-        A->ldp(W(16), W(17), mem(l, 8));
+        // two 32-bit loads, not one ldp: the previous append's 32-bit store of len
+        // then forwards to the len load (an ldp spanning it would stall)
+        A->ldr(W(16), mem(l, 8));
+        A->ldr(W(17), mem(l, 12));
         A->cmp(W(16), W(17));
         A->b(EQ, grow);
         A->ldr(X(17), mem(l, 0));
@@ -2516,6 +2626,7 @@ public:
     }
 
     V append(const Node* n) {
+        if (push_cur_ && n->kids[0]->op == Op::Local && n->kids[0]->a == push_cur_->list) return append_cached(n);
         V k[2];
         eval_kids(n, 0, 2, k);
         uint32_t esz = esz_of(n->kids[0]->type.a);
@@ -2523,6 +2634,36 @@ public:
         Reg l = R(k[0], true);
         Reg v = (w.k == V::IMM && w.imm == 0) ? (esz == 8 ? xzr : wzr) : R(w, esz == 8);
         push(l, v, esz);
+        release(w);
+        return k[0];
+    }
+
+    V append_cached(const Node* n) {
+        const PushCache pc = *push_cur_;
+        V k[2];
+        eval_kids(n, 0, 2, k);
+        uint32_t esz = pc.esz;
+        V w = esz == 8 ? word_of(n->kids[1]->type, k[1]) : k[1];
+        Reg l = R(k[0], true);
+        Reg v = (w.k == V::IMM && w.imm == 0) ? (esz == 8 ? xzr : wzr) : R(w, esz == 8);
+        Reg len = W(L[pc.len].reg), cap = W(L[pc.cap].reg), dreg = X(L[pc.data].reg);
+        Label top = A->here(), grow = A->new_label();
+        A->cmp(len, cap);
+        A->b(EQ, grow);
+        A->str(v, memr(dreg, len, UXTW, true));
+        A->add(len, len, 1u);
+        uint32_t save = live_caller_saved(0);
+        cold(grow, [=, this]() {
+            A->str(len, mem(l, 8));
+            save_regs(save);
+            A->mov(X(0), l.xr());
+            A->movz(W(1), esz);
+            call_helper(H_LIST_GROW);
+            restore_regs(save);
+            A->ldr(cap, mem(l, 12));
+            A->ldr(dreg, mem(l, 0));
+            A->b(top);
+        });
         release(w);
         return k[0];
     }
@@ -3455,6 +3596,35 @@ public:
                         store_local(h.second, v);
                     }
             }
+            if (!push_loops_.empty() && !push_cur_) {
+                auto it = push_loops_.find(n);
+                if (it != push_loops_.end()) {
+                    PushCache pcv = it->second;
+                    const LocalInfo& ll = L[(size_t)pcv.list];
+                    bool on = L[pcv.len].reg >= 0 && L[pcv.cap].reg >= 0 && L[pcv.data].reg >= 0 && !ll.needs_init &&
+                              ll.alias < 0;
+                    if (on) {
+                        V lv = read_local((uint32_t)pcv.list);
+                        Reg lr = R(lv, true);
+                        A->ldr(W(L[pcv.len].reg), mem(lr, 8));
+                        A->ldr(W(L[pcv.cap].reg), mem(lr, 12));
+                        A->ldr(X(L[pcv.data].reg), mem(lr, 0));
+                        release(lv);
+                        push_cur_ = &pcv;
+                        branch(n->kids[0], false, exit);
+                        A->bind(top);
+                        stmt(n->kids[1]);
+                        stmt(n->kids[2]);
+                        branch(n->kids[0], true, top);
+                        A->bind(exit);
+                        V lv2 = read_local((uint32_t)pcv.list);
+                        A->str(W(L[pcv.len].reg), mem(R(lv2, true), 8));
+                        release(lv2);
+                        push_cur_ = nullptr;
+                        return;
+                    }
+                }
+            }
             branch(n->kids[0], false, exit);
             A->bind(top);
             const Node* body = n->kids[1];
@@ -3975,6 +4145,7 @@ public:
         getenv_always_dry_ = getenv("EPQ_JIT_ALWAYS_DRY") != nullptr;
         getenv_no_coalesce_ = getenv("EPQ_JIT_NO_COALESCE") != nullptr;
         no_hoist_ = getenv("EPQ_JIT_NO_HOIST") != nullptr;
+        no_pushcache_ = getenv("EPQ_JIT_NO_PUSHCACHE") != nullptr;
         getenv_coarse_loops_ = getenv("EPQ_JIT_COARSE_LOOPS") != nullptr;
         for (auto& f : M.funcs) compile_func(*f);
         F = nullptr;
