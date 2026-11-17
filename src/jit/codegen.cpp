@@ -99,6 +99,7 @@ enum Helper : int {
     H_APPEND_RANGE,
     H_EQ_LA,
     H_CMP3_LA,
+    H_ALLOC,
     H_COUNT
 };
 
@@ -123,13 +124,14 @@ const void* helper_addr(int h) {
     case H_APPEND_RANGE: return (const void*)&jrt_append_range;
     case H_EQ_LA: return (const void*)&jrt_eq_la;
     case H_CMP3_LA: return (const void*)&jrt_cmp3_la;
+    case H_ALLOC: return (const void*)&jrt_alloc;
     }
     return nullptr;
 }
 const char* helper_name(int h) {
     static const char* n[] = {"rt_fail", "rt_print_int", "rt_print", "rt_read_int", "rt_list_new", "rt_list_grow",
                               "rt_eq", "rt_lt", "rt_eq_li", "rt_lt_li", "rt_dyn_neg", "rt_dyn_abs", "rt_call_dyn", "rt_alloc_slow", "rt_list_free",
-                              "rt_list_reserve", "rt_append_range", "rt_eq_la", "rt_cmp3_la"};
+                              "rt_list_reserve", "rt_append_range", "rt_eq_la", "rt_cmp3_la", "rt_alloc"};
     return n[h];
 }
 
@@ -193,7 +195,7 @@ struct LocalInfo {
     std::vector<Ref> refs;
 };
 
-bool is64(Type t) { return t.k == TK::List || t.k == TK::Any || t.k == TK::Pair || t.k == TK::Ptr; }
+bool is64(Type t) { return t.k == TK::List || t.k == TK::Any || t.k == TK::Pair || t.k == TK::Ptr || t.k == TK::Rec; }
 
 Cond cond_of(Op o) {
     switch (o) {
@@ -1265,6 +1267,50 @@ public:
         case Op::ElemLoad: return elem_load(n, want);
         case Op::ElemStore: return elem_store(n);
         case Op::CheckIndex: return check_index(n);
+        case Op::RecLit: return rec_lit(n);
+        case Op::RecNull: return V::im(0);
+        case Op::RecGet: {  // one load at a constant offset (null check first when b)
+            V v = expr(n->kids[0]);
+            Reg x = R(v, true);
+            if (n->b) A->cbz(x, err(Err::IndexOOB));
+            release(v);
+            if (n->type.k == TK::Fn) return V::none();
+            int d = dest(want);
+            A->ldr(is64(n->type) ? X(d) : W(d), mem(x, 8 * (int64_t)n->a));
+            return result(d, want);
+        }
+        case Op::RecSet: {  // both kids, then the null check, then the store; value v
+            V k[2];
+            eval_kids(n, 0, 2, k);
+            Type vt = n->kids[1]->type;
+            V w = word_of(vt, k[1]);
+            Reg x = R(k[0], true);
+            if (n->b) A->cbz(x, err(Err::IndexOOB));
+            Reg s = (w.k == V::IMM && w.imm == 0) ? xzr : R(w, true);
+            A->str(s, mem(x, 8 * (int64_t)n->a));
+            release(k[0]);
+            if (vt.k == TK::Fn) {
+                release(w);
+                return V::none();
+            }
+            return w;  // for an Int, the zero-extended word is the value
+        }
+        case Op::RecLen: {  // rec ? k : 0
+            V v = expr(n->kids[0]);
+            uint32_t k = M.regions[n->kids[0]->type.a].rec_len;
+            if (v.k == V::IMM) return V::im(v.imm ? k : 0);
+            Reg x = R(v, true);
+            release(v);
+            int d = dest(want);
+            A->cmp(x, 0u);
+            if (k == 1) {
+                A->cset(W(d), NE);
+            } else {
+                A->movz(W(16), k);
+                A->csel(W(d), W(16), wzr, NE);
+            }
+            return result(d, want);
+        }
         case Op::Reserve: {  // appendopt: epq_list_reserve(l, n, esz); value 0
             V k[2];
             eval_kids(n, 0, 2, k);
@@ -1521,7 +1567,8 @@ public:
                 }
             }
         }
-        bool xs = tx == TK::List || tx == TK::Fn || tx == TK::Pair, ys = ty == TK::List || ty == TK::Fn || ty == TK::Pair;
+        bool xs = tx == TK::List || tx == TK::Fn || tx == TK::Pair || tx == TK::Rec,
+             ys = ty == TK::List || ty == TK::Fn || ty == TK::Pair || ty == TK::Rec;
         if (xs || ys) {
             release(k[0]);
             release(k[1]);
@@ -1930,10 +1977,10 @@ public:
         A->str(s, elem_mem(k[1], esz));
         release(k[0]);
         release(k[1]);
-        if (esz == 8 && n->kids[2]->type.k != TK::Any && n->kids[2]->type.k != TK::List) {
-            // value of SetIndex is v (of its static type); word_of made a copy
+        // value of SetIndex is v: for 8-byte slots its word (word_of only rewrites Int/Fn)
+        if (esz == 8 && n->kids[2]->type.k == TK::Fn) {
             release(w);
-            return n->kids[2]->type.k == TK::Fn ? V::none() : k[2];
+            return V::none();
         }
         return w;
     }
@@ -2311,6 +2358,68 @@ public:
         release(k[1]);
         return k[0];
     }
+    // ---- records
+    // Inline epq_alloc(bytes) (size-class free list, then the bump pointer, slow
+    // path out of line) into register d. bytes: a multiple of 16, <= 512.
+    void inline_alloc(int d, uint32_t total) {
+        uint32_t lo;
+        Label slow = A->new_label(), cont = A->new_label(), bump = A->new_label();
+        data_addr(X(16), fl_off, &lo);
+        A->ldr(X(16), mem(X(16), lo));
+        A->ldr(X(d), mem(X(16), 8 * (total >> 4)));
+        A->cbz(X(d), bump);
+        A->ldr(X(17), mem(X(d), 0));
+        A->str(X(17), mem(X(16), 8 * (total >> 4)));
+        A->b(cont);
+        A->bind(bump);
+        data_addr(X(16), bump_off, &lo);
+        A->ldr(X(16), mem(X(16), lo));
+        A->ldp(X(d), X(17), mem(X(16), 0));
+        A->sub(X(17), X(17), X(d));
+        A->cmp(X(17), total);
+        A->b(LO, slow);
+        A->add(X(17), X(d), total);
+        A->str(X(17), mem(X(16), 0));
+        A->bind(cont);
+        uint32_t save = live_caller_saved(bit(d));
+        cold(slow, [=, this]() {
+            save_regs(save);
+            A->movz(W(0), total);
+            call_helper(H_ALLOC_SLOW);
+            A->mov(X(16), X(0));
+            restore_regs(save);
+            A->mov(X(d), X(16));
+            A->b(cont);
+        });
+    }
+    // RecLit: every kid first (in order), then epq_rec_new(k) and k slot stores.
+    V rec_lit(const Node* n) {
+        uint32_t k = n->nkids;
+        std::vector<V> v(k);
+        eval_kids(n, 0, k, v.data());
+        for (uint32_t i = 0; i < k; ++i) v[i] = word_of(n->kids[i]->type, v[i]);
+        uint32_t total = (8 * k + 15) & ~15u;
+        if (total == 0) total = 16;
+        int d = talloc();
+        if (bump_adjacent && total <= 512) {
+            inline_alloc(d, total);
+        } else {  // epq_alloc (big block) with every live register saved
+            uint32_t save = live_caller_saved(bit(d));
+            save_regs(save);
+            li(X(0), total);
+            call_helper(H_ALLOC);
+            A->mov(X(16), X(0));
+            restore_regs(save);
+            A->mov(X(d), X(16));
+        }
+        for (uint32_t i = 0; i < k; ++i) {
+            Reg s = (v[i].k == V::IMM && v[i].imm == 0) ? xzr : R(v[i], true);
+            A->str(s, mem(X(d), 8 * (int64_t)i));
+            release(v[i]);
+        }
+        return V::reg(d, true);
+    }
+
     void free_list(const Node* n) {
         V v = expr(n->kids[0]);
         uint32_t esz = esz_of(n->kids[0]->type.a);
@@ -2536,6 +2645,20 @@ public:
                 bool jneg = (n->op == Op::LtI32) == sense;
                 if (jneg) A->tbnz(r, 31, target);
                 else A->tbz(r, 31, target);
+                release(v);
+                return;
+            }
+            if ((n->op == Op::EqI32 || n->op == Op::NeI32) && (b->op == Op::ConstInt && b->a == 0) && a->op == Op::RecLen) {
+                // records: `t = []` is RecLen(t) == 0, i.e. t == null
+                V v = expr(a->kids[0]);
+                bool jz = (n->op == Op::EqI32) == sense;
+                if (v.k == V::IMM) {
+                    if ((v.imm == 0) == jz) A->b(target);
+                    return;
+                }
+                Reg r = R(v, true);
+                if (jz) A->cbz(r, target);
+                else A->cbnz(r, target);
                 release(v);
                 return;
             }
@@ -3258,13 +3381,14 @@ bool op_supported(Op o) {
     case Op::Free: case Op::SameList: case Op::Nop:
     case Op::DynIsEmptyList:  // litcmp
     case Op::Reserve: case Op::AppendRange:  // appendopt
+    case Op::RecLit: case Op::RecNull: case Op::RecGet: case Op::RecSet: case Op::RecLen:  // records
         return true;
     default: return false;
     }
 }
 bool type_supported(Type t) {
     switch (t.k) {
-    case TK::Bot: case TK::Int: case TK::List: case TK::Fn: case TK::Any: case TK::Pair: case TK::Ptr: return true;
+    case TK::Bot: case TK::Int: case TK::List: case TK::Fn: case TK::Any: case TK::Pair: case TK::Ptr: case TK::Rec: return true;
     default: return false;
     }
 }

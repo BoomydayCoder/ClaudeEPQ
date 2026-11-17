@@ -31,4 +31,5 @@ int32_t jrt_append_range(void* l, void* m, int32_t lo, int32_t hi, uint32_t esz)
 // litcmp: both lists with Any elements
 int32_t jrt_eq_la(void* a, void* b);
 int32_t jrt_cmp3_la(void* a, void* b);
+void* jrt_alloc(size_t n);
 }

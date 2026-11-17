@@ -54,6 +54,7 @@ int32_t jrt_append_range(void* l, void* m, int32_t lo, int32_t hi, uint32_t esz)
     return epq_append_range(static_cast<EList*>(l), static_cast<EList*>(m), lo, hi, esz);
 }
 int32_t jrt_eq_la(void* a, void* b) { return epq_eq_la(static_cast<EList*>(a), static_cast<EList*>(b)); }
+void* jrt_alloc(size_t n) { return epq_alloc(n); }
 int32_t jrt_cmp3_la(void* a, void* b) { return epq_cmp3_la(static_cast<EList*>(a), static_cast<EList*>(b)); }
 
 }  // extern "C"
