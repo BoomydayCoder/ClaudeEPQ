@@ -41,6 +41,7 @@ void usage(FILE* f, const char* argv0) {
                  "  --no-pass=NAME     disable a TIR pass or build step (fold, definite-assignment,\n"
                  "                     demote-globals, constants)\n"
                  "  --only-pass=A,B    run only these optimisation passes (see --list-passes)\n"
+                 "  --enable-pass=A,B  also run these default-off passes (also EPQ_ENABLE_PASS=A,B)\n"
                  "  --verify-tir       check the TIR after construction and every pass (env EPQ_VERIFY_TIR=1)\n"
                  "  --dump-tir-after=P print the TIR after pass P and exit\n"
                  "  --list-passes      list the TIR passes in pipeline order\n"
@@ -290,13 +291,16 @@ int main(int argc, char** argv) {
             opts.no_pass.push_back(a + 10);
         } else if (!std::strncmp(a, "--only-pass=", 12)) {
             opts.only_pass.push_back(a + 12);
+        } else if (!std::strncmp(a, "--enable-pass=", 14)) {
+            opts.enable_pass.push_back(a + 14);
         } else if (!std::strcmp(a, "--verify-tir")) {
             opts.verify_tir = true;
         } else if (!std::strncmp(a, "--dump-tir-after=", 17)) {
             opts.dump_tir_after = a + 17;
         } else if (!std::strcmp(a, "--list-passes")) {
             for (const auto& p : epq::tir::passes())
-                std::printf("%-20s %s%s\n", p.name, p.what, epq::tir::pass_is_optimisation(p.name) ? "" : "  [infrastructure]");
+                std::printf("%-20s %s%s%s\n", p.name, p.what, epq::tir::pass_is_optimisation(p.name) ? "" : "  [infrastructure]",
+                            epq::tir::pass_default_off(p.name) ? "  [off by default: --enable-pass]" : "");
             return 0;
         } else if (!std::strncmp(a, "--tir-selftest=", 15)) {
             return epq::tir_selftest(a + 15, opts);

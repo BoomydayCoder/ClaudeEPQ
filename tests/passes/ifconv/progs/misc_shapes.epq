@@ -1,0 +1,22 @@
+// not converted: else branch, outside loops, or, division, large bodies, prints
+l := [5, 0, 7];
+z := 0;
+(l[0] > 1) ? z := 1;
+>> z;
+(i := 0; i < 3; i := i + 1;) @ {
+  (l[i] > 4 | i = 1) ? z := z + 1;
+  (l[i] > 4) ? z := z + 2; : z := z - 1;
+  (l[i] > 0) ? z := 100 / l[i];
+  (l[i] > 0) ? >> l[i];
+  (l[i] = 0) ? { z := z + 1; z := z + 1; z := z + 1; z := z + 1; z := z + 1; }
+}
+>> z;
+g := (k) => {
+  r := 0;
+  (q := 0; q < k; q := q + 1;) @ { (q > 2) ? r := r + q; }
+  => r;
+};
+>> g(6);
+d := [1, [2], 3];
+(i := 0; i < 3; i := i + 1;) @ { (i = 2) ? d[i] := 9; }
+>> d;

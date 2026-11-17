@@ -1,0 +1,11 @@
+// inline x records x pairs
+getx := (pt) => { => pt[0]; };
+mkpt := (a, b, c) => { => [a, [b, c]]; };
+s := 0;
+(i := 0; i < 10; i := i + 1;) @ { pp := mkpt(i, i * 2, 7); s := s + getx(pp) + pp[1][0]; }
+>> s;
+setx := (pt2, v) => { pt2[0] := v; => pt2; };
+qq := mkpt(1, 2, 3);
+setx(qq, 40);
+>> qq;
+>> getx(setx(mkpt(5, 6, 7), 8));

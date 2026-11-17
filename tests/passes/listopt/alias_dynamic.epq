@@ -1,0 +1,20 @@
+// a list reachable through a dynamic (heterogeneous) container, appended dynamically
+d := () => {
+    l := [1, 2, 3];
+    h := [l, 0, [4]];
+    m := h[0];
+    s := 0;
+    (i := 0; i < |l|; i := i + 1;) @ {
+        s := s + l[i];
+        (i < 3) ? m :+ i + 100;
+    }
+    >> s;
+    >> l;
+    -m;
+    -m;
+    -m;
+    -m;
+    >> l[1];
+    >> l[2];
+};
+d();

@@ -1,0 +1,13 @@
+// the index expression appends to the same list (through a parameter)
+ap := (x) => { x :+ 9; => |x| - 1; };
+t := (l) => {
+    >> l[0];
+    >> l[0];
+    >> l[ap(l)];
+    >> l[ap(l)];
+    l[ap(l)] := 5;
+    >> l;
+    v := l[1] + l[ap(l) - 1];
+    >> v;
+};
+t([1]);

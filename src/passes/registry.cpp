@@ -38,6 +38,13 @@ const Pass kPipeline[] = {
 };
 constexpr size_t kFirstOpt = 5;
 
+// Default-off passes (integration): each entry names the reason and the saved
+// failing case under tests/integration/known/. Enabled by --enable-pass=NAME /
+// EPQ_ENABLE_PASS=NAME, or by naming the pass in --only-pass.
+const char* const kDefaultOff[] = {
+    nullptr,  // (none at the moment)
+};
+
 bool listed(const std::vector<std::string>& v, const char* name) {
     for (auto& s : v)
         if (s == name) return true;
@@ -57,10 +64,17 @@ bool pass_is_optimisation(const char* name) {
     return false;
 }
 
+bool pass_default_off(const char* name) {
+    for (const char* n : kDefaultOff)
+        if (n && !std::strcmp(n, name)) return true;
+    return false;
+}
+
 bool run_passes(Module& m, const PassOptions& o) {
     for (size_t i = 0; i < std::size(kPipeline); ++i) {
         const Pass& p = kPipeline[i];
         if (listed(o.disabled, p.name)) continue;
+        if (pass_default_off(p.name) && !listed(o.enabled, p.name) && !listed(o.only, p.name)) continue;
         if (i >= kFirstOpt && !o.only.empty() && !listed(o.only, p.name)) continue;
         if (o.verbose) std::fprintf(stderr, "pass %s\n", p.name);
         p.run(m);

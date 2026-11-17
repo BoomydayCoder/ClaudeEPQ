@@ -118,6 +118,7 @@ std::string cache_hash(const std::string& csrc, const std::string& flags) {
     key += '\0';
     if (const char* np = std::getenv("EPQ_NO_PASS")) key += np;  // (already reflected in csrc; explicit)
     if (const char* nr = std::getenv("EPQ_NO_RECORDS")) key += std::string("\0norec", 6) + nr;  // records (§5.11)
+    if (const char* ep = std::getenv("EPQ_ENABLE_PASS")) key += std::string("\0enpass", 7) + ep;  // default-off passes (also in csrc)
     return hash_hex(key);
 }
 // ---- end cache key ----
@@ -269,6 +270,9 @@ Options normalise(const Options& in) {
     o.only_pass.clear();
     for (auto& s : in.no_pass) split_into(o.no_pass, s);
     for (auto& s : in.only_pass) split_into(o.only_pass, s);
+    o.enable_pass.clear();
+    for (auto& s : in.enable_pass) split_into(o.enable_pass, s);
+    if (const char* e = std::getenv("EPQ_ENABLE_PASS")) split_into(o.enable_pass, e);
     if (const char* e = std::getenv("EPQ_NO_PASS")) split_into(o.no_pass, e);
     if (const char* e = std::getenv("EPQ_VERIFY_TIR"); e && e[0] == '1') o.verify_tir = true;
     if (const char* e = std::getenv("EPQ_NO_RECORDS"); e && e[0] == '1') o.no_records = true;  // records (§5.11)
@@ -328,6 +332,7 @@ int run_module(tir::Module& M, const Options& opts_in) {
     tir::PassOptions po;
     po.disabled = opts.no_pass;
     po.only = opts.only_pass;
+    po.enabled = opts.enable_pass;
     po.verbose = opts.verbose;
     po.verify = opts.verify_tir;
     po.dump_after = opts.dump_tir_after;

@@ -41,6 +41,7 @@ struct Options {
     // TIR pass control (src/passes/registry.cpp). Comma-separated lists are split
     // by the driver; EPQ_NO_PASS=a,b is appended to no_pass, EPQ_VERIFY_TIR=1 sets verify_tir.
     std::vector<std::string> only_pass;  // --only-pass=NAME[,NAME...]
+    std::vector<std::string> enable_pass;  // --enable-pass=NAME / EPQ_ENABLE_PASS=a,b: run a default-off pass
     bool verify_tir = false;             // --verify-tir
     std::string dump_tir_after;          // --dump-tir-after=NAME
 };

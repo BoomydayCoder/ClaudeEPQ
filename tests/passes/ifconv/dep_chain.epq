@@ -1,0 +1,8 @@
+// body statements depend on each other, and on locals used in later conditions
+xs := [4, 9, 2, 9, 1, 7];
+best := 0; bi := -1; prev := 0; t := 0;
+(i := 0; i < |xs|; i := i + 1;) @ {
+  (xs[i] >= best) ? { prev := best; best := xs[i]; bi := i; }
+  (best > prev) ? { t := best; best := prev; prev := t; }
+  >> [best, bi, prev, t];
+}

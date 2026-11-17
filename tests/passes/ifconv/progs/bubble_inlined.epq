@@ -1,0 +1,32 @@
+// conditional swap (hand-inlined swap, with and without a parameter copy)
+l := [5, 3, 9, 1, 7, 2, 8, -4, 0, 6, 6, 11];
+n := |l|;
+temp := 0;
+(i := 0; i < n; i := i + 1;) @ {
+  (j := 0; j < n - i - 1; j := j + 1;) @ {
+    (l[j] > l[j + 1]) ? {
+      temp := l[j];
+      l[j] := l[j + 1];
+      l[j + 1] := temp;
+    }
+  }
+}
+>> l;
+>> temp;
+m := [4, 8, 1, 9, 3, 3, 0];
+k := |m|;
+p := 0;
+t2 := 0;
+(i := 0; i < k; i := i + 1;) @ {
+  (j := 0; j < k - i - 1; j := j + 1;) @ {
+    (m[j] < m[j + 1]) ? {
+      p := j + 1;
+      t2 := m[j];
+      m[j] := m[p];
+      m[p] := t2;
+    }
+  }
+}
+>> m;
+>> p;
+>> t2;

@@ -1,0 +1,15 @@
+// reclaim x records: fresh lists stored in records (RecLit / RecSet) escape
+mkrec := (n) => { l := [n, n + 1]; rr := [0, l]; => rr; };
+setrec := (n) => { l2 := [n, n * 2]; r2 := [0, [9]]; r2[1] := l2; => r2; };
+x := mkrec(5);
+y := mkrec(6);
+>> x;
+>> y;
+z := setrec(3);
+w := setrec(4);
+>> z;
+>> w;
+>> x[1][1] + z[1][1];
+lst := [];
+(i := 0; i < 4; i := i + 1;) @ lst :+ mkrec(i);
+>> lst;

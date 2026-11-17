@@ -1,0 +1,11 @@
+// heap child selection: converted (scalar, element reads established by the And's first kid... and inner cond)
+h := [9, 4, 7, 1, 8, 2, 6, 3, 5, 0];
+size := |h|;
+(idx := 0; idx < 5; idx := idx + 1;) @ {
+  l := 2 * idx + 1;
+  r := 2 * idx + 2;
+  s := idx;
+  (l < size & h[l] < h[s]) ? s := l;
+  (r < size & h[r] < h[s]) ? s := r;
+  >> [idx, s];
+}

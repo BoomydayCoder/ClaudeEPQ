@@ -1,0 +1,14 @@
+// swap through a function (the inline pass may turn it into an InlineBlock)
+swap := (xs, a1, b1) => { tmp := xs[a1]; xs[a1] := xs[b1]; xs[b1] := tmp; };
+l := [9, 8, 7, 6, 5, 4, 3, 2, 1, 0];
+n := |l|;
+(i := 0; i < n; i := i + 1;) @ {
+  (j := 0; j < n - i - 1; j := j + 1;) @ {
+    (l[j] > l[j + 1]) ? swap(l, j, j + 1);
+  }
+}
+>> l;
+mx := (u, v) => { (u > v) ? => u; => v; };
+s := 0;
+(i := 0; i < n; i := i + 1;) @ { (l[i] > 3) ? s := mx(s, l[i]); }
+>> s;

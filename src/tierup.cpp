@@ -165,6 +165,8 @@ std::string compute_key(const std::string& source, const Options& o) {
     h.field(o.no_dedup ? "nodedup" : "dedup");
     for (auto& s : o.no_pass) h.field("-" + s);
     for (auto& s : o.only_pass) h.field("+" + s);
+    for (auto& s : o.enable_pass) h.field("^" + s);  // integration: default-off passes
+    h.field(o.no_records ? "norec" : "rec");          // integration: --no-records changes the code
     return h.hex();
 }
 
@@ -329,8 +331,8 @@ bool lock_held(const std::string& lock_path) {
 
 struct Trigger {
     std::string file, dir, key;
-    std::vector<std::string> no_pass, only_pass;
-    bool mono = false, no_dedup = false, verbose = false;
+    std::vector<std::string> no_pass, only_pass, enable_pass;
+    bool mono = false, no_dedup = false, verbose = false, no_records = false;
     unsigned ms = kDefaultTierMs;
     uint64_t t0 = 0;
     pid_t pid = 0;  // helper already launched (EPQ_TIER_MS=0)
@@ -347,6 +349,8 @@ pid_t launch_helper(const Trigger& t) {
     std::vector<std::string> args = {exe, "--tier-compile"};
     for (auto& s : t.no_pass) args.push_back("--no-pass=" + s);
     for (auto& s : t.only_pass) args.push_back("--only-pass=" + s);
+    for (auto& s : t.enable_pass) args.push_back("--enable-pass=" + s);
+    if (t.no_records) args.push_back("--no-records");
     if (t.mono) args.push_back("--mono");
     if (t.no_dedup) args.push_back("--no-dedup");
     args.push_back(t.file);
@@ -736,6 +740,8 @@ bool start(CompileUnit& cu, const Options& opts, int argc, char** argv, int* rc)
     t->key = key;
     t->no_pass = opts.no_pass;
     t->only_pass = opts.only_pass;
+    t->enable_pass = opts.enable_pass;
+    t->no_records = opts.no_records;
     t->mono = opts.mono;
     t->no_dedup = opts.no_dedup;
     t->verbose = opts.verbose;

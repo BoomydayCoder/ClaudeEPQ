@@ -1,0 +1,14 @@
+// reclaim x appendopt: a fresh list of lists is bulk-copied, then freed; elements survive
+cp := (src) => { out := []; (i := 0; i < |src|; i := i + 1;) @ out :+ src[i]; => out; };
+inner := (k) => { t := [[k], [k + 1], [k + 2]]; c := cp(t); => c; };
+a := inner(1);
+b := inner(10);
+>> a;
+>> b;
+a[0][0] := 99;
+>> a;
+>> b;
+cp2 := (src2) => { o2 := []; (y : src2) @ o2 :+ y; => o2; };
+inner2 := (k2) => { t2 := [k2, k2 * 2, k2 * 3]; c2 := cp2(t2); t3 := [0]; => c2; };
+>> inner2(4);
+>> inner2(5);
