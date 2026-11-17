@@ -33,9 +33,21 @@ struct Options {
     std::vector<std::string> no_pass;  // --no-pass=NAME (TIR passes and build options:
                                        // definite-assignment, demote-globals, constants)
     std::string file;            // source path as given on the command line
+    // TIR pass control (src/passes/registry.cpp). Comma-separated lists are split
+    // by the driver; EPQ_NO_PASS=a,b is appended to no_pass, EPQ_VERIFY_TIR=1 sets verify_tir.
+    std::vector<std::string> only_pass;  // --only-pass=NAME[,NAME...]
+    bool verify_tir = false;             // --verify-tir
+    std::string dump_tir_after;          // --dump-tir-after=NAME
 };
 
 // Runs the resolved program. Returns the process exit status.
 int run_backend(const Program& prog, const Options& opts);
+
+namespace tir { struct Module; }
+// Runs passes (per opts) on an already built module, then the engine. Used by
+// run_backend and by the TIR self-test (src/tir_selftest.cpp).
+int run_module(tir::Module& M, const Options& opts);
+// --tir-selftest=NAME: hand-built TIR programs exercising the extension ops.
+int tir_selftest(const char* name, const Options& opts);
 
 }  // namespace epq

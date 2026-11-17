@@ -61,6 +61,7 @@
 #include <poll.h>
 #include <errno.h>
 #include <sys/mman.h>
+#include <stdlib.h>
 
 #ifndef EPQ_RT_API
 #define EPQ_RT_API static __attribute__((unused))
@@ -79,7 +80,8 @@ typedef struct __attribute__((aligned(16))) EList {
     int32_t cap;
 } EList;
 
-enum { EPQ_K_INT = 0, EPQ_K_ANY = 1, EPQ_K_FN = 2, EPQ_K_LIST = 3 };
+enum { EPQ_K_INT = 0, EPQ_K_ANY = 1, EPQ_K_FN = 2, EPQ_K_LIST = 3, EPQ_K_PAIR = 4 };
+/* PAIR: an unboxed two-integer list (src/tir.hpp Pair); its word is the packed int64. */
 enum { EPQ_D_INT = 0, EPQ_D_ANY = 1, EPQ_D_LISTANY = 2, EPQ_D_FN = 3 };
 typedef struct EDesc {
     uint32_t kind; /* EPQ_K_* */
@@ -290,12 +292,69 @@ EPQ_RT_API void* epq_alloc_slow(size_t n) {
     return p;
 }
 
+/* ---- free lists (static reclamation, DESIGN.md §5.7) -------------------------
+ * Freed blocks (list headers with inline buffers, outgrown / freed buffers) go
+ * to size-class free lists that epq_alloc consults before bumping. Classes:
+ * exact multiples of 16 bytes up to EPQ_FL_SMALL_MAX (class n/16), then powers
+ * of two (a block of size s goes to class floor(log2 s); a request of n is
+ * served from class ceil(log2 n)). The first word of a free block links it.
+ * EPQ_POISON_FREED=1: freed memory is filled with a garbage pattern (headers
+ * get len 0x7fffffff and an unmapped data pointer) and never reused. */
+#define EPQ_FL_SMALL_MAX 512
+static void* epq_fl_small[EPQ_FL_SMALL_MAX / 16 + 1];
+static void* epq_fl_big[64];
+static int epq_poison_mode = -1; /* -1: not yet read from the environment */
+
+EPQ_RT_API void* epq_alloc_big(size_t n) {
+    unsigned c = 64 - (unsigned)__builtin_clzll((unsigned long long)(n - 1)); /* ceil(log2 n) */
+    void* p = c < 64 ? epq_fl_big[c] : 0;
+    if (p) {
+        epq_fl_big[c] = *(void**)p;
+        return p;
+    }
+    if ((size_t)(epq_bump_end - epq_bump) < n) return epq_alloc_slow(n);
+    p = epq_bump;
+    epq_bump += n;
+    return p;
+}
+
 EPQ_INLINE void* epq_alloc(size_t n) {
     n = (n + 15) & ~(size_t)15;
+    if (EPQ_UNLIKELY(n > EPQ_FL_SMALL_MAX)) return epq_alloc_big(n);
+    void* f = epq_fl_small[n >> 4];
+    if (f) {
+        epq_fl_small[n >> 4] = *(void**)f;
+        return f;
+    }
     char* p = epq_bump;
     if (EPQ_UNLIKELY((size_t)(epq_bump_end - p) < n)) return epq_alloc_slow(n);
     epq_bump = p + n;
     return p;
+}
+
+EPQ_RT_API int epq_poison_on(void) {
+    if (epq_poison_mode < 0) {
+        const char* e = getenv("EPQ_POISON_FREED");
+        epq_poison_mode = (e && e[0] == '1') ? 1 : 0;
+    }
+    return epq_poison_mode;
+}
+/* Returns a block of (at least) s bytes, 16-aligned, to the free lists. */
+EPQ_RT_API void epq_free_block(void* p, size_t s) {
+    if (epq_poison_on()) {
+        memset(p, 0xA5, s);
+        return;
+    }
+    s &= ~(size_t)15;
+    if (s < 16) return;
+    if (s <= EPQ_FL_SMALL_MAX) {
+        *(void**)p = epq_fl_small[s >> 4];
+        epq_fl_small[s >> 4] = p;
+    } else {
+        unsigned c = 63 - (unsigned)__builtin_clzll((unsigned long long)s); /* floor(log2 s) */
+        *(void**)p = epq_fl_big[c];
+        epq_fl_big[c] = p;
+    }
 }
 
 /* A fresh list of n elements of esz bytes; the buffer follows the header.
@@ -316,8 +375,32 @@ EPQ_RT_API void epq_list_grow(EList* l, uint32_t esz) {
     if (ncap > 0x7fffffff) ncap = 0x7fffffff;
     void* nd = epq_alloc((size_t)ncap * esz);
     memcpy(nd, l->data, (size_t)l->len * esz);
+    /* An outgrown out-of-line buffer is only reachable through this header:
+     * recycle it (an inline buffer is part of the header's block). */
+    if (l->data != (void*)((char*)l + sizeof(EList))) epq_free_block(l->data, (size_t)l->cap * esz);
     l->data = nd;
     l->cap = (int32_t)ncap;
+}
+
+/* Frees list l (element size esz): its header and its buffer, never what the
+ * elements point to. The caller guarantees no other reference is ever used. */
+EPQ_RT_API void epq_list_free(EList* l, uint32_t esz) {
+    size_t buf = (size_t)l->cap * esz;
+    int inl = l->data == (void*)((char*)l + sizeof(EList));
+    if (epq_poison_on()) {
+        if (!inl) memset(l->data, 0xA5, buf);
+        else memset((char*)l + sizeof(EList), 0xA5, buf);
+        l->data = (void*)(uintptr_t)0xDEAD0000DEAD0000ull; /* unmapped */
+        l->len = 0x7fffffff;
+        l->cap = 0x7fffffff;
+        return;
+    }
+    if (inl) {
+        epq_free_block(l, sizeof(EList) + buf);
+    } else {
+        epq_free_block(l->data, buf);
+        epq_free_block(l, 2 * sizeof(EList)); /* header block: >= 16 + 16 bytes */
+    }
 }
 
 /* ---- typed list operations ------------------------------------------------- */
@@ -431,6 +514,25 @@ EPQ_RT_API EAny epq_call_dyn(EAny f, int32_t n, const EAny* args) {
     return epq_rt_fns[d].fn(args);
 }
 
+/* ---- pairs (src/tir.hpp Pair) ------------------------------------------------
+ * (int64)first << 32 | ((uint32)second ^ 0x80000000): signed 64-bit order is
+ * lexicographic order, equality is bit equality. */
+typedef int64_t EPair;
+EPQ_INLINE EPair epq_pair_make(int32_t a, int32_t b) {
+    return (EPair)(((uint64_t)(uint32_t)a << 32) | (uint64_t)((uint32_t)b ^ 0x80000000u));
+}
+EPQ_INLINE int32_t epq_pair_first(EPair p) { return (int32_t)((uint64_t)p >> 32); }
+EPQ_INLINE int32_t epq_pair_second(EPair p) { return (int32_t)((uint32_t)(uint64_t)p ^ 0x80000000u); }
+EPQ_RT_API EPQ_COLD void epq_fail_index(void) { epq_fail(EPQ_E_INDEX_OOB); }
+EPQ_INLINE int32_t epq_pair_index(EPair p, int32_t i) {
+    if (EPQ_UNLIKELY((uint32_t)i > 1u)) epq_fail_index();
+    return i ? epq_pair_second(p) : epq_pair_first(p);
+}
+EPQ_INLINE int32_t epq_check_index(int32_t i, int32_t len) {
+    if (EPQ_UNLIKELY((uint32_t)i >= (uint32_t)len)) epq_fail_index();
+    return i;
+}
+
 /* ---- descriptor-driven deep operations ------------------------------------- */
 /* Normalise (desc, word): resolves ANY to the concrete kind. */
 EPQ_INLINE void epq_norm(uint32_t* d, EAny* w) {
@@ -451,10 +553,66 @@ EPQ_INLINE EAny epq_elem_word(uint32_t ed, EList* l, int32_t k) {
     return ((EW64*)l->data)[k].v;
 }
 
+/* A list-like view of a LIST or PAIR (desc, word), for mixed comparisons. */
+typedef struct EView {
+    int32_t n;
+    uint32_t ed;
+    EList* l;
+    int32_t p[2];
+} EView;
+EPQ_INLINE void epq_view(uint32_t d, EAny w, EView* v) {
+    if (epq_rt_desc[d].kind == EPQ_K_PAIR) {
+        v->n = 2;
+        v->ed = EPQ_D_INT;
+        v->l = 0;
+        v->p[0] = epq_pair_first((EPair)w);
+        v->p[1] = epq_pair_second((EPair)w);
+    } else {
+        v->l = (EList*)(uintptr_t)w;
+        v->n = v->l->len;
+        v->ed = epq_rt_desc[d].elem;
+    }
+}
+EPQ_INLINE EAny epq_view_word(const EView* v, int32_t k) {
+    if (!v->l) return (uint32_t)v->p[k];
+    return epq_elem_word(v->ed, v->l, k);
+}
+EPQ_RT_API int epq_eq(uint32_t da, EAny a, uint32_t db, EAny b);
+EPQ_RT_API int epq_lt(uint32_t da, EAny a, uint32_t db, EAny b);
+/* PAIR on at least one side (both already normalised). */
+EPQ_RT_API int epq_eq_pair(uint32_t da, EAny a, uint32_t db, EAny b) {
+    uint32_t ka = epq_rt_desc[da].kind, kb = epq_rt_desc[db].kind;
+    if (ka == EPQ_K_PAIR && kb == EPQ_K_PAIR) return a == b;
+    if ((ka != EPQ_K_PAIR && ka != EPQ_K_LIST) || (kb != EPQ_K_PAIR && kb != EPQ_K_LIST)) return 0;
+    EView va, vb;
+    epq_view(da, a, &va);
+    epq_view(db, b, &vb);
+    if (va.n != vb.n) return 0;
+    for (int32_t k = 0; k < va.n; k++)
+        if (!epq_eq(va.ed, epq_view_word(&va, k), vb.ed, epq_view_word(&vb, k))) return 0;
+    return 1;
+}
+EPQ_RT_API int epq_lt_pair(uint32_t da, EAny a, uint32_t db, EAny b) {
+    uint32_t ka = epq_rt_desc[da].kind, kb = epq_rt_desc[db].kind;
+    if (ka == EPQ_K_PAIR && kb == EPQ_K_PAIR) return (EPair)a < (EPair)b;
+    if ((ka != EPQ_K_PAIR && ka != EPQ_K_LIST) || (kb != EPQ_K_PAIR && kb != EPQ_K_LIST)) epq_fail(EPQ_E_INVALID_CMP);
+    EView va, vb;
+    epq_view(da, a, &va);
+    epq_view(db, b, &vb);
+    for (int32_t k = 0; k < vb.n; k++) {
+        if (k == va.n) return 1;
+        EAny x = epq_view_word(&va, k), y = epq_view_word(&vb, k);
+        if (epq_lt(va.ed, x, vb.ed, y)) return 1;
+        if (epq_lt(vb.ed, y, va.ed, x)) return 0;
+    }
+    return 0;
+}
+
 EPQ_RT_API int epq_eq(uint32_t da, EAny a, uint32_t db, EAny b) {
     epq_norm(&da, &a);
     epq_norm(&db, &b);
     uint32_t ka = epq_rt_desc[da].kind, kb = epq_rt_desc[db].kind;
+    if (EPQ_UNLIKELY(ka == EPQ_K_PAIR || kb == EPQ_K_PAIR)) return epq_eq_pair(da, a, db, b);
     if (ka != kb) return 0;
     if (ka == EPQ_K_INT) return (int32_t)a == (int32_t)b;
     if (ka == EPQ_K_FN) return a == b;
@@ -475,6 +633,7 @@ EPQ_RT_API int epq_lt(uint32_t da, EAny a, uint32_t db, EAny b) {
     epq_norm(&db, &b);
     uint32_t ka = epq_rt_desc[da].kind, kb = epq_rt_desc[db].kind;
     if (ka == EPQ_K_INT && kb == EPQ_K_INT) return (int32_t)a < (int32_t)b;
+    if (EPQ_UNLIKELY(ka == EPQ_K_PAIR || kb == EPQ_K_PAIR)) return epq_lt_pair(da, a, db, b);
     if (ka != EPQ_K_LIST || kb != EPQ_K_LIST) epq_fail(EPQ_E_INVALID_CMP);
     EList* la = (EList*)(uintptr_t)a;
     EList* lb = (EList*)(uintptr_t)b;
@@ -525,6 +684,12 @@ EPQ_RT_API void epq_print_val(uint32_t d, EAny w) {
         epq_out_int((int32_t)w);
     } else if (k == EPQ_K_FN) {
         epq_out("<function>", 10);
+    } else if (k == EPQ_K_PAIR) {
+        epq_out("[", 1);
+        epq_out_int(epq_pair_first((EPair)w));
+        epq_out(", ", 2);
+        epq_out_int(epq_pair_second((EPair)w));
+        epq_out("]", 1);
     } else {
         EList* l = (EList*)(uintptr_t)w;
         uint32_t e = epq_rt_desc[d].elem;

@@ -33,6 +33,9 @@ const char* op_name(Op o) {
         C(DivI32) C(NegI32) C(AbsI32) C(NotI32) C(EqI32) C(NeI32) C(LtI32) C(LeI32) C(GtI32) C(GeI32)
         C(DynArith) C(DynNeg) C(DynAbs) C(DynNot) C(Eq) C(Ne) C(Cmp) C(ListLit) C(Len) C(Index) C(SetIndex)
         C(Append) C(Pop) C(DynIndex) C(DynSetIndex) C(DynAppend) C(And) C(Or) C(CallDirect) C(CallDyn)
+        C(Select) C(InlineBlock) C(Break) C(PairMake) C(PairFirst) C(PairSecond) C(PairIndex) C(PairEq) C(PairNe)
+        C(PairLt) C(PairLe) C(PairGt) C(PairGe) C(ListData) C(ElemLoad) C(ElemStore) C(CheckIndex) C(Free)
+        C(SameList) C(Nop)
 #undef C
     }
     return "?";
@@ -66,6 +69,13 @@ uint32_t Module::desc_of(Type t) {
     case TK::Int: return 0;
     case TK::Any: return 1;
     case TK::Fn: return 3;
+    case TK::Pair:
+    case TK::Ptr: {  // one shared PAIR descriptor (Ptr never needs one; mapped for totality)
+        for (size_t i = 4; i < descs.size(); ++i)
+            if (descs[i].kind == 4) return (uint32_t)i;
+        descs.push_back({4, 0});
+        return (uint32_t)descs.size() - 1;
+    }
     case TK::List: {
         if (region_desc_memo.size() < regions.size()) region_desc_memo.resize(regions.size(), -1);
         if (region_desc_memo[t.a] >= 0) return (uint32_t)region_desc_memo[t.a];
@@ -100,8 +110,21 @@ bool is_pure(const Node* n) {
     case Op::AddI32: case Op::SubI32: case Op::MulI32: case Op::NegI32: case Op::AbsI32: case Op::NotI32:
     case Op::EqI32: case Op::NeI32: case Op::LtI32: case Op::LeI32: case Op::GtI32: case Op::GeI32:
     case Op::Box: case Op::Len:
+    case Op::Select: case Op::PairMake: case Op::PairFirst: case Op::PairSecond:
+    case Op::PairEq: case Op::PairNe: case Op::PairLt: case Op::PairLe: case Op::PairGt: case Op::PairGe:
+    case Op::SameList: case Op::ListData: case Op::ElemLoad: case Op::Nop:
         for (uint32_t i = 0; i < n->nkids; ++i)
             if (!is_pure(n->kids[i])) return false;
+        return true;
+    default:
+        return false;
+    }
+}
+
+bool is_stmt_op(Op o) {
+    switch (o) {
+    case Op::Seq: case Op::If: case Op::While: case Op::Return: case Op::Print:
+    case Op::InlineBlock: case Op::Break: case Op::Free: case Op::Nop:
         return true;
     default:
         return false;
@@ -115,6 +138,8 @@ std::string type_str(const Module& m, Type t) {
     case TK::Any: return "Any";
     case TK::Fn: return "Fn" + std::to_string(t.a);
     case TK::List: return "L" + std::to_string(t.a);
+    case TK::Pair: return "Pair" + std::to_string(t.a);
+    case TK::Ptr: return "Ptr" + std::to_string(t.a);
     }
     return "?";
 }
@@ -132,6 +157,7 @@ struct Dumper {
         std::string s;
         if (l.name != kNoSym) s = std::string(m.prog->syms->name(l.name));
         else if (l.kind == LocalKind::Temp) s = "tmp";
+        else if (l.kind == LocalKind::Cache) s = "cache";
         else s = "hid";
         return s + "%" + std::to_string(id);
     }
@@ -153,6 +179,7 @@ struct Dumper {
             o += std::string(" ") + op_name((Op)n->c) + " desc" + std::to_string(n->a) + ",desc" + std::to_string(n->b);
             break;
         case Op::CallDirect: o += " " + m.funcs[(size_t)n->a]->name; break;
+        case Op::InlineBlock: case Op::Break: o += " label" + std::to_string(n->a); break;
         case Op::While:
             if (n->flags & F_FOREACH) o += " foreach(idx=" + lname((uint32_t)n->a) + ", list=" + lname((uint32_t)n->b) + ")";
             if (n->flags & F_FOR) o += " for";
@@ -161,7 +188,7 @@ struct Dumper {
         }
         if (n->flags & F_CHECKED) o += " checked";
         if (n->flags & F_COND) o += " cond";
-        if (n->op > Op::Print) o += " : " + type_str(m, n->type);
+        if (!is_stmt_op(n->op)) o += " : " + type_str(m, n->type);
         bool leaf = n->nkids == 0;
         if (leaf) {
             o += "\n";
@@ -189,6 +216,7 @@ void dump(std::string& o, const Module& m) {
         o += "  L" + std::to_string(r) + " elem " + type_str(m, m.regions[r].elem);
         if (m.regions[r].header_mutated) o += " header-mutated";
         if (m.regions[r].elem_stored) o += " elem-stored";
+        if (m.regions[r].pair) o += " pair";
         o += " sites:";
         for (auto& s : m.regions[r].sites)
             o += " f" + std::to_string(s.func) + "/line" + std::to_string(s.line) + "/len" + std::to_string(s.len);
@@ -196,7 +224,7 @@ void dump(std::string& o, const Module& m) {
     }
     o += "descs:";
     for (size_t i = 0; i < m.descs.size(); ++i) {
-        static const char* kn[] = {"INT", "ANY", "FN", "LIST"};
+        static const char* kn[] = {"INT", "ANY", "FN", "LIST", "PAIR"};
         o += " " + std::to_string(i) + "=" + kn[m.descs[i].kind];
         if (m.descs[i].kind == 3) o += "(" + std::to_string(m.descs[i].elem) + ")";
     }
@@ -216,7 +244,7 @@ void dump(std::string& o, const Module& m) {
         if (f.mutates_any) o += " any";
         o += "\n  locals:";
         for (size_t i = 0; i < f.locals.size(); ++i) {
-            static const char* kn[] = {"param", "user", "hidden", "temp", "demoted"};
+            static const char* kn[] = {"param", "user", "hidden", "temp", "demoted", "cache"};
             o += " " + D.lname((uint32_t)i) + ":" + type_str(m, f.locals[i].type) + "(" + kn[(int)f.locals[i].kind] +
                  (f.locals[i].unique ? ",unique" : "") + ")";
         }
@@ -225,7 +253,7 @@ void dump(std::string& o, const Module& m) {
     }
 }
 
-// ---- pass manager -----------------------------------------------------------------
+// ---- constant folding (the pass manager is in src/passes/registry.cpp) --------------
 
 namespace {
 // Constant folding of pure integer subtrees (tiny; mostly a placeholder for the
@@ -247,34 +275,10 @@ Node* fold(Module& m, Node* n) {
     c->line = n->line;
     return c;
 }
-void pass_fold(Module& m) {
-    for (auto& f : m.funcs) f->body = fold(m, f->body);
-}
-
-const Pass kPassList[] = {
-    {"definite-assignment", "drop Undefined-global checks proven unnecessary (§2.6)", pass_definite_assignment},
-    {"constants", "single-literal globals become constants (§2.6)", pass_constants},
-    {"demote-globals", "globals used only by main become locals of main (§2.6)", pass_demote_globals},
-    {"fold", "constant folding of integer arithmetic", pass_fold},
-    {"region-info", "analysis: header-mutation summaries, unique lists (§5.2)", pass_region_info},
-};
 }  // namespace
 
-// Function-local static: no global constructor at start-up.
-const std::vector<Pass>& passes() {
-    static const std::vector<Pass> v(std::begin(kPassList), std::end(kPassList));
-    return v;
-}
-
-void run_passes(Module& m, const std::vector<std::string>& disabled, bool verbose) {
-    for (const Pass& p : kPassList) {
-        bool off = false;
-        for (auto& d : disabled)
-            if (d == p.name) off = true;
-        if (off) continue;
-        if (verbose) std::fprintf(stderr, "pass %s\n", p.name);
-        p.run(m);
-    }
+void pass_fold(Module& m) {
+    for (auto& f : m.funcs) f->body = fold(m, f->body);
 }
 
 }  // namespace epq::tir

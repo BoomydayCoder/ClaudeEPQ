@@ -19,13 +19,17 @@ struct CGen {
     std::string out;
     const Func* F = nullptr;
     int tmpn = 0;
+    int labeln = 0;                                   // C labels (InlineBlock), per function
+    std::vector<std::pair<int32_t, int>> blocks;     // enclosing InlineBlocks: (TIR label, C label)
 
     explicit CGen(const Module& m) : M(m) {}
 
-    static std::string ctype(Type t) {
+    std::string ctype(Type t) const {
         switch (t.k) {
         case TK::List: return "EList*";
         case TK::Any: return "EAny";
+        case TK::Pair: return "EPair";
+        case TK::Ptr: return M.elem_is_i32(t.a) ? "EI32*" : "EW64*";
         default: return "int32_t";
         }
     }
@@ -79,6 +83,8 @@ struct CGen {
             if (pure) return "epq_box_fn(" + std::to_string(t.a) + ")";
             return "((void)(" + e + "), epq_box_fn(" + std::to_string(t.a) + "))";
         case TK::Any: return e;
+        case TK::Pair: return "((EAny)(" + e + "))";
+        case TK::Ptr: break;
         }
         return e;
     }
@@ -93,6 +99,7 @@ struct CGen {
         case TK::List: return "((EList*)(uintptr_t)(" + w + "))";
         case TK::Any: return w;
         case TK::Fn: return "((void)(" + w + "), 0)";
+        case TK::Pair: return "((EPair)(" + w + "))";
         default: return "((int32_t)(" + w + "))";
         }
     }
@@ -278,6 +285,7 @@ struct CGen {
             return se(pre, "epq_call_dyn(" + k.v[na] + ", " + std::to_string(na) + ", " + arr + ")");
         }
         default:
+            if (std::string r; low_E(n, r)) return r;
             std::fprintf(stderr, "epq: cgen: unexpected op %s in expression\n", op_name(n->op));
             std::abort();
         }
@@ -305,6 +313,7 @@ struct CGen {
             }
             return "(EPQ_LIKELY(" + wa + " & " + wb + " & 1) ? (" + fast + ") : " + slow + ")";
         }
+        if (ta.k == TK::Pair && tb.k == TK::Pair) return low_pair_cmp(c, k.v[0], k.v[1]);
         if (ta.k == TK::List && tb.k == TK::List && M.elem_is_i32(ta.a) && M.elem_is_i32(tb.a)) {
             std::string a = k.v[0], b = k.v[1];
             switch (c) {
@@ -329,7 +338,8 @@ struct CGen {
             if (y->type.k == TK::Int) pre += "if (EPQ_UNLIKELY(" + b + " == 0)) epq_fail(EPQ_E_DIV_ZERO); ";
             else if (y->type.k == TK::Any) pre += "if (EPQ_UNLIKELY(" + b + " == 1)) epq_fail(EPQ_E_DIV_ZERO); ";
         }
-        bool xs = x->type.k == TK::List || x->type.k == TK::Fn, ys = y->type.k == TK::List || y->type.k == TK::Fn;
+        bool xs = x->type.k == TK::List || x->type.k == TK::Fn || x->type.k == TK::Pair,
+             ys = y->type.k == TK::List || y->type.k == TK::Fn || y->type.k == TK::Pair;
         if (xs || ys) return "({ " + pre + "epq_fail(EPQ_E_OPERANDS_INT); (int32_t)0; })";
         bool xa = x->type.k == TK::Any, ya = y->type.k == TK::Any;
         if (xa && ya) pre += "if (EPQ_UNLIKELY(!(" + a + " & " + b + " & 1))) epq_fail(EPQ_E_OPERANDS_INT); ";
@@ -364,6 +374,10 @@ struct CGen {
     }
 
     void ind(int d) { out.append((size_t)d * 4, ' '); }
+
+    // Low-TIR / extension ops (Select, InlineBlock/Break, Pair*, ListData,
+    // ElemLoad/ElemStore, CheckIndex, Free, SameList, Nop): src/cgen_low.inc.
+#include "cgen_low.inc"
 
     void S(const Node* n, int d) {
         switch (n->op) {
@@ -412,6 +426,7 @@ struct CGen {
             return;
         }
         default:
+            if (low_S(n, d)) return;
             if (is_pure(n)) return;
             ind(d);
             out += "(void)(" + E(n) + ");\n";
@@ -434,6 +449,8 @@ struct CGen {
     void func(const Func& f) {
         F = &f;
         tmpn = 0;
+        labeln = 0;
+        blocks.clear();
         out += proto(f) + " {\n";
         std::vector<bool> is_param(f.locals.size(), false);
         for (uint32_t p : f.params) is_param[p] = true;
