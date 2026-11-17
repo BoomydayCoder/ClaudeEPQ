@@ -1,0 +1,14 @@
+# function f1_f after --dump-tir-after=simplify: each "absent" op name must not
+# appear in that function's dump, each "present" line must appear.
+func f1_f
+absent SetLocal
+absent If
+absent While
+absent NotI32
+absent SubI32
+absent NegI32
+present GeI32
+present GtI32
+present Return
+present ConstInt 30
+present ConstInt -2147483648
