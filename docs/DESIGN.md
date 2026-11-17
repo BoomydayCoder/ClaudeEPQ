@@ -234,8 +234,14 @@ store whose bounds are already established before the `If`, and every right-hand
 and cannot fail, becomes straight-line code: `c` is evaluated once into a temporary, `x := e` becomes
 `x := Select(c, e, x)` and `A[i] := e` becomes `A[i] := Select(c, e, A[i])`. Sequential semantics are
 preserved statement by statement. The language is single-threaded, so introducing the stores is legal —
-something a C compiler is not allowed to assume. Covers the conditional swap of bubblesort and the
-child selection of heap sift-down.
+something a C compiler is not allowed to assume.
+
+**Revised after measurement.** Converting *element stores* is off by default: on bubblesort's swap it
+measured 4.7× slower (6.5 → 30.5 ms). The unconditional stores put a store-to-load dependency on the
+loop-carried path, and the branch they replace is one Apple's predictor already handles (once the
+running maximum is being carried, the comparison goes the same way almost every time). The default
+scope is scalar bodies only — heap child selection (`smallest := leftChild`), min/max updates — and each
+shape is enabled only where a back-to-back measurement shows a win.
 
 ### 5.6 Local simplification
 Constant folding and propagation, strength reduction (`* 2^k`, `/ 2^k`, other constant divisors by
@@ -269,6 +275,50 @@ free into an immediate wrong answer instead of silent corruption.
 A conservative mark-sweep collector triggered only when the heap passes a large threshold remains an
 optional backstop for programs the original could never run (unbounded allocation in a long loop). It
 is deliberately last: it adds risk and no speed.
+
+### 5.8–5.12 Optimisations added after profiling the first working compiler
+
+With the type inference and C backend running, every benchmark's generated code was inspected and the
+remaining costs measured, where possible by hand-editing the emitted C and timing it. That produced
+five additions (measurements are from those experiments, on a loaded machine):
+
+**5.8 Append loops (`appendopt`).** Appends dominate mergesort, quicksort and the sieve's set-up.
+- *Capacity hints.* Before a counted loop that appends once per iteration, reserve the trip count.
+  Capacity is unobservable, so a hint can never change behaviour.
+- *Bulk copy.* `for (i := a; i < b; i := i + 1) L :+ M[i]` becomes one range check plus `memcpy`, with the
+  original loop kept as the fallback whenever the range is not entirely in bounds, so the error fires at
+  the same iteration as before.
+- *Grow in place.* A buffer that is the most recent bump allocation is extended instead of copied, inside
+  one large lazily-committed reservation. Measured: mergesort_big 47 → 23 ms with hints + bulk copy;
+  5–20% from grow-in-place alone on every append-heavy program.
+
+**5.9 Comparisons that should not allocate (`litcmp`).** `t != []` allocated an empty list on every
+evaluation — 1.37 M of bintree's 1.73 M allocations. It becomes "is a list of length 0". The runtime's
+deep `<` also becomes a three-way walk: the original's definition compares each equal element twice
+(`x < y`, then `y < x`), which is exponential in nesting depth; a three-way walk visits the same pairs
+in the same order and raises `Invalid comparison` at the same first invalid pairing.
+
+**5.10 Recursion (`recur`).** The JIT gets none of what LLVM does for recursive code, so it is done in TIR.
+- *Self tail calls become loops.*
+- *Purity.* An instance that writes no global, does no I/O, mutates no list and calls only pure instances
+  returns the same result (or the same failure) for the same arguments.
+- *Duplicate pure calls are merged*, after unrolling a pure self-recursive function by one level:
+  `fib(n-1) + fib(n-2)` becomes `fib(n-2) + fib(n-3) + fib(n-2)` and the two `fib(n-2)` calls collapse.
+  Measured on recursive fib: 11.3 → 0.65 ms.
+
+**5.11 Records — per-position types for fixed-shape lists.** *(next wave)* `[key, [a, b]]` mixes an integer
+and a list, so the plain rule of §2.2 makes its elements `Any`; a sort of such records was the slowest
+benchmark (6.8×). A region whose allocation sites are all literals of one length *k*, which is only ever
+indexed by constants and never appended to or popped, gets one type variable *per position* instead of
+one for all elements. Records stay heap objects with identity (a constant-index store is fine), so this
+is a typing refinement, not unboxing; pair unboxing (§5.4) then applies to record fields that qualify.
+Implemented as a second inference run in which candidate regions found by the first are records; a
+region that turns out to be used otherwise is demoted and inference repeats. Measured by hand: 2.6×.
+
+**5.12 Byte lists — narrow element storage.** *(next wave)* When every value ever stored into a region
+is a constant in 0–255 (a sieve's flags, n-queens' column marks), the region is laid out one byte per
+element. A 4-byte flag array for the 6 M sieve is 24 MB and misses cache on every stride; one byte per
+flag measured 45 → 23 ms.
 
 ## 6. ARM64 JIT (default engine)
 

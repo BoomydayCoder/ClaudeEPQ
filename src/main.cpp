@@ -5,18 +5,23 @@
 // Exit status: 0 ok, 1 syntax / compile / run-time error (as the original),
 // 2 usage error or missing back end.
 
+#include <mach/mach_time.h>
 #include <pthread.h>
+#include <sys/resource.h>
+#include <unistd.h>
 
-#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <iostream>
+#include <ostream>
+#include <streambuf>
 #include <string>
 
 #include "backend.hpp"
 #include "frontend.hpp"
+#include "infer.hpp"
 #include "tir.hpp"
+#include "tirbuild.hpp"
 
 using namespace epq;
 
@@ -46,15 +51,60 @@ void usage(FILE* f, const char* argv0) {
                  "  --parse-only       parse (and dump with -e), then exit 0/1 without running\n"
                  "  --dump-resolved    print globals, functions, scopes and bindings, then exit\n"
                  "  --frontend-time    print front-end phase timings to stderr\n"
-                 "  --frontend-bench=N run lex+parse+resolve N times in process, report timing\n"
+                 "  --frontend-bench=N run parse..TIR passes N times in process, report per-phase timing\n"
+                 "                     (with --parse-only: lex+parse+resolve only)\n"
                  "  -h, --help         this help\n",
                  argv0);
 }
 
-using Clock = std::chrono::steady_clock;
-double us_since(Clock::time_point t) {
-    return std::chrono::duration<double, std::micro>(Clock::now() - t).count();
+// Monotonic clock in mach ticks (no <chrono>, no libc++ clock calls).
+struct Clock {
+    using time_point = uint64_t;
+    static time_point now() { return mach_absolute_time(); }
+};
+double ticks_us(uint64_t d) {
+    static mach_timebase_info_data_t tb;
+    if (tb.denom == 0) mach_timebase_info(&tb);
+    return (double)d * tb.numer / tb.denom / 1000.0;
 }
+double us_since(Clock::time_point t) { return ticks_us(Clock::now() - t); }
+long minflt() {
+    struct rusage ru;
+    getrusage(RUSAGE_SELF, &ru);
+    return ru.ru_minflt;
+}
+
+// Unbuffered-enough ostream onto a file descriptor, so the AST / resolver
+// dumps need neither <iostream> nor std::cout / std::cerr.
+class FdBuf : public std::streambuf {
+public:
+    explicit FdBuf(int fd) : fd_(fd) { setp(buf_, buf_ + sizeof buf_); }
+    ~FdBuf() override { sync(); }
+    int sync() override {
+        const char* p = pbase();
+        size_t n = (size_t)(pptr() - pbase());
+        while (n > 0) {
+            ssize_t w = ::write(fd_, p, n);
+            if (w <= 0) break;
+            p += w;
+            n -= (size_t)w;
+        }
+        setp(buf_, buf_ + sizeof buf_);
+        return 0;
+    }
+    int_type overflow(int_type c) override {
+        sync();
+        if (c != traits_type::eof()) {
+            *pptr() = (char)c;
+            pbump(1);
+        }
+        return 0;
+    }
+
+private:
+    int fd_;
+    char buf_[8192];
+};
 
 // Everything after reading the source: parse, dump, resolve, back end.
 int pipeline(CompileUnit& cu, Options& opts, Clock::time_point t0, double t_read) {
@@ -64,8 +114,10 @@ int pipeline(CompileUnit& cu, Options& opts, Clock::time_point t0, double t_read
     if (!parsed) return 1;
 
     if (opts.dump_ast) {
-        dump_ast(std::cerr, cu.root, cu.syms);
-        std::cerr.flush();
+        FdBuf b(2);
+        std::ostream os(&b);
+        dump_ast(os, cu.root, cu.syms);
+        os.flush();
     }
     if (opts.parse_only) {
         if (opts.frontend_time)
@@ -82,8 +134,10 @@ int pipeline(CompileUnit& cu, Options& opts, Clock::time_point t0, double t_read
     if (!resolved) return 1;
 
     if (opts.dump_resolved) {
-        dump_resolved(std::cout, cu.prog);
-        std::cout.flush();
+        FdBuf b(1);
+        std::ostream os(&b);
+        dump_resolved(os, cu.prog);
+        os.flush();
         return 0;
     }
 
@@ -92,22 +146,92 @@ int pipeline(CompileUnit& cu, Options& opts, Clock::time_point t0, double t_read
 
 }  // namespace
 
-// --frontend-bench=N: lex+parse+resolve the (already read) source N times in
-// process and report the best and mean time per iteration (warm caches).
-int frontend_bench(const CompileUnit& src, int iters) {
-    double best = 1e30, total = 0;
-    for (int i = 0; i < iters; ++i) {
-        auto t = Clock::now();
+// --frontend-bench=N: run the whole compile front half (lex+parse, resolve,
+// inference, TIR build, TIR passes) on the (already read) source N times in
+// process and report the best and mean time per phase (warm caches).
+int frontend_bench(const CompileUnit& src, int iters, const Options& opts) {
+    enum { P_PARSE, P_RESOLVE, P_INFER, P_BUILD, P_PASSES, P_TOTAL, NP };
+    static const char* const names[NP] = {"lex+parse", "resolve", "infer", "tir-build", "passes", "total"};
+    const auto& plist = tir::passes();
+    size_t npass = plist.size();
+    std::vector<double> best(NP + npass, 1e30), sum(NP + npass, 0), first(NP + npass, 0);
+    std::vector<long> flt(NP + npass, 0);  // page faults during the first iteration
+    long flt_start = minflt();
+    bool backend = !opts.parse_only;
+    long fl = 0;
+    auto acc = [&](size_t i, uint64_t d) {
+        double us = ticks_us(d);
+        if (us < best[i]) best[i] = us;
+        if (sum[i] == 0) first[i] = us;
+        sum[i] += us;
+    };
+    // First iteration only: faults since the previous mark.
+    auto mark = [&](int it, size_t i) {
+        if (it) return;
+        long f = minflt();
+        flt[i] = f - fl;
+        fl = f;
+    };
+    for (int it = 0; it < iters; ++it) {
+        fl = minflt();
+        long fl0 = fl;
+        uint64_t t0 = Clock::now();
         CompileUnit cu;
         cu.file = src.file;
         cu.source = src.source;
-        if (!parse_unit(cu) || !resolve_unit(cu)) return 1;
-        double us = us_since(t);
-        best = us < best ? us : best;
-        total += us;
+        if (!parse_unit(cu)) return 1;
+        uint64_t t1 = Clock::now();
+        mark(it, P_PARSE);
+        if (!resolve_unit(cu)) return 1;
+        uint64_t t2 = Clock::now();
+        mark(it, P_RESOLVE);
+        acc(P_PARSE, t1 - t0);
+        acc(P_RESOLVE, t2 - t1);
+        if (backend) {
+            infer::Config cfg;
+            cfg.poly = !opts.mono;
+            cfg.dedup = !opts.no_dedup;
+            infer::Result R;
+            infer::infer(cu.prog, cfg, R);
+            uint64_t t3 = Clock::now();
+            mark(it, P_INFER);
+            tir::Module M;
+            build_tir(cu.prog, R, BuildOptions{}, M);
+            uint64_t t4 = Clock::now();
+            mark(it, P_BUILD);
+            uint64_t tp = t4;
+            for (size_t p = 0; p < npass; ++p) {
+                bool off = false;
+                for (auto& d : opts.no_pass)
+                    if (d == plist[p].name) off = true;
+                if (!off) plist[p].run(M);
+                uint64_t tq = Clock::now();
+                mark(it, NP + p);
+                acc(NP + p, tq - tp);
+                tp = tq;
+            }
+            acc(P_INFER, t3 - t2);
+            acc(P_BUILD, t4 - t3);
+            acc(P_PASSES, tp - t4);
+            acc(P_TOTAL, tp - t0);
+        } else {
+            acc(P_TOTAL, t2 - t0);
+        }
+        if (it == 0) {
+            for (size_t p = 0; p < npass; ++p) flt[P_PASSES] += flt[NP + p];
+            flt[P_TOTAL] = minflt() - fl0;
+        }
     }
-    std::fprintf(stderr, "frontend-bench: %d iterations, best %.2f us, mean %.2f us (lex+parse+resolve, %zu bytes)\n",
-                 iters, best, total / iters, src.source.size());
+    std::fprintf(stderr, "frontend-bench: %s, %zu bytes, %d iterations (best / mean / first us, first faults);"
+                 " %ld faults before\n", src.file.c_str(), src.source.size(), iters, flt_start);
+    for (int i = 0; i < NP; ++i) {
+        if (!backend && i >= P_INFER && i < P_TOTAL) continue;
+        std::fprintf(stderr, "  %-22s %9.2f %9.2f %9.2f %5ld\n", names[i], best[i], sum[i] / iters, first[i], flt[i]);
+    }
+    if (backend)
+        for (size_t p = 0; p < npass; ++p)
+            std::fprintf(stderr, "    pass %-17s %9.2f %9.2f %9.2f %5ld\n", plist[p].name, best[NP + p],
+                         sum[NP + p] / iters, first[NP + p], flt[NP + p]);
     return 0;
 }
 
@@ -188,7 +312,7 @@ int main(int argc, char** argv) {
     CompileUnit cu;
     if (!load_source(cu, opts.file)) return 1;
     double t_read = us_since(t0);
-    if (bench_iters > 0) return frontend_bench(cu, bench_iters);
+    if (bench_iters > 0) return frontend_bench(cu, bench_iters, opts);
 
     // Small sources cannot nest deeply enough to threaten the main thread's
     // stack. Larger ones run the whole pipeline on a thread whose (lazily

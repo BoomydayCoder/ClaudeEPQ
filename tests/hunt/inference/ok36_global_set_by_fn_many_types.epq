@@ -1,0 +1,11 @@
+g := 0;
+setg := (v) => { g := v; };
+getg := () => { => g; };
+setg(1);
+>> getg() + 1;
+setg([2]);
+>> getg();
+setg(setg);
+>> getg() = setg;
+setg(5);
+>> getg() * 2;

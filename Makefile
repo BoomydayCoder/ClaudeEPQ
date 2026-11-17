@@ -15,6 +15,10 @@ WARN     := -Wall -Wextra -Wpedantic -Wshadow -Wno-unused-parameter
 OPT      := -O2
 CXXFLAGS ?=
 LDFLAGS  ?=
+# Drop unreferenced code: fewer pages to map / fault at start-up. The host
+# runtime (runtime/epq_rt_host.c) marks its entry points `used`, so code that
+# reaches them only by address or by name still finds them.
+LDOPT    := -Wl,-dead_strip
 
 SRCS     := $(wildcard src/*.cpp src/*/*.cpp)
 CSRCS    := $(wildcard runtime/*.c)
@@ -36,7 +40,7 @@ debug: build/epq-asan
 
 build/epq: $(OBJS)
 	@mkdir -p $(dir $@)
-	$(CXX) $(OPT) $(LDFLAGS) -o $@ $(OBJS)
+	$(CXX) $(OPT) $(LDOPT) $(LDFLAGS) -o $@ $(OBJS)
 
 build/epq-asan: $(ASANOBJS)
 	@mkdir -p $(dir $@)

@@ -21,8 +21,9 @@ namespace {
 struct Walk {
     Module& M;
     Func* F = nullptr;
-    std::vector<uint32_t> sets, ok_reads, bad_reads;
+    std::vector<uint32_t> sets, bad_reads;
     std::vector<uint8_t> lit_set;
+    std::vector<uint32_t> calls;  // CallDirect targets of all functions, preorder (flat)
 
     void add_mut(Func* f, uint32_t r) {
         if (std::find(f->mutates.begin(), f->mutates.end(), r) == f->mutates.end()) f->mutates.push_back(r);
@@ -43,6 +44,9 @@ struct Walk {
         case Op::CallDyn:
             F->mutates_any = true;
             break;
+        case Op::CallDirect:
+            calls.push_back((uint32_t)n->a);
+            break;
         case Op::SetLocal:
             sets[(size_t)n->a]++;
             if (n->kids[0]->op == Op::ListLit) lit_set[(size_t)n->a] = 1;
@@ -52,19 +56,13 @@ struct Walk {
                         (parent->op == Op::Index || parent->op == Op::SetIndex || parent->op == Op::Append ||
                          parent->op == Op::Pop || parent->op == Op::Len);
             bool ret = parent && parent->op == Op::Return;
-            if (base || ret) ok_reads[(size_t)n->a]++;
-            else bad_reads[(size_t)n->a]++;
+            if (!(base || ret)) bad_reads[(size_t)n->a]++;
             break;
         }
         default:
             break;
         }
         for (uint32_t i = 0; i < n->nkids; ++i) visit(n->kids[i], n, i);
-    }
-
-    void callees(Node* n, std::vector<uint32_t>& out) {
-        if (n->op == Op::CallDirect) out.push_back((uint32_t)n->a);
-        for (uint32_t i = 0; i < n->nkids; ++i) callees(n->kids[i], out);
     }
 };
 
@@ -73,7 +71,9 @@ struct Walk {
 void pass_region_info(Module& m) {
     Walk w{m, nullptr, {}, {}, {}, {}};
     for (auto& r : m.regions) r.header_mutated = r.elem_stored = false;
-    std::vector<std::vector<uint32_t>> calls(m.funcs.size());
+    size_t nf = m.funcs.size();
+    // CallDirect targets of function id i: w.calls[cb[i] .. ce[i])
+    std::vector<uint32_t> cb(nf, 0), ce(nf, 0);
     for (auto& fp : m.funcs) {
         Func* f = fp.get();
         f->mutates.clear();
@@ -81,40 +81,43 @@ void pass_region_info(Module& m) {
         w.F = f;
         size_t nl = f->locals.size();
         w.sets.assign(nl, 0);
-        w.ok_reads.assign(nl, 0);
         w.bad_reads.assign(nl, 0);
         w.lit_set.assign(nl, 0);
+        cb[f->id] = (uint32_t)w.calls.size();
         w.visit(f->body, nullptr, 0);
+        ce[f->id] = (uint32_t)w.calls.size();
         for (size_t l = 0; l < nl; ++l) {
             Local& L = f->locals[l];
             L.unique = L.kind != LocalKind::Param && L.type.k == TK::List && w.sets[l] == 1 && w.lit_set[l] &&
                        w.bad_reads[l] == 0;
         }
-        w.callees(f->body, calls[f->id]);
     }
     // Generic entries are reachable from any dynamic call.
     std::vector<uint32_t> generics;
     for (auto& f : m.funcs)
         if (f->generic) generics.push_back(f->id);
+    auto absorb = [&](Func* f, uint32_t c, bool& changed) {
+        Func* g = m.funcs[c].get();
+        if (g->mutates_any && !f->mutates_any) {
+            f->mutates_any = true;
+            changed = true;
+        }
+        if (g == f) return;
+        for (uint32_t r : g->mutates) {
+            if (std::find(f->mutates.begin(), f->mutates.end(), r) == f->mutates.end()) {
+                f->mutates.push_back(r);
+                changed = true;
+            }
+        }
+    };
     for (bool changed = true; changed;) {
         changed = false;
         for (auto& fp : m.funcs) {
             Func* f = fp.get();
-            std::vector<uint32_t> cs = calls[f->id];
-            if (f->mutates_any) cs.insert(cs.end(), generics.begin(), generics.end());
-            for (uint32_t c : cs) {
-                Func* g = m.funcs[c].get();
-                if (g->mutates_any && !f->mutates_any) {
-                    f->mutates_any = true;
-                    changed = true;
-                }
-                for (uint32_t r : g->mutates) {
-                    if (std::find(f->mutates.begin(), f->mutates.end(), r) == f->mutates.end()) {
-                        f->mutates.push_back(r);
-                        changed = true;
-                    }
-                }
-            }
+            bool any = f->mutates_any;  // generics join the callees as of the start of f's visit
+            for (uint32_t i = cb[f->id]; i < ce[f->id]; ++i) absorb(f, w.calls[i], changed);
+            if (any)
+                for (uint32_t c : generics) absorb(f, c, changed);
         }
     }
     for (auto& f : m.funcs) std::sort(f->mutates.begin(), f->mutates.end());
