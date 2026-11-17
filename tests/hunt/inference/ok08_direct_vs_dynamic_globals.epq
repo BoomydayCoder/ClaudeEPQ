@@ -1,0 +1,13 @@
+cnt := 0;
+inc := (k) => { cnt := cnt + k; => cnt; };
+fs := [inc, inc];
+>> inc(1);
+>> fs[0](10);
+>> cnt;
+h := inc;
+>> h(100);
+h := 5;
+>> h + cnt;
+z := [inc][0];
+>> z(1000);
+>> cnt;
