@@ -1,0 +1,8 @@
+// outside loops: not converted (heuristic), semantics unchanged
+a := 3; b := 0;
+(a > 2) ? b := a * 2;
+(a > 5) ? b := 99;
+>> b;
+f := (x) => { r := 0; (x > 0) ? r := x; => r; };
+>> f(4);
+>> f(-4);

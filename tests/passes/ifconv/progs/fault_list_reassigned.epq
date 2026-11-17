@@ -1,0 +1,9 @@
+// list local replaced by a shorter list after the established access
+a := [1, 2, 3, 4, 5];
+(k := 0; k < 2; k := k + 1;) @ {
+  y := a[4];
+  a := [9];
+  (y > 100) ? a[4] := 0;
+  (y > 0) ? a[4] := 0;
+}
+>> a;
