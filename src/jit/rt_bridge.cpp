@@ -49,5 +49,11 @@ char** jrt_bump_end_ptr(void) { return &epq_bump_end; }
 void** jrt_fl_small_ptr(void) { return epq_fl_small; }
 int32_t jrt_poison_on(void) { return epq_poison_on(); }
 void jrt_list_free(void* l, uint32_t esz) { epq_list_free(static_cast<EList*>(l), esz); }
+void jrt_list_reserve(void* l, int32_t n, uint32_t esz) { epq_list_reserve(static_cast<EList*>(l), n, esz); }
+int32_t jrt_append_range(void* l, void* m, int32_t lo, int32_t hi, uint32_t esz) {
+    return epq_append_range(static_cast<EList*>(l), static_cast<EList*>(m), lo, hi, esz);
+}
+int32_t jrt_eq_la(void* a, void* b) { return epq_eq_la(static_cast<EList*>(a), static_cast<EList*>(b)); }
+int32_t jrt_cmp3_la(void* a, void* b) { return epq_cmp3_la(static_cast<EList*>(a), static_cast<EList*>(b)); }
 
 }  // extern "C"

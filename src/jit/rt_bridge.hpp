@@ -25,4 +25,10 @@ char** jrt_bump_end_ptr(void);
 void** jrt_fl_small_ptr(void);
 int32_t jrt_poison_on(void);
 void jrt_list_free(void* l, uint32_t esz);
+// appendopt
+void jrt_list_reserve(void* l, int32_t n, uint32_t esz);
+int32_t jrt_append_range(void* l, void* m, int32_t lo, int32_t hi, uint32_t esz);
+// litcmp: both lists with Any elements
+int32_t jrt_eq_la(void* a, void* b);
+int32_t jrt_cmp3_la(void* a, void* b);
 }

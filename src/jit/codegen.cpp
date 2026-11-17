@@ -95,6 +95,10 @@ enum Helper : int {
     H_CALL_DYN,
     H_ALLOC_SLOW,
     H_LIST_FREE,
+    H_RESERVE,
+    H_APPEND_RANGE,
+    H_EQ_LA,
+    H_CMP3_LA,
     H_COUNT
 };
 
@@ -115,12 +119,17 @@ const void* helper_addr(int h) {
     case H_CALL_DYN: return (const void*)&jrt_call_dyn;
     case H_ALLOC_SLOW: return (const void*)&jrt_alloc_slow;
     case H_LIST_FREE: return (const void*)&jrt_list_free;
+    case H_RESERVE: return (const void*)&jrt_list_reserve;
+    case H_APPEND_RANGE: return (const void*)&jrt_append_range;
+    case H_EQ_LA: return (const void*)&jrt_eq_la;
+    case H_CMP3_LA: return (const void*)&jrt_cmp3_la;
     }
     return nullptr;
 }
 const char* helper_name(int h) {
     static const char* n[] = {"rt_fail", "rt_print_int", "rt_print", "rt_read_int", "rt_list_new", "rt_list_grow",
-                              "rt_eq", "rt_lt", "rt_eq_li", "rt_lt_li", "rt_dyn_neg", "rt_dyn_abs", "rt_call_dyn", "rt_alloc_slow", "rt_list_free"};
+                              "rt_eq", "rt_lt", "rt_eq_li", "rt_lt_li", "rt_dyn_neg", "rt_dyn_abs", "rt_call_dyn", "rt_alloc_slow", "rt_list_free",
+                              "rt_list_reserve", "rt_append_range", "rt_eq_la", "rt_cmp3_la"};
     return n[h];
 }
 
@@ -547,7 +556,9 @@ public:
         case Op::CallDirect:
         case Op::CallDyn:
         case Op::Print:
-        case Op::Input: return true;
+        case Op::Input:
+        case Op::Reserve:
+        case Op::AppendRange: return true;
         case Op::ListLit: return !lit_inline(n);
         case Op::Eq:
         case Op::Ne:
@@ -1254,6 +1265,20 @@ public:
         case Op::ElemLoad: return elem_load(n, want);
         case Op::ElemStore: return elem_store(n);
         case Op::CheckIndex: return check_index(n);
+        case Op::Reserve: {  // appendopt: epq_list_reserve(l, n, esz); value 0
+            V k[2];
+            eval_kids(n, 0, 2, k);
+            std::initializer_list<Move> mv{{0, k[0], true}, {1, k[1], false}, {2, V::im(esz_of(n->kids[0]->type.a)), false}};
+            helper_call(H_RESERVE, mv, false);
+            return V::im(0);
+        }
+        case Op::AppendRange: {  // appendopt: epq_append_range(l, m, lo, hi, esz)
+            V k[4];
+            eval_kids(n, 0, 4, k);
+            std::initializer_list<Move> mv{{0, k[0], true}, {1, k[1], true}, {2, k[2], false}, {3, k[3], false},
+                                           {4, V::im(esz_of(n->kids[0]->type.a)), false}};
+            return helper_call(H_APPEND_RANGE, mv, true);
+        }
         case Op::DynIsEmptyList: {
             // (x & 3) == 0 && ((EList*)x)->len == 0  (epq_is_empty_list)
             V v = expr(n->kids[0]);
@@ -1610,6 +1635,10 @@ public:
         Type ta = n->kids[0]->type, tb = n->kids[1]->type;
         return ta.k == TK::List && tb.k == TK::List && M.elem_is_i32(ta.a) && M.elem_is_i32(tb.a);
     }
+    bool la_fast(const Node* n) {
+        Type ta = n->kids[0]->type, tb = n->kids[1]->type;
+        return ta.k == TK::List && tb.k == TK::List && M.regions[ta.a].elem.k == TK::Any && M.regions[tb.a].elem.k == TK::Any;
+    }
     // Non-inline Eq/Ne/Cmp: result in a fresh register (helper call).
     V deep_cmp_call(const Node* n) {
         V k[2];
@@ -1617,6 +1646,19 @@ public:
         Op c = n->op == Op::Cmp ? (Op)n->c : n->op;
         bool swap = c == Op::GtI32 || c == Op::LeI32;
         bool neg = n->op == Op::Ne || c == Op::LeI32 || c == Op::GeI32;
+        if (la_fast(n)) {  // litcmp: epq_eq_la / epq_cmp3_la(a, b) <op> 0, as the C backend
+            if (n->op == Op::Eq || n->op == Op::Ne) {
+                std::initializer_list<Move> mv{{0, k[0], true}, {1, k[1], true}};
+                V r = helper_call(H_EQ_LA, mv, true);
+                if (n->op == Op::Ne) A->eor(W(r.r), W(r.r), (uint64_t)1);
+                return r;
+            }
+            std::initializer_list<Move> mv{{0, k[0], true}, {1, k[1], true}};
+            V r = helper_call(H_CMP3_LA, mv, true);
+            A->cmp(W(r.r), 0u);
+            A->cset(W(r.r), cond_of(c));
+            return r;
+        }
         if (li_fast(n)) {
             int h = (n->op == Op::Eq || n->op == Op::Ne) ? H_EQ_LI : H_LT_LI;
             std::initializer_list<Move> mv{{swap ? 1 : 0, k[0], true}, {swap ? 0 : 1, k[1], true}};
@@ -2707,6 +2749,7 @@ public:
             bug("Break outside its InlineBlock");
         }
         case Op::Free: free_list(n); return;
+        case Op::Reserve: discard_value(n); return;
         case Op::Nop: return;
         default:
             if (tir::is_pure(n)) return;
@@ -3214,6 +3257,7 @@ bool op_supported(Op o) {
     case Op::ListData: case Op::ElemLoad: case Op::ElemStore: case Op::CheckIndex:
     case Op::Free: case Op::SameList: case Op::Nop:
     case Op::DynIsEmptyList:  // litcmp
+    case Op::Reserve: case Op::AppendRange:  // appendopt
         return true;
     default: return false;
     }
