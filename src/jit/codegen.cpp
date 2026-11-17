@@ -153,6 +153,7 @@ struct V {
 struct NInfo {
     uint32_t en = 0, lv = 0;
     bool call = false;
+    bool cref = false;  // ConstInt read through its pseudo-local register
 };
 
 struct Ref {
@@ -176,6 +177,8 @@ struct LocalInfo {
     bool crosses_call = false;
     int reg = -1;   // assigned register
     int slot = -1;  // else frame slot
+    bool is_const = false;  // pseudo-local holding a large constant used in loops
+    int64_t cval = 0;
     std::vector<Ref> refs;
 };
 
@@ -235,7 +238,53 @@ public:
 
     // ---- per function ----
     const Func* F = nullptr;
-    std::unordered_map<const Node*, NInfo> info;
+    // node -> NInfo: flat open-addressing table (pointer keys), reused per function
+    struct InfoMap {
+        struct E {
+            const Node* k;
+            NInfo v;
+        };
+        std::vector<E> t;
+        size_t mask = 0, n = 0;
+        void reset(size_t expect) {
+            size_t cap = 64;
+            while (cap < expect * 2) cap <<= 1;
+            if (t.size() != cap) t.assign(cap, E{nullptr, {}});
+            else std::fill(t.begin(), t.end(), E{nullptr, {}});
+            mask = cap - 1;
+            n = 0;
+        }
+        static size_t h(const Node* p) { return (size_t)(((uintptr_t)p >> 4) * 0x9E3779B97F4A7C15ull >> 20); }
+        void put(const Node* k, NInfo v) {
+            if (2 * (n + 1) > t.size()) grow();
+            size_t i = h(k) & mask;
+            while (t[i].k && t[i].k != k) i = (i + 1) & mask;
+            if (!t[i].k) ++n;
+            t[i] = E{k, v};
+        }
+        const NInfo* get(const Node* k) const {
+            size_t i = h(k) & mask;
+            while (t[i].k) {
+                if (t[i].k == k) return &t[i].v;
+                i = (i + 1) & mask;
+            }
+            return nullptr;
+        }
+        void grow() {
+            std::vector<E> old;
+            old.swap(t);
+            t.assign(old.size() * 2, E{nullptr, {}});
+            mask = t.size() - 1;
+            n = 0;
+            for (auto& e : old)
+                if (e.k) put(e.k, e.v);
+        }
+    } info;
+    static size_t count_nodes(const Node* n) {
+        size_t c = 1;
+        for (uint32_t i = 0; i < n->nkids; ++i) c += count_nodes(n->kids[i]);
+        return c;
+    }
     std::vector<LocalInfo> L;
     std::vector<LoopRec> loops;
     std::vector<uint32_t> call_pos;
@@ -270,9 +319,9 @@ public:
         std::abort();
     }
     const NInfo& I(const Node* n) {
-        auto it = info.find(n);
-        if (it == info.end()) bug("node without info");
-        return it->second;
+        const NInfo* p = info.get(n);
+        if (!p) bug("node without info");
+        return *p;
     }
     Label ext_func(uint32_t f) { return dry ? dummy : func_label[f]; }
     Label ext_helper(int h) {
@@ -447,6 +496,7 @@ public:
     // v is pending while kids [from, to] of n are evaluated.
     void hold(V& v, const Node* n, uint32_t from, uint32_t to) {
         if (v.k != V::REG) return;
+        if (early_) return;  // before the prologue: pure, call-free, no writes
         if (from > to || from >= n->nkids) return;
         bool across = range_has_call(n, from, to);
         if (!v.own) {
@@ -500,11 +550,32 @@ public:
     void prepass(const Node* n, int depth) {
         uint32_t en = pos_++;
         bool call = false;
+        bool cref = false;
         auto kid = [&](uint32_t i, int d) {
             prepass(n->kids[i], d);
-            call |= info[n->kids[i]].call;
+            call |= info.get(n->kids[i])->call;
         };
         switch (n->op) {
+        case Op::ConstInt: {
+            // Constants needing more than one instruction, used inside loops,
+            // compete for registers as pseudo-locals (initialised at entry).
+            if (depth > 0 && !no_const_reg_ && Assembler::load_imm_len(n->a, false) > 1) {
+                uint32_t id = const_local(n->a);
+                L[id].refs.push_back(Ref{en, ctx_, false});
+                L[id].weight += 0.5 * wdepth(depth);
+                cref = true;
+            }
+            break;
+        }
+        case Op::DivI32:
+        case Op::DynArith: {
+            // a constant divisor keeps its immediate form (magic-number division)
+            kid(0, depth);
+            no_const_reg_ = true;
+            kid(1, depth);
+            no_const_reg_ = false;
+            break;
+        }
         case Op::Local: {
             LocalInfo& l = L[(size_t)n->a];
             if (!l.fn) {
@@ -570,7 +641,7 @@ public:
             call = true;
             call_pos.push_back(n->op == Op::ListLit ? en : lv);
         }
-        info[n] = NInfo{en, lv, call};
+        info.put(n, NInfo{en, lv, call, cref});
     }
 
     // Definite assignment (for zero-initialisation): bits = assigned locals.
@@ -644,9 +715,27 @@ public:
     }
     std::vector<std::pair<int32_t, Bits*>> da_blocks;
 
+    bool no_const_reg_ = false;
+    std::vector<std::pair<int64_t, uint32_t>> const_ids;  // constant -> pseudo-local id
+    uint32_t const_local(int64_t v) {
+        for (auto& c : const_ids)
+            if (c.first == v) return c.second;
+        LocalInfo l;
+        l.is_const = true;
+        l.cval = v;
+        l.needs_init = true;
+        L.push_back(l);
+        const_ids.push_back({v, (uint32_t)L.size() - 1});
+        return (uint32_t)L.size() - 1;
+    }
+    int const_reg(int64_t v) {
+        for (auto& c : const_ids)
+            if (c.first == v) return L[c.second].reg;
+        return -1;
+    }
     void analyze() {
-        info.clear();
-        info.reserve(1024);
+        info.reset(count_nodes(F->body));
+        const_ids.clear();
         loops.clear();
         call_pos.clear();
         pos_ = 0;
@@ -747,7 +836,7 @@ public:
                 busy[(size_t)pick].push_back({l.lo, l.hi});
                 if (pick >= 19) callee_used |= bit(pick);
                 else caller_locals |= bit(pick);
-            } else {
+            } else if (!l.is_const) {
                 l.slot = nfixed++;
             }
         }
@@ -767,6 +856,7 @@ public:
     V read_local(uint32_t id) {
         LocalInfo& l = L[id];
         if (l.fn) return V::none();
+        if (early_) return V::reg(l.param_idx, false);
         if (l.reg >= 0) return V::reg(l.reg, false);
         if (l.slot >= 0) {
             int r = talloc();
@@ -908,7 +998,13 @@ public:
 
     V expr(const Node* n, int want = -1) {
         switch (n->op) {
-        case Op::ConstInt: return V::im(n->a);
+        case Op::ConstInt: {
+            if (!const_ids.empty() && !early_ && I(n).cref) {
+                int r = const_reg(n->a);
+                if (r >= 0) return V::reg(r, false);
+            }
+            return V::im(n->a);
+        }
         case Op::ConstFn: return V::none();
         case Op::Local: return read_local((uint32_t)n->a);
         case Op::GetGlobal: return get_global(n, want);
@@ -2230,9 +2326,23 @@ public:
         case Op::LeI32:
         case Op::GtI32:
         case Op::GeI32: {
-            // cbz/cbnz for comparisons with 0 (eq/ne)
+            // cbz/cbnz for comparisons with 0 (eq/ne); tbz/tbnz on the sign bit (lt/ge)
             const Node* a = n->kids[0];
             const Node* b = n->kids[1];
+            if ((n->op == Op::LtI32 || n->op == Op::GeI32) && (b->op == Op::ConstInt && b->a == 0)) {
+                V v = expr(a);
+                if (v.k == V::IMM) {
+                    bool r = ((int32_t)v.imm < 0) == (n->op == Op::LtI32);
+                    if (r == sense) A->b(target);
+                    return;
+                }
+                Reg r = R(v, false);
+                bool jneg = (n->op == Op::LtI32) == sense;
+                if (jneg) A->tbnz(r, 31, target);
+                else A->tbz(r, 31, target);
+                release(v);
+                return;
+            }
             if ((n->op == Op::EqI32 || n->op == Op::NeI32) && (b->op == Op::ConstInt && b->a == 0)) {
                 V v = expr(a);
                 if (v.k == V::IMM) {
@@ -2516,6 +2626,10 @@ public:
         }
         for (auto& l : L) {
             if (l.param || l.fn || !l.needs_init) continue;
+            if (l.is_const) {
+                if (l.reg >= 0) A->load_imm(W(l.reg), (int32_t)l.cval);
+                continue;
+            }
             if (l.reg >= 0) {
                 if (l.any) A->movz(X(l.reg), 1);
                 else A->movz(X(l.reg), 0);
@@ -2530,11 +2644,89 @@ public:
         }
     }
 
+    // Shrink-wrapping for leading `If(c, Return(v))` statements whose condition
+    // and value only read parameters (still in x0..x7) through pure integer
+    // operations: they run before the prologue and return without a frame.
+    bool early_ = false;
+    bool simple_param_expr(const Node* n, bool cond) {
+        switch (n->op) {
+        case Op::ConstInt: return true;
+        case Op::Local: {
+            const LocalInfo& l = L[(size_t)n->a];
+            return l.param && !l.fn && l.param_idx < 8;
+        }
+        case Op::AddI32: case Op::SubI32: case Op::MulI32: case Op::NegI32: case Op::NotI32:
+        case Op::EqI32: case Op::NeI32: case Op::LtI32: case Op::LeI32: case Op::GtI32: case Op::GeI32:
+            for (uint32_t i = 0; i < n->nkids; ++i)
+                if (!simple_param_expr(n->kids[i], false)) return false;
+            return true;
+        case Op::And:
+        case Op::Or:
+            if (!cond || !(n->flags & tir::F_COND)) return false;
+            return simple_param_expr(n->kids[0], true) && simple_param_expr(n->kids[1], true);
+        default: return false;
+        }
+    }
+    const Node* early_return_value(const Node* s) {
+        if (s->op != Op::If) return nullptr;
+        const Node* e = s->kids[2];
+        if (!(e->op == Op::Seq && e->nkids == 0)) return nullptr;
+        const Node* t = s->kids[1];
+        while (t->op == Op::Seq && t->nkids == 1) t = t->kids[0];
+        if (t->op != Op::Return) return nullptr;
+        if (!simple_param_expr(s->kids[0], true)) return nullptr;
+        const Node* v = t->kids[0];
+        if (F->ret.k == TK::Fn || F->ret.k == TK::Bot) return nullptr;
+        if (!simple_param_expr(v, false)) return nullptr;
+        if (v->op == Op::Local && L[(size_t)v->a].x64 != is64(F->ret)) return nullptr;
+        return v;
+    }
+    uint32_t early_returns() {
+        if (F->is_main || !hot_calls || F->body->op != Op::Seq) return 0;
+        uint32_t k = 0;
+        while (k < F->body->nkids && early_return_value(F->body->kids[k])) ++k;
+        if (!k) return 0;
+        early_ = true;
+        uint32_t argregs = 0;
+        for (size_t i = 0; i < F->params.size() && i < 8; ++i) argregs |= bit((int)i);
+        temp_free = temp_pool & ~argregs;
+        if (nfree() < 5) {
+            early_ = false;
+            temp_free = temp_pool;
+            return 0;
+        }
+        bool x64 = is64(F->ret);
+        for (uint32_t i = 0; i < k; ++i) {
+            const Node* s = F->body->kids[i];
+            Label skip = A->new_label();
+            branch(s->kids[0], false, skip);
+            V r = expr(early_return_value(s));
+            if (r.k == V::IMM) {
+                if (x64) A->load_imm(X(0), r.imm);
+                else A->load_imm(W(0), (int32_t)r.imm);
+            } else {
+                Reg src = R(r, x64);
+                if (src.id != 0) A->mov(x64 ? X(0) : W(0), src);
+            }
+            release(r);
+            A->ret();
+            A->bind(skip);
+        }
+        early_ = false;
+        temp_free = temp_pool;
+        return k;
+    }
+
     void gen_body() {
         reset_body_state();
+        uint32_t skip = early_returns();
         emit_prologue();
         entry_moves();
-        stmt(F->body);
+        if (skip) {
+            for (uint32_t i = skip; i < F->body->nkids; ++i) stmt(F->body->kids[i]);
+        } else {
+            stmt(F->body);
+        }
         if (F->is_main) emit_epilogue();
         // a non-main function always ends in Return (builder guarantee); guard:
         else A->brk(1);
@@ -2711,7 +2903,11 @@ public:
         tm[1] = now_us();
         if (!setup_data()) return false;
         tm[2] = now_us();
-        main_as.reserve(1 << 16);
+        {
+            size_t nn = 0;
+            for (auto& f : M.funcs) nn += count_nodes(f->body);
+            main_as.reserve(std::max<size_t>(4096, nn * 24));
+        }
         func_label.resize(M.funcs.size());
         func_off.assign(M.funcs.size(), 0);
         for (auto& f : M.funcs) func_label[f->id] = main_as.new_label();
@@ -2782,7 +2978,7 @@ int run(const Module& m, const JitConfig& cfg) {
     jit::set_overflow_callback(on_overflow);
     void* entry = C->code + C->func_off[0];
     uint64_t e0 = now_us();
-    if (st->create(size_t(8) << 30)) {
+    if (!getenv("EPQ_JIT_NOSTACK") && st->create(size_t(8) << 30)) {
         e0 = now_us();
         st->run(run_main, entry);
     } else {
