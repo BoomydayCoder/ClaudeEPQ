@@ -27,6 +27,7 @@ struct Options {
     bool dump_types = false;     // --dump-types
     bool mono = false;           // --mono: one instance per function (no call-site specialisation)
     bool no_dedup = false;       // --no-dedup
+    bool no_records = false;     // --no-records / EPQ_NO_RECORDS=1: no record typing (DESIGN.md §5.11)
     bool verbose = false;        // --verbose: compile/cache diagnostics on stderr
     std::vector<std::string> no_pass;  // --no-pass=NAME (TIR passes and build options:
                                        // definite-assignment, demote-globals, constants)

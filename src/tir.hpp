@@ -105,6 +105,42 @@
 // true for PairIndex / CheckIndex (may fail) or ElemStore / Free.
 // tir::verify() checks all of the above (src/tir_verify.cpp).
 //
+// ---------------------------------------------------------------------------
+// Records (DESIGN.md §5.11; set by inference, built by tirbuild)
+// ---------------------------------------------------------------------------
+// Types:
+//   Rec(r)   a fixed-shape heterogeneous list of a *record region* r
+//            (Region::record): every list of r has exactly rec_len elements
+//            (or, if Region::nullable, is empty), and position j always holds a
+//            value of static type Region::fields[j]. Representation: pointer to
+//            rec_len 8-byte slots, NO header; a slot holds the field's word
+//            (Int/Bot: (uint64)(uint32)v; List/Rec: pointer; Pair: the int64;
+//            Fn: the tagged function word; Any: the tagged word). The empty list
+//            of a nullable region is the null pointer. Records are heap objects
+//            with identity (stores are seen through every alias), but: a region
+//            with record == true never appears as List(r); records never flow
+//            into Any (no Box of a Rec); nothing ever appends to / pops / iterates
+//            a record or indexes it with a non-constant. Wherever an op accepts
+//            kids "of any static type" (Eq/Ne/Cmp/Print with descriptors,
+//            conditions, DynArith) a Rec behaves exactly like the list it stands
+//            for (descriptor kind RECORD; truthy; DynArith: OperandsInt).
+// Ops:
+//   RecLit [k kids: fields[i]] -> Rec(r)   allocates k slots, stores the kids. k == rec_len
+//   RecNull -> Rec(r)                      the empty list of a nullable r (null); pure
+//   RecGet a = position [rec] -> fields[a] one load; b = 1 iff r is nullable: then a null
+//                                          rec raises IndexOOB (after evaluating rec)
+//   RecSet a = position [rec, v: fields[a]] -> fields[a]   stores v into slot a (value v);
+//                                          b as RecGet (null check after evaluating both kids).
+//                                          Never touches any list header.
+//   RecLen [rec] -> Int                    rec_len, or 0 if null (nullable r only; for a
+//                                          non-nullable r the builder emits Comma(rec, k))
+// A literal index outside [0, k) is built as Fail(IndexOOB, rec, i[, v]).
+// `t = []` / `t != []` with t : Rec(r) is built as EqI32/NeI32(RecLen(t), 0)
+// (or a constant after evaluating t when r is not nullable): no allocation, no call.
+// is_pure: RecNull, RecLen, and RecGet with b == 0 (when their kids are pure).
+// Escape: a list or record stored into a RecLit kid or a RecSet value escapes
+// exactly like one stored into a list element.
+//
 // Locals: each Func has a typed local table: parameters first-class (Func::
 // params lists their local ids in order), user locals (resolver slots keep
 // their slot numbers), hidden for-each locals, compiler temporaries (kind
@@ -121,7 +157,7 @@
 
 namespace epq::tir {
 
-enum class TK : uint8_t { Bot, Int, List, Fn, Any, Pair, Ptr };
+enum class TK : uint8_t { Bot, Int, List, Fn, Any, Pair, Ptr, Rec };
 
 struct Type {
     TK k = TK::Bot;
@@ -133,7 +169,8 @@ struct Type {
     static Type fn(uint32_t d) { return {TK::Fn, d}; }
     static Type pair(uint32_t r) { return {TK::Pair, r}; }  // a: the pair's region (Region::pair)
     static Type ptr(uint32_t r) { return {TK::Ptr, r}; }    // a: region of the list
-    bool has_arg() const { return k == TK::List || k == TK::Fn || k == TK::Pair || k == TK::Ptr; }
+    static Type rec(uint32_t r) { return {TK::Rec, r}; }    // a: the record region (Region::record)
+    bool has_arg() const { return k == TK::List || k == TK::Fn || k == TK::Pair || k == TK::Ptr || k == TK::Rec; }
     bool operator==(const Type& o) const { return k == o.k && (!has_arg() ? true : a == o.a); }
     bool operator!=(const Type& o) const { return !(*this == o); }
     bool is_int_like() const { return k == TK::Int || k == TK::Bot; }
@@ -230,6 +267,12 @@ enum class Op : uint8_t {
     Free,       // [l: List(r)]                            statement
     SameList,   // [a: List, b: List] -> Int               pointer identity
     Nop,        // statement
+    // ---- records (see "Records" above) ----------------------------------------
+    RecLit,     // [k kids: fields] -> Rec(r)          allocates
+    RecNull,    // -> Rec(r)                            null (nullable r)
+    RecGet,     // a = position, b = null check, [rec] -> fields[a]
+    RecSet,     // a = position, b = null check, [rec, v] -> fields[a]
+    RecLen,     // [rec] -> Int (k or 0)
 };
 const char* op_name(Op o);
 
@@ -306,11 +349,19 @@ struct Region {
     // Pair region (§5.4, set by the pairs pass): values of this region are
     // Pair(r), elem must be Int. Every Pair-typed value belongs to such a region.
     bool pair = false;
+    // Record region (§5.11, from inference): values are Rec(r), never List(r);
+    // elem is unused (Bot). fields[j] is the static type of position j.
+    bool record = false;
+    bool nullable = false;   // record region with `[]` sites (the null record)
+    uint32_t rec_len = 0;    // k, 1..16
+    std::vector<Type> fields;
 };
 
 // Static type descriptors (runtime EDesc). Index 0 INT, 1 ANY, 2 LIST(ANY), 3 FN.
+// RECORD (kind 5): elem = rec_len | (nullable ? 0x10000 : 0); it is followed by
+// rec_len FIELD entries (kind 6) whose elem is the descriptor of that position.
 struct Desc {
-    uint32_t kind;  // 0 INT, 1 ANY, 2 FN, 3 LIST, 4 PAIR (runtime EPQ_K_*)
+    uint32_t kind;  // 0 INT, 1 ANY, 2 FN, 3 LIST, 4 PAIR, 5 RECORD, 6 FIELD (runtime EPQ_K_*)
     uint32_t elem;  // LIST: element descriptor
 };
 
