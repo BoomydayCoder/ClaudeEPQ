@@ -1,0 +1,12 @@
+// one function called with a record region and a plain list region
+get1 := (l) => { => l[1]; };
+setv := (l, v) => { l[1] := v; => l; };
+r := [1, [2]];
+p := [];
+p :+ 3;
+p :+ 4;
+>> get1(r);
+>> get1(p);
+>> setv(r, [5]);
+>> setv(p, 6);
+>> get1(setv(r, [7, 8]));

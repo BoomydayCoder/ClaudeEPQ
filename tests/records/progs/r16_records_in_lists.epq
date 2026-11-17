@@ -1,0 +1,9 @@
+// records in lists, lists in records, sorting by comparison
+l := [];
+(i := 0; i < 6; i := i + 1;) @ l :+ [(i * 7) - (i * 7) / 5 * 5, [i]];
+>> l;
+(i := 0; i < |l|; i := i + 1;) @ (j := i + 1; j < |l|; j := j + 1;) @ (l[j] < l[i]) ? { t := l[i]; l[i] := l[j]; l[j] := t; }
+>> l;
+c := [l, 3];
+>> c[0][2][1];
+>> |c[0]|;

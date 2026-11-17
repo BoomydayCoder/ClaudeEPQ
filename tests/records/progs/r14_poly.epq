@@ -1,0 +1,14 @@
+// polymorphic functions used with records and with plain lists
+first := (l) => { => l[0]; };
+second := (l) => { => l[1]; };
+r := [1, [2]];
+p := [3, 4];
+q := [[5], 6];
+>> first(r);
+>> second(r);
+>> first(p) + second(p);
+>> first(q);
+>> second(q);
+sw := (l) => { t := l[0]; l[0] := l[1]; l[1] := t; => l; };
+>> sw(p);
+>> sw([7, 8]);

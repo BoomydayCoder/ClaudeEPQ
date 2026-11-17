@@ -790,6 +790,12 @@ EPQ_INLINE EAny epq_view_word(const EView* v, int32_t k) {
 }
 EPQ_RT_API int epq_eq(uint32_t da, EAny a, uint32_t db, EAny b);
 EPQ_RT_API int epq_lt(uint32_t da, EAny a, uint32_t db, EAny b);
+/* records (block "records" at the end of this file) */
+enum { EPQ_K_REC = 5, EPQ_K_FIELD = 6 };
+EPQ_RT_API int epq_eq_rec(uint32_t da, EAny a, uint32_t db, EAny b);
+EPQ_RT_API int epq_lt_rec(uint32_t da, EAny a, uint32_t db, EAny b);
+EPQ_RT_API void epq_print_rec(uint32_t d, EAny w);
+EPQ_RT_API int epq_cmp3_rec(uint32_t da, EAny a, uint32_t db, EAny b); /* integration: three-way record compare */
 /* ---- litcmp: three-way deep comparison -------------------------------------------
  * epq_cmp3(a, b) < 0 / == 0 / > 0  <=>  a < b / neither / b < a, with the original's
  * `<` (std::lexicographical_compare: per element pair k, `x<y` then `y<x`).
@@ -829,6 +835,7 @@ EPQ_RT_API int epq_cmp3(uint32_t da, EAny a, uint32_t db, EAny b) {
     epq_norm(&db, &b);
     uint32_t ka = epq_rt_desc[da].kind, kb = epq_rt_desc[db].kind;
     if (ka == EPQ_K_INT && kb == EPQ_K_INT) return epq_cmp3_i32((int32_t)a, (int32_t)b);
+    if (EPQ_UNLIKELY(ka >= EPQ_K_REC || kb >= EPQ_K_REC)) return epq_cmp3_rec(da, a, db, b); /* records */
     if (EPQ_UNLIKELY(ka == EPQ_K_PAIR || kb == EPQ_K_PAIR)) return epq_cmp3_pair(da, a, db, b);
     if (ka != EPQ_K_LIST || kb != EPQ_K_LIST) epq_fail(EPQ_E_INVALID_CMP);
     EList* la = (EList*)(uintptr_t)a;
@@ -878,6 +885,7 @@ EPQ_RT_API int epq_eq(uint32_t da, EAny a, uint32_t db, EAny b) {
     epq_norm(&da, &a);
     epq_norm(&db, &b);
     uint32_t ka = epq_rt_desc[da].kind, kb = epq_rt_desc[db].kind;
+    if (EPQ_UNLIKELY(ka >= EPQ_K_REC || kb >= EPQ_K_REC)) return epq_eq_rec(da, a, db, b); /* records */
     if (EPQ_UNLIKELY(ka == EPQ_K_PAIR || kb == EPQ_K_PAIR)) return epq_eq_pair(da, a, db, b);
     if (ka != kb) return 0;
     if (ka == EPQ_K_INT) return (int32_t)a == (int32_t)b;
@@ -1020,6 +1028,8 @@ EPQ_RT_API void epq_print_val(uint32_t d, EAny w) {
         epq_out_int((int32_t)w);
     } else if (k == EPQ_K_FN) {
         epq_out("<function>", 10);
+    } else if (k == EPQ_K_REC) { /* records */
+        epq_print_rec(d, w);
     } else if (k == EPQ_K_PAIR) {
         epq_out("[", 1);
         epq_out_int(epq_pair_first((EPair)w));
@@ -1070,6 +1080,105 @@ EPQ_RT_API void epq_print_list_any(const EList* l) {
     epq_out(">> ", 3);
     epq_print_alist_val(l);
     epq_out("\n", 1);
+}
+
+/* ---- records (src/tir.hpp "Records"; DESIGN.md §5.11) ---------------------------
+ * A record of a record region with k positions is a pointer to k 8-byte slots,
+ * no header (k is static). Slot j holds the descriptor word of position j's
+ * static type: Int as (uint64)(uint32)v, lists/records as pointers, pairs as the
+ * packed int64, functions as tagged words, Any as tagged words. The empty list
+ * of a nullable record region is NULL (word 0).
+ * Descriptor RECORD (kind 5) at index d: elem = k | (nullable << 16); entries
+ * d+1 .. d+k (kind FIELD) give each position's descriptor in their elem.
+ * A record compares, equals and prints exactly like the list it stands for. */
+typedef struct ERec { EAny v; } ERec;
+EPQ_INLINE ERec* epq_rec_new(uint32_t k) { return (ERec*)epq_alloc((size_t)k * 8); }
+
+/* (desc, word) of a LIST / PAIR / REC as a sequence; other kinds are not lists. */
+EPQ_INLINE int epq_rq_listlike(uint32_t d) {
+    uint32_t k = epq_rt_desc[d].kind;
+    return k == EPQ_K_LIST || k == EPQ_K_PAIR || k == EPQ_K_REC;
+}
+EPQ_INLINE int32_t epq_rq_len(uint32_t d, EAny w) {
+    uint32_t k = epq_rt_desc[d].kind;
+    if (k == EPQ_K_REC) return w ? (int32_t)(epq_rt_desc[d].elem & 0xffff) : 0;
+    if (k == EPQ_K_PAIR) return 2;
+    return ((EList*)(uintptr_t)w)->len;
+}
+EPQ_INLINE void epq_rq_at(uint32_t d, EAny w, int32_t j, uint32_t* ed, EAny* ew) {
+    uint32_t k = epq_rt_desc[d].kind;
+    if (k == EPQ_K_REC) {
+        *ed = epq_rt_desc[d + 1 + (uint32_t)j].elem;
+        *ew = ((ERec*)(uintptr_t)w)[j].v;
+    } else if (k == EPQ_K_PAIR) {
+        *ed = EPQ_D_INT;
+        *ew = (uint32_t)(j ? epq_pair_second((EPair)w) : epq_pair_first((EPair)w));
+    } else {
+        *ed = epq_rt_desc[d].elem;
+        *ew = epq_elem_word(*ed, (EList*)(uintptr_t)w, j);
+    }
+}
+/* At least one side is a REC (both normalised). */
+EPQ_RT_API int epq_eq_rec(uint32_t da, EAny a, uint32_t db, EAny b) {
+    if (!epq_rq_listlike(da) || !epq_rq_listlike(db)) return 0;
+    int32_t na = epq_rq_len(da, a), nb = epq_rq_len(db, b);
+    if (na != nb) return 0;
+    for (int32_t k = 0; k < na; k++) {
+        uint32_t ex, ey;
+        EAny x, y;
+        epq_rq_at(da, a, k, &ex, &x);
+        epq_rq_at(db, b, k, &ey, &y);
+        if (!epq_eq(ex, x, ey, y)) return 0;
+    }
+    return 1;
+}
+/* integration (litcmp x records): three-way, same element pairs and errors as
+ * `x < y` followed by `y < x` (see epq_cmp3). */
+EPQ_RT_API int epq_cmp3_rec(uint32_t da, EAny a, uint32_t db, EAny b) {
+    if (!epq_rq_listlike(da) || !epq_rq_listlike(db)) epq_fail(EPQ_E_INVALID_CMP);
+    int32_t na = epq_rq_len(da, a), nb = epq_rq_len(db, b), n = na < nb ? na : nb;
+    for (int32_t k = 0; k < n; k++) {
+        uint32_t ex, ey;
+        EAny x, y;
+        epq_rq_at(da, a, k, &ex, &x);
+        epq_rq_at(db, b, k, &ey, &y);
+        int c = epq_cmp3(ex, x, ey, y);
+        if (c) return c;
+    }
+    return (na > nb) - (na < nb);
+}
+EPQ_RT_API int epq_lt_rec(uint32_t da, EAny a, uint32_t db, EAny b) { return epq_cmp3_rec(da, a, db, b) < 0; }
+EPQ_RT_API void epq_print_rec(uint32_t d, EAny w) {
+    epq_out("[", 1);
+    if (w) {
+        uint32_t k = epq_rt_desc[d].elem & 0xffff;
+        const ERec* r = (const ERec*)(uintptr_t)w;
+        for (uint32_t j = 0; j < k; j++) {
+            if (j) epq_out(", ", 2);
+            epq_print_val(epq_rt_desc[d + 1 + j].elem, r[j].v);
+        }
+    }
+    epq_out("]", 1);
+}
+/* Helpers of the typed comparisons the C backend generates for records
+ * (src/cgen_rec.inc): three-way results -1 / 0 / 1, raising exactly where
+ * `<` raises (LANGUAGE.md 6: a three-way compare reaches the same element
+ * pairs as `x < y` followed by `y < x`). */
+EPQ_INLINE int epq_c3i(int32_t a, int32_t b) { return (a > b) - (a < b); }
+EPQ_INLINE int epq_c3p(EPair a, EPair b) { return (a > b) - (a < b); }
+EPQ_RT_API EPQ_COLD int epq_c3_invalid(void) { epq_fail(EPQ_E_INVALID_CMP); }
+EPQ_RT_API int epq_c3_dyn(uint32_t da, EAny a, uint32_t db, EAny b) {
+    int c = epq_cmp3(da, a, db, b);
+    return (c > 0) - (c < 0);
+}
+static inline __attribute__((unused)) int epq_c3_li(EList* a, EList* b) {
+    const EI32* pa = (const EI32*)a->data;
+    const EI32* pb = (const EI32*)b->data;
+    int32_t na = a->len, nb = b->len;
+    int32_t n = na < nb ? na : nb;
+    for (int32_t k = 0; k < n; k++)
+        if (pa[k].v != pb[k].v) return pa[k].v < pb[k].v ? -1 : 1;
+    return (na > nb) - (na < nb);
 }
 
 #endif /* EPQ_RT_H */

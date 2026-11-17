@@ -117,6 +117,7 @@ std::string cache_hash(const std::string& csrc, const std::string& flags) {
     key += kEmitterVersion;
     key += '\0';
     if (const char* np = std::getenv("EPQ_NO_PASS")) key += np;  // (already reflected in csrc; explicit)
+    if (const char* nr = std::getenv("EPQ_NO_RECORDS")) key += std::string("\0norec", 6) + nr;  // records (§5.11)
     return hash_hex(key);
 }
 // ---- end cache key ----
@@ -270,10 +271,27 @@ Options normalise(const Options& in) {
     for (auto& s : in.only_pass) split_into(o.only_pass, s);
     if (const char* e = std::getenv("EPQ_NO_PASS")) split_into(o.no_pass, e);
     if (const char* e = std::getenv("EPQ_VERIFY_TIR"); e && e[0] == '1') o.verify_tir = true;
+    if (const char* e = std::getenv("EPQ_NO_RECORDS"); e && e[0] == '1') o.no_records = true;  // records (§5.11)
     return o;
 }
 
 }  // namespace
+
+// ---- tier-up hook (src/tierup.cpp): run an already dlopen'ed dylib ----------
+int run_dylib_entry(void* h, const Options& opts) {
+    auto entry = (int (*)(void))dlsym(h, "epq_entry");
+    if (!entry) return -1;
+    g_flush = (void (*)(void))dlsym(h, "epq_entry_flush");
+    uint64_t exec_us = 0;
+    int rc = run_on_big_stack(entry, &exec_us);
+    if (opts.time) {
+        char buf[80];
+        int n = std::snprintf(buf, sizeof buf, "Execution time: %llu microseconds\n", (unsigned long long)exec_us);
+        (void)!::write(2, buf, (size_t)n);
+    }
+    return rc;
+}
+// ---- end tier-up hook --------------------------------------------------------
 
 int run_backend(const Program& prog, const Options& opts_in) {
     Options opts = normalise(opts_in);
@@ -281,6 +299,7 @@ int run_backend(const Program& prog, const Options& opts_in) {
     infer::Config cfg;
     cfg.poly = !opts.mono;
     cfg.dedup = !opts.no_dedup;
+    cfg.records = !opts.no_records;
     infer::Result R;
     infer::infer(prog, cfg, R);
     uint64_t Ti = now_us();

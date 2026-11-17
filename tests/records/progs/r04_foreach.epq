@@ -1,0 +1,5 @@
+// a record iterated with for-each
+r := [1, [2, 3], 4];
+>> r[1];
+(x : r) @ { >> x; }
+>> r;

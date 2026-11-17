@@ -1,0 +1,11 @@
+// records of different lengths meeting in one variable
+v := [1, [2]];
+>> v[0];
+c := 1;
+(c) ? v := [3, [4], 5];
+>> v;
+>> |v|;
+>> v[1];
+u := [1, [1]];
+>> u = v;
+>> u < v;

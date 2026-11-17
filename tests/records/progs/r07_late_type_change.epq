@@ -1,0 +1,9 @@
+// a field that changes type late (Int then List)
+r := [1, [2]];
+>> r[0] + 1;
+s := r;
+r[0] := [7, 8];
+>> s;
+>> s[0];
+t := [r, [3]];
+>> t;

@@ -21,6 +21,7 @@
 #include "batch.hpp"
 #include "frontend.hpp"
 #include "infer.hpp"
+#include "tierup.hpp"  // tier-up hook
 #include "tir.hpp"
 #include "tirbuild.hpp"
 
@@ -47,6 +48,7 @@ void usage(FILE* f, const char* argv0) {
                  "  --no-dedup         keep identical instances separate\n"
                  "  --dump-asm         print the JIT's machine code (disassembly) and exit\n"
                  "  --jit-stats        print JIT compile time and code size to stderr\n"
+                 "  --no-records       no record typing of fixed-shape lists (also EPQ_NO_RECORDS=1)\n"
                  "  --verbose          compile / cache diagnostics on stderr\n"
                  "  -t                 print \"Execution time: N microseconds\" to stderr\n"
                  "  -e                 dump the parsed AST to stderr (format of the original)\n"
@@ -55,6 +57,7 @@ void usage(FILE* f, const char* argv0) {
                  "  --frontend-time    print front-end phase timings to stderr\n"
                  "  --frontend-bench=N run parse..TIR passes N times in process, report per-phase timing\n"
                  "                     (with --parse-only: lex+parse+resolve only)\n"
+                 "  --tier-status FILE / --tier-clear   background-compiled cache (src/tierup.hpp)\n"
                  "  --batch MANIFEST [-j N] [--timeout SEC]\n"
                  "                     run many programs with one dylib (see src/batch.cpp, tools/README.md)\n"
                  "  -h, --help         this help\n",
@@ -195,6 +198,7 @@ int frontend_bench(const CompileUnit& src, int iters, const Options& opts) {
             infer::Config cfg;
             cfg.poly = !opts.mono;
             cfg.dedup = !opts.no_dedup;
+            cfg.records = !opts.no_records && !(std::getenv("EPQ_NO_RECORDS") && std::getenv("EPQ_NO_RECORDS")[0] == '1');
             infer::Result R;
             infer::infer(cu.prog, cfg, R);
             uint64_t t3 = Clock::now();
@@ -278,6 +282,8 @@ int main(int argc, char** argv) {
             opts.dump_asm = true;
         } else if (!std::strcmp(a, "--jit-stats")) {
             opts.jit_stats = true;
+        } else if (!std::strcmp(a, "--no-records")) {
+            opts.no_records = true;
         } else if (!std::strcmp(a, "--verbose")) {
             opts.verbose = true;
         } else if (!std::strncmp(a, "--no-pass=", 10)) {
@@ -302,6 +308,7 @@ int main(int argc, char** argv) {
             opts.jit_mode = 2;
         } else if (!std::strcmp(a, "--engine=aot") || !std::strcmp(a, "--aot")) {
             opts.engine = Engine::Aot;
+        } else if (tierup::is_flag(a)) {  // tier-up hook: --tier-compile/--tier-status/--tier-clear
         } else if (a[0] == '-' && a[1] != 0) {
             std::fprintf(stderr, "%s: unknown option %s\n", argv[0], a);
             usage(stderr, argv[0]);
@@ -314,6 +321,7 @@ int main(int argc, char** argv) {
             return 2;
         }
     }
+    if (int rc; tierup::command(argc, argv, &rc)) return rc;  // tier-up hook: --tier-clear
     if (!have_file) {
         std::fputs("No file passed\n", stderr);
         usage(stderr, argv[0]);
@@ -325,6 +333,7 @@ int main(int argc, char** argv) {
     if (!load_source(cu, opts.file)) return 1;
     double t_read = us_since(t0);
     if (bench_iters > 0) return frontend_bench(cu, bench_iters, opts);
+    if (int rc; tierup::start(cu, opts, argc, argv, &rc)) return rc;  // tier-up hook: cache probe / helper
 
     // Small sources cannot nest deeply enough to threaten the main thread's
     // stack. Larger ones run the whole pipeline on a thread whose (lazily

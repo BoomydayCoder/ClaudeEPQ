@@ -1,0 +1,9 @@
+// record reached through a global and a list element, mutated via both
+G := [1, [2], [3]];
+L := [G];
+upd := () => { G[2] := [30, 31]; => 0; };
+upd();
+>> L[0];
+L[0][0] := 5;
+>> G;
+>> G[0] + L[0][0];

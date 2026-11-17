@@ -1,0 +1,7 @@
+// indexing an empty one
+cons := (h, t) => { => [h, [t]]; };
+c := cons(1, []);
+>> c;
+d := c[1][0];
+>> d;
+>> d[0];

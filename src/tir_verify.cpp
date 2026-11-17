@@ -57,9 +57,24 @@ struct Verifier {
         case TK::Fn:
             if (t.a >= M.defs.size()) fail(n, std::string(what) + ": bad DefId " + std::to_string(t.a));
             break;
+        case TK::Rec:
+            if (t.a >= M.regions.size()) fail(n, std::string(what) + ": bad region id " + std::to_string(t.a));
+            if (!M.regions[t.a].record) fail(n, std::string(what) + ": Rec of region " + std::to_string(t.a) + " which is not a record region");
+            break;
         default:
             break;
         }
+        // Records (§5.11): a record region never appears as a list.
+        if ((t.k == TK::List || t.k == TK::Ptr || t.k == TK::Pair) && t.a < M.regions.size() && M.regions[t.a].record)
+            fail(n, std::string(what) + ": " + ts(t) + " of record region " + std::to_string(t.a));
+    }
+    // Records: kid 0 is a Rec, a is a valid position, b is the region's null check flag.
+    const Region& rec_kid(const Node* n) {
+        kid_kind(n, 0, TK::Rec, "Rec");
+        const Region& R = M.regions[n->kids[0]->type.a];
+        if (n->a < 0 || (uint32_t)n->a >= R.rec_len) fail(n, "position " + std::to_string(n->a) + " out of range");
+        if (n->b != (R.nullable ? 1 : 0)) fail(n, "null-check flag b does not match the region's nullability");
+        return R;
     }
     void nk(const Node* n, uint32_t k) {
         if (n->nkids != k) fail(n, "expected " + std::to_string(k) + " kids, has " + std::to_string(n->nkids));
@@ -98,6 +113,7 @@ struct Verifier {
         case TK::Fn: want = 2; break;
         case TK::List: want = 3; break;
         case TK::Pair: want = 4; break;
+        case TK::Rec: want = 5; break;
         default: fail(n, std::string(which) + ": operand of type " + ts(t) + " has no descriptor");
         }
         if (M.descs[(size_t)d].kind != want)
@@ -317,6 +333,38 @@ struct Verifier {
                 fail(n, "lists have different element types");
             break;
         // ---- end appendopt ----
+        // ---- records (§5.11) ----
+        case Op::RecLit: {
+            if (n->type.k != TK::Rec) fail(n, "RecLit of non-record type " + ts(n->type));
+            const Region& R = M.regions[n->type.a];
+            nk(n, R.rec_len);
+            for (uint32_t i = 0; i < n->nkids; ++i) kid_is(n, i, R.fields[i]);
+            break;
+        }
+        case Op::RecNull:
+            nk(n, 0);
+            if (n->type.k != TK::Rec) fail(n, "RecNull of non-record type " + ts(n->type));
+            if (!M.regions[n->type.a].nullable) fail(n, "RecNull of a non-nullable record region");
+            break;
+        case Op::RecGet: {
+            nk(n, 1);
+            const Region& R = rec_kid(n);
+            res(n, R.fields[(size_t)n->a]);
+            break;
+        }
+        case Op::RecSet: {
+            nk(n, 2);
+            const Region& R = rec_kid(n);
+            kid_is(n, 1, R.fields[(size_t)n->a]);
+            res(n, R.fields[(size_t)n->a]);
+            break;
+        }
+        case Op::RecLen:
+            nk(n, 1);
+            kid_kind(n, 0, TK::Rec, "Rec");
+            if (!M.regions[n->kids[0]->type.a].nullable) fail(n, "RecLen of a non-nullable record (use the constant)");
+            res_int(n);
+            break;
         }
         // Ptr values only come from ListData / Local reads of Cache locals / assignments to them.
         if (n->type.k == TK::Ptr && n->op != Op::ListData && n->op != Op::Local && n->op != Op::SetLocal && n->op != Op::Comma &&
@@ -356,6 +404,13 @@ void verify(Module& m, const char* after_pass) {
         if (R.pair && !R.elem.is_int_like())
             std::fprintf(stderr, "epq: TIR verifier (after %s): pair region %zu has element type %s\n", V.after, r, type_str(m, R.elem).c_str()),
                 std::abort();
+        if (R.record) {  // records (§5.11)
+            bool ok = !R.pair && R.rec_len >= 1 && R.rec_len <= 16 && R.fields.size() == R.rec_len;
+            for (Type f : R.fields) ok = ok && f.k != TK::Ptr && (!f.has_arg() || f.k == TK::Fn || f.a < m.regions.size());
+            if (!ok) std::fprintf(stderr, "epq: TIR verifier (after %s): malformed record region %zu\n", V.after, r), std::abort();
+        } else if (R.nullable || !R.fields.empty()) {
+            std::fprintf(stderr, "epq: TIR verifier (after %s): region %zu has record fields but is not a record\n", V.after, r), std::abort();
+        }
     }
     for (size_t i = 0; i < m.funcs.size(); ++i) {
         if (m.funcs[i]->id != i)
