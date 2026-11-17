@@ -147,6 +147,8 @@ inline bool has_call(const Node* n) {
     return r;
 }
 
+// Integration rule (both helpers): every op is classified explicitly; an op
+// that is not listed (one added later) counts as "may do anything".
 inline bool may_mutate_header(const Module& m, const Node* n, uint32_t r) {
     bool any_elems = m.regions[r].elem.k == TK::Any;
     bool res = false;
@@ -166,7 +168,25 @@ inline bool may_mutate_header(const Module& m, const Node* n, uint32_t r) {
                 if (q == r) res = true;
             break;
         }
-        default: break;
+        // known never to change a list header
+        case Op::Seq: case Op::If: case Op::While: case Op::Return: case Op::Print:
+        case Op::ConstInt: case Op::ConstFn: case Op::Local: case Op::GetGlobal: case Op::Input:
+        case Op::SetLocal: case Op::SetGlobal: case Op::Box: case Op::UnboxInt: case Op::Coerce:
+        case Op::Comma: case Op::Fail:
+        case Op::AddI32: case Op::SubI32: case Op::MulI32: case Op::DivI32: case Op::NegI32: case Op::AbsI32:
+        case Op::NotI32: case Op::EqI32: case Op::NeI32: case Op::LtI32: case Op::LeI32: case Op::GtI32: case Op::GeI32:
+        case Op::DynArith: case Op::DynAbs: case Op::DynNot: case Op::Eq: case Op::Ne: case Op::Cmp:
+        case Op::ListLit: case Op::Len: case Op::Index: case Op::DynIndex:
+        case Op::And: case Op::Or:
+        case Op::Select: case Op::InlineBlock: case Op::Break:
+        case Op::PairMake: case Op::PairFirst: case Op::PairSecond: case Op::PairIndex:
+        case Op::PairEq: case Op::PairNe: case Op::PairLt: case Op::PairLe: case Op::PairGt: case Op::PairGe:
+        case Op::ListData: case Op::ElemLoad: case Op::CheckIndex: case Op::SameList: case Op::Nop:
+        case Op::DynIsEmptyList:
+        case Op::RecLit: case Op::RecNull: case Op::RecGet: case Op::RecSet: case Op::RecLen:  // records are never lists
+        case Op::SetIndex: case Op::DynSetIndex: case Op::ElemStore:
+            break;
+        default: res = true; break;  // unknown op
         }
         return !res;
     });
@@ -178,13 +198,32 @@ inline bool may_store_elems(const Module& m, const Node* n, uint32_t r) {
     walk(n, [&](Node* x, Node*, uint32_t) {
         switch (x->op) {
         case Op::SetIndex: case Op::ElemStore:
+        case Op::Reserve: case Op::AppendRange:  // appendopt: may move l's buffer / write slots
             if (x->kids[0]->type.a == r) res = true;
             break;
         case Op::DynSetIndex:
             if (any_elems) res = true;
             break;
         case Op::CallDirect: case Op::CallDyn: res = true; break;
-        default: break;
+        // known never to store a list element
+        case Op::Seq: case Op::If: case Op::While: case Op::Return: case Op::Print:
+        case Op::ConstInt: case Op::ConstFn: case Op::Local: case Op::GetGlobal: case Op::Input:
+        case Op::SetLocal: case Op::SetGlobal: case Op::Box: case Op::UnboxInt: case Op::Coerce:
+        case Op::Comma: case Op::Fail:
+        case Op::AddI32: case Op::SubI32: case Op::MulI32: case Op::DivI32: case Op::NegI32: case Op::AbsI32:
+        case Op::NotI32: case Op::EqI32: case Op::NeI32: case Op::LtI32: case Op::LeI32: case Op::GtI32: case Op::GeI32:
+        case Op::DynArith: case Op::DynAbs: case Op::DynNot: case Op::Eq: case Op::Ne: case Op::Cmp:
+        case Op::ListLit: case Op::Len: case Op::Index: case Op::DynIndex:
+        case Op::And: case Op::Or:
+        case Op::Select: case Op::InlineBlock: case Op::Break:
+        case Op::PairMake: case Op::PairFirst: case Op::PairSecond: case Op::PairIndex:
+        case Op::PairEq: case Op::PairNe: case Op::PairLt: case Op::PairLe: case Op::PairGt: case Op::PairGe:
+        case Op::ListData: case Op::ElemLoad: case Op::CheckIndex: case Op::SameList: case Op::Nop:
+        case Op::DynIsEmptyList:
+        case Op::RecLit: case Op::RecNull: case Op::RecGet: case Op::RecSet: case Op::RecLen:  // records are never lists
+        case Op::Append: case Op::Pop: case Op::DynAppend: case Op::DynNeg: case Op::Free:
+            break;
+        default: res = true; break;  // unknown op
         }
         return !res;
     });

@@ -1,0 +1,14 @@
+// appendopt x pairs x reclaim: bulk copy of a list of pairs
+ps := [];
+(i := 0; i < 6; i := i + 1;) @ ps :+ [i, 6 - i];
+qs := [];
+(k := 0; k < |ps|; k := k + 1;) @ qs :+ ps[k];
+>> qs;
+qs[0] := [9, 9];
+>> ps[0];
+>> qs[0];
+cnt := (n) => { ps2 := []; (j := 0; j < n; j := j + 1;) @ ps2 :+ [j, j]; c2 := []; (h := 0; h < |ps2|; h := h + 1;) @ c2 :+ ps2[h]; => |c2| + c2[n - 1][0]; };
+>> cnt(5) + cnt(7);
+self := [1, 2, 3];
+(m := 0; m < 3; m := m + 1;) @ self :+ self[m];
+>> self;

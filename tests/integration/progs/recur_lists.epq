@@ -1,0 +1,9 @@
+// recur x reclaim x appendopt: tail-call loops over lists
+acc := (l, n) => { (n = 0) ? => l; l :+ n; => acc(l, n - 1); };
+>> acc([], 5);
+build := (n, k) => { t := [n, k]; (n = 0) ? => t[1]; => build(n - 1, k + t[0]); };
+>> build(10, 0);
+walkl := (l, i, s) => { (i = |l|) ? => s; => walkl(l, i + 1, s + l[i]); };
+>> walkl([1, 2, 3, 4, 5], 0, 0);
+grow := (l, n) => { (n = 0) ? => |l|; m := []; (z : l) @ m :+ z; m :+ n; => grow(m, n - 1); };
+>> grow([1], 6);

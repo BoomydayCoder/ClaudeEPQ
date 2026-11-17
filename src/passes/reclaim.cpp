@@ -108,6 +108,11 @@ struct FuncAn {
             case Op::Eq: case Op::Ne: case Op::Cmp: case Op::SameList: case Op::DynArith:
             case Op::Fail: case Op::Seq:
                 break;
+            // appendopt (integration): Reserve / AppendRange only change kid 0's header
+            // and copy kid 1's element WORDS; neither list is retained, and the copied
+            // elements' referents already escaped when they were stored into kid 1.
+            case Op::Reserve: case Op::AppendRange:
+                break;
             case Op::Index: case Op::SetIndex: case Op::Free:
                 if (i != 0) escape(k);
                 break;

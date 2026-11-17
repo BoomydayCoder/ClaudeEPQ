@@ -1,0 +1,12 @@
+// reclaim x inline: lists created by inlined callees, aliases, and escapes through globals
+mk3 := (v) => { => [v, v, v]; };
+sum3 := (v) => { q3 := mk3(v); keep := q3; => keep[0] + q3[2]; };
+>> sum3(4);
+glob := [];
+leak := (v) => { q4 := mk3(v); glob := q4; => 0; };
+leak(3);
+>> glob;
+pick := (v) => { a1 := mk3(v); a2 := mk3(v + 1); (v > 2) ? a1 := a2; => a1[0] + |a2|; };
+>> pick(1) + pick(5);
+nest := (v) => { o := [mk3(v)]; ii := o[0]; => ii; };
+>> nest(7);
