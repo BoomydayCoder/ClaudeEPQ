@@ -78,6 +78,38 @@ def main():
         ok = r.returncode == 1 and se == "Stack overflow\n" and so.startswith(">> ")
         record(name, ok, "" if ok else "rc=%d stdout=%r stderr=%r" % (r.returncode, so[:80], se[:200]))
 
+    # one huge function (> 32 KB: short branches to the cold stubs need islands);
+    # the baseline rejects it ("Loop too far"), so compare with the C backend
+    import random
+    rnd = random.Random(7)
+    lines = ["l := [1, 2, 3, 4, 5, 6, 7, 8];", "d := 0;", "d := [1, 2, 3];", "s := 0;",
+             "(i := 0; i < 3; i := i + 1;) @ {"]
+    for k in range(3000):
+        r = rnd.randrange(6)
+        if r == 0:
+            lines.append("  s := s + l[%d] * l[(|s| + %d) - (|s| + %d) / 8 * 8];" % (k % 8, k, k))
+        elif r == 1:
+            lines.append("  l[%d] := l[%d] + s / %d;" % (k % 8, (k + 3) % 8, k + 1))
+        elif r == 2:
+            lines.append("  s := s + |d| + d[%d];" % (k % 3))
+        elif r == 3:
+            lines.append("  (s > %d) ? s := s - %d; : s := s + 1;" % (k * 7, k))
+        elif r == 4:
+            lines.append("  s := s - s / 1000003 * 1000003;")
+        else:
+            lines.append("  (d[%d] = s) ? s := s + 2;" % (k % 3))
+    lines += ["}", ">> s; >> l;"]
+    p = os.path.join(tmp, "huge.epq")
+    with open(p, "w") as f:
+        f.write("\n".join(lines) + "\n")
+    env = dict(os.environ)
+    env.setdefault("EPQ_CACHE_DIR", os.path.join(tmp, "cache"))
+    env.setdefault("EPQ_CFLAGS", "-O1")
+    rj = run([epq, "--engine=jit", p])
+    ra = run([epq, "--engine=aot", p], env=env)
+    ok = rj.returncode == ra.returncode == 0 and rj.stdout == ra.stdout and len(rj.stdout) > 10
+    record("huge_function", ok, "" if ok else "jit rc=%d aot rc=%d" % (rj.returncode, ra.returncode))
+
     p = os.path.join(ROOT, "bench", "original", "bubblesort.epq")
     r = run([epq, "--dump-asm", p])
     s = r.stdout.decode(errors="replace")
