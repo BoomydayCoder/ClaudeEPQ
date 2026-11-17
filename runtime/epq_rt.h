@@ -46,10 +46,11 @@
  * Errors: epq_fail(code) flushes stdout, writes the original's message and a
  * newline to stderr, and exits with status 1.
  *
- * I/O: output is buffered (64 KB), flushed at exit, before an error, and before
- * any read that would block while output is pending. Input is read in blocks
- * and parsed by hand like C++ `cin >> int`; a failed read yields 0 and all
- * later reads yield 0 (LANGUAGE.md 9.2).
+ * I/O: output is buffered (64 KB to a pipe/tty, 1 MB to a file), flushed at
+ * exit, before an error, and before any read that would block while output is
+ * pending (never for file stdin). Input is read in 256 KB blocks and parsed by
+ * hand like C++ `cin >> int`; a failed read yields 0 and all later reads
+ * yield 0 (LANGUAGE.md 9.2).
  */
 #ifndef EPQ_RT_H
 #define EPQ_RT_H
@@ -135,18 +136,29 @@ static const EDesc* epq_rt_desc __attribute__((unused));
 static const EFnInfo* epq_rt_fns __attribute__((unused));
 
 /* ---- output ---------------------------------------------------------------- */
-/* EPQ_OBUF bytes are flushed at a time; EPQ_OSLACK more bytes behind them let a
- * formatter write one whole bounded value after a single capacity check. */
+/* Output is flushed whenever epq_olim bytes are pending. The limit starts at
+ * EPQ_OBUF_SMALL and is decided at the first flush from the kind of stdout:
+ * pipes, sockets and ttys keep 64 KB (the pipe's own capacity: each write
+ * completes in one copy while the reader drains in parallel; measured fastest),
+ * regular files and /dev/null get the whole EPQ_OBUF (fewer write calls). */
 #ifndef EPQ_OBUF
-#define EPQ_OBUF (256 * 1024)
+#define EPQ_OBUF (1024 * 1024)
+#endif
+#if EPQ_OBUF < 65536
+#define EPQ_OBUF_SMALL EPQ_OBUF
+#else
+#define EPQ_OBUF_SMALL 65536
 #endif
 #define EPQ_OSLACK 64
 static char epq_obuf[EPQ_OBUF + EPQ_OSLACK];
 static uint32_t epq_olen;
+static uint32_t epq_olim = EPQ_OBUF_SMALL;
+static int epq_odecided;
 
 EPQ_RT_API void epq_write_all(int fd, const char* p, size_t n) {
     while (n > 0) {
         ssize_t w = write(fd, p, n);
+        if (w < 0 && errno == EINTR) continue;
         if (w <= 0) return;
         p += w;
         n -= (size_t)w;
@@ -157,6 +169,13 @@ EPQ_RT_API void epq_flush(void) {
     if (epq_olen) {
         epq_write_all(1, epq_obuf, epq_olen);
         epq_olen = 0;
+        if (EPQ_UNLIKELY(!epq_odecided)) {
+            struct stat st;
+            epq_odecided = 1;
+            if (fstat(1, &st) == 0 &&
+                (S_ISREG(st.st_mode) || (S_ISCHR(st.st_mode) && !isatty(1))))
+                epq_olim = EPQ_OBUF;
+        }
     }
 }
 
@@ -175,13 +194,13 @@ EPQ_RT_API EPQ_COLD void epq_fail(int code) {
  * with at least n (<= EPQ_OSLACK) bytes of room; write, then epq_ocommit(o).
  * Values are emitted between a reserve and a commit without touching epq_olen. */
 EPQ_INLINE char* epq_oreserve(uint32_t n) {
-    if (EPQ_UNLIKELY(epq_olen > EPQ_OBUF - n)) epq_flush();
+    if (EPQ_UNLIKELY(epq_olen > epq_olim - n)) epq_flush();
     return epq_obuf + epq_olen;
 }
 EPQ_INLINE void epq_ocommit(char* o) { epq_olen = (uint32_t)(o - epq_obuf); }
 /* Within a loop that keeps the write pointer local: room for n more bytes. */
 EPQ_INLINE char* epq_oroom(char* o, uint32_t n) {
-    if (EPQ_UNLIKELY(o > epq_obuf + EPQ_OBUF - n)) {
+    if (EPQ_UNLIKELY(o > epq_obuf + epq_olim - n)) {
         epq_ocommit(o);
         epq_flush();
         return epq_obuf;
@@ -190,9 +209,9 @@ EPQ_INLINE char* epq_oroom(char* o, uint32_t n) {
 }
 
 EPQ_INLINE void epq_out(const char* s, uint32_t n) {
-    if (EPQ_UNLIKELY(epq_olen > EPQ_OBUF - n)) {
+    if (EPQ_UNLIKELY(epq_olen > epq_olim - n)) {
         epq_flush();
-        if (n > EPQ_OBUF) { /* never happens for the runtime's own strings */
+        if (n > epq_olim) { /* never happens for the runtime's own strings */
             epq_write_all(1, s, n);
             return;
         }
@@ -211,10 +230,13 @@ static const uint32_t epq_pow10[10] __attribute__((unused)) = {
 /* Decimal digits of u (1..10). */
 EPQ_INLINE uint32_t epq_ndigits(uint32_t u) {
     uint32_t t = ((32u - (uint32_t)__builtin_clz(u | 1)) * 1233u) >> 12;
-    return t + 1 - (u < epq_pow10[t]);
+    return t + 1 - ((u | 1) < epq_pow10[t]); /* u|1: 0 has one digit */
 }
 /* Writes u in decimal at o (at most 10 bytes), returns the end. Digits are
- * produced two at a time, right to left, straight into the destination. */
+ * produced two at a time, right to left, straight into the destination.
+ * (Measured against an all-digits-at-once SWAR formatter: this is as fast for
+ * 7-digit values and faster for small and 10-digit ones; tests/rtio/rtbench.c.
+ * Checked exhaustively over all int32 by tests/rtio/fmtcheck.c.) */
 EPQ_INLINE char* epq_fmt_u32(char* o, uint32_t u) {
     if (u < 10) {
         *o = (char)('0' + u);

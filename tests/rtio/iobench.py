@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """I/O micro-benchmarks for the runtime (output formatting, list printing, input).
 
-    python3 tests/rtio/iobench.py [--runs N] [--only NAME,...] [--ref] [-- ENGINE CMD...]
+    python3 tests/rtio/iobench.py [--runs N] [--only NAME,...] [--ref]
+                                  [--sink devnull|pipe|file] [-- ENGINE CMD...]
 
 Generates the micro programs under build/rtio/micro/, warms the C backend cache,
 then reports min / median of N runs of the `-t` execution time and of wall time.
@@ -61,12 +62,23 @@ def cases():
     return out
 
 
+SINK = "devnull"
+
+
 def run(cmd, prog, inp, env):
     stdin = open(inp, "rb") if inp else subprocess.DEVNULL
+    if SINK == "file":
+        out = open(os.path.join(REPO, "build", "rtio", "sink.out"), "wb")
+    elif SINK == "pipe":
+        out = subprocess.PIPE
+    else:
+        out = subprocess.DEVNULL
     t0 = time.perf_counter()
-    r = subprocess.run(cmd + ["-t", prog], stdin=stdin, stdout=subprocess.DEVNULL,
+    r = subprocess.run(cmd + ["-t", prog], stdin=stdin, stdout=out,
                        stderr=subprocess.PIPE, env=env, timeout=120)
     wall = time.perf_counter() - t0
+    if SINK == "file":
+        out.close()
     if inp:
         stdin.close()
     us = None
@@ -87,6 +99,9 @@ def main():
             only = set(args.pop(0).split(","))
         elif a == "--ref":
             ref = True
+        elif a == "--sink":
+            global SINK
+            SINK = args.pop(0)
         elif a == "--":
             cmd = args
             break
