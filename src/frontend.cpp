@@ -12,27 +12,26 @@ namespace {
 
 void write_err(const std::string& s) { std::fwrite(s.data(), 1, s.size(), stderr); }
 
+// Reads straight into `out` (no large stack buffer: its stack probes would
+// fault in several fresh pages at start-up). A regular file gets one buffer of
+// its size + 1, so the usual case is two read() calls (data, then EOF); a file
+// that grew since fstat, or a pipe, grows the buffer geometrically.
 bool read_fd(int fd, std::string& out) {
     struct stat st;
-    if (fstat(fd, &st) == 0 && S_ISREG(st.st_mode)) {
-        out.resize((size_t)st.st_size);
-        size_t got = 0;
-        while (got < out.size()) {
-            ssize_t r = ::read(fd, &out[got], out.size() - got);
-            if (r < 0) return false;
-            if (r == 0) break;
-            got += (size_t)r;
-        }
-        out.resize(got);
-        // The file may have grown since fstat; read any remainder.
-    }
-    char buf[65536];
+    size_t chunk = 16384;
+    if (fstat(fd, &st) == 0 && S_ISREG(st.st_mode) && st.st_size > 0) chunk = (size_t)st.st_size + 1;
+    size_t got = 0;
     for (;;) {
-        ssize_t r = ::read(fd, buf, sizeof buf);
+        if (out.size() - got == 0) {
+            out.resize(got + chunk);
+            chunk = out.size();
+        }
+        ssize_t r = ::read(fd, &out[got], out.size() - got);
         if (r < 0) return false;
         if (r == 0) break;
-        out.append(buf, (size_t)r);
+        got += (size_t)r;
     }
+    out.resize(got);
     return true;
 }
 

@@ -7,6 +7,7 @@
 
 #include <mach/mach_time.h>
 #include <pthread.h>
+#include <sys/resource.h>
 #include <unistd.h>
 
 #include <cstdio>
@@ -60,6 +61,11 @@ double ticks_us(uint64_t d) {
     return (double)d * tb.numer / tb.denom / 1000.0;
 }
 double us_since(Clock::time_point t) { return ticks_us(Clock::now() - t); }
+long minflt() {
+    struct rusage ru;
+    getrusage(RUSAGE_SELF, &ru);
+    return ru.ru_minflt;
+}
 
 // Unbuffered-enough ostream onto a file descriptor, so the AST / resolver
 // dumps need neither <iostream> nor std::cout / std::cerr.
@@ -142,22 +148,36 @@ int frontend_bench(const CompileUnit& src, int iters, const Options& opts) {
     const auto& plist = tir::passes();
     size_t npass = plist.size();
     std::vector<double> best(NP + npass, 1e30), sum(NP + npass, 0), first(NP + npass, 0);
+    std::vector<long> flt(NP + npass, 0);  // page faults during the first iteration
+    long flt_start = minflt();
     bool backend = !opts.parse_only;
+    long fl = 0;
     auto acc = [&](size_t i, uint64_t d) {
         double us = ticks_us(d);
         if (us < best[i]) best[i] = us;
         if (sum[i] == 0) first[i] = us;
         sum[i] += us;
     };
+    // First iteration only: faults since the previous mark.
+    auto mark = [&](int it, size_t i) {
+        if (it) return;
+        long f = minflt();
+        flt[i] = f - fl;
+        fl = f;
+    };
     for (int it = 0; it < iters; ++it) {
+        fl = minflt();
+        long fl0 = fl;
         uint64_t t0 = Clock::now();
         CompileUnit cu;
         cu.file = src.file;
         cu.source = src.source;
         if (!parse_unit(cu)) return 1;
         uint64_t t1 = Clock::now();
+        mark(it, P_PARSE);
         if (!resolve_unit(cu)) return 1;
         uint64_t t2 = Clock::now();
+        mark(it, P_RESOLVE);
         acc(P_PARSE, t1 - t0);
         acc(P_RESOLVE, t2 - t1);
         if (backend) {
@@ -167,9 +187,11 @@ int frontend_bench(const CompileUnit& src, int iters, const Options& opts) {
             infer::Result R;
             infer::infer(cu.prog, cfg, R);
             uint64_t t3 = Clock::now();
+            mark(it, P_INFER);
             tir::Module M;
             build_tir(cu.prog, R, BuildOptions{}, M);
             uint64_t t4 = Clock::now();
+            mark(it, P_BUILD);
             uint64_t tp = t4;
             for (size_t p = 0; p < npass; ++p) {
                 bool off = false;
@@ -177,6 +199,7 @@ int frontend_bench(const CompileUnit& src, int iters, const Options& opts) {
                     if (d == plist[p].name) off = true;
                 if (!off) plist[p].run(M);
                 uint64_t tq = Clock::now();
+                mark(it, NP + p);
                 acc(NP + p, tq - tp);
                 tp = tq;
             }
@@ -187,17 +210,21 @@ int frontend_bench(const CompileUnit& src, int iters, const Options& opts) {
         } else {
             acc(P_TOTAL, t2 - t0);
         }
+        if (it == 0) {
+            for (size_t p = 0; p < npass; ++p) flt[P_PASSES] += flt[NP + p];
+            flt[P_TOTAL] = minflt() - fl0;
+        }
     }
-    std::fprintf(stderr, "frontend-bench: %s, %zu bytes, %d iterations (best / mean / first us)\n", src.file.c_str(),
-                 src.source.size(), iters);
+    std::fprintf(stderr, "frontend-bench: %s, %zu bytes, %d iterations (best / mean / first us, first faults);"
+                 " %ld faults before\n", src.file.c_str(), src.source.size(), iters, flt_start);
     for (int i = 0; i < NP; ++i) {
         if (!backend && i >= P_INFER && i < P_TOTAL) continue;
-        std::fprintf(stderr, "  %-22s %9.2f %9.2f %9.2f\n", names[i], best[i], sum[i] / iters, first[i]);
+        std::fprintf(stderr, "  %-22s %9.2f %9.2f %9.2f %5ld\n", names[i], best[i], sum[i] / iters, first[i], flt[i]);
     }
     if (backend)
         for (size_t p = 0; p < npass; ++p)
-            std::fprintf(stderr, "    pass %-17s %9.2f %9.2f %9.2f\n", plist[p].name, best[NP + p], sum[NP + p] / iters,
-                         first[NP + p]);
+            std::fprintf(stderr, "    pass %-17s %9.2f %9.2f %9.2f %5ld\n", plist[p].name, best[NP + p],
+                         sum[NP + p] / iters, first[NP + p], flt[NP + p]);
     return 0;
 }
 
