@@ -101,6 +101,18 @@ or exceeding the output cap where the reference finished ⇒ failure. Failing ca
 are saved with the program, input, every engine's stdout/stderr and a `report.json`.
 Exit 1 on any mismatch.
 
+`--batch` (also on `fuzz.py`): every C-backend engine (an engine whose command runs
+`build/epq` without `--engine=jit`, also behind `env K=V …` or `fake_engine.py`) gets all
+programs through `epq --batch` (`--batch-chunk N` programs per invocation, default 300;
+one new dylib per chunk and engine configuration, none on a rerun) instead of one process
+and one new dylib per program. The reference, the JIT and pyref still run per process.
+Verdicts, saved cases and the reducer are unchanged (the reducer runs its candidates per
+process). Per-program wall times of batch engines are reported as 0. Use it whenever an
+`aot` engine is in the list:
+
+    tools/fuzz.py --batch --seed 1 --count 5000 --engine baseline=../refbuild/epq_ref \
+        --engine "aot=build/epq --engine=aot" --engine "aot-nolist=env EPQ_NO_PASS=listopt build/epq --engine=aot"
+
 ## fuzz.py — random-program differential fuzzer (+ reducer)
 
     tools/fuzz.py --seed 1 --count 20000 --profile any [--engine ...] [--pyref] [--jobs 10]

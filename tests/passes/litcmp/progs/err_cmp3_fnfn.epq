@@ -1,0 +1,5 @@
+// f < f fails even when it is the same function, nested in equal prefixes.
+g := (y) => { => y; };
+>> [1, [2, [3]]] = [1, [2, [3]]];
+>> [1, [2, [g]]] = [1, [2, [g]]];
+>> [1, [2, [g]]] < [1, [2, [g]]];

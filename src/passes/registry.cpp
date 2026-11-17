@@ -26,7 +26,9 @@ const Pass kPipeline[] = {
     {"region-info", "analysis: header-mutation summaries, unique lists (§5.2)", pass_region_info},
     // ---- optimisation passes (§5) ----
     {"simplify", "local simplification, early (§5.6)", pass_simplify},
+    {"litcmp", "comparisons against list literals without allocating them", pass_litcmp},
     {"inline", "inline small instances as InlineBlocks (§5.1)", pass_inline},
+    {"recur", "recursion: purity, self tail calls -> loops, pure-call CSE, self-unrolling", pass_recur},
     {"pairs", "pair unboxing (§5.4)", pass_pairs},
     {"ifconv", "if-conversion to Select (§5.5)", pass_ifconv},
     {"listopt", "header caching and check elision (§5.2/§5.3)", pass_listopt},

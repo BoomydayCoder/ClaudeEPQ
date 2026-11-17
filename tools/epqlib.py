@@ -264,3 +264,95 @@ def short(b, n=400):
 
 def jobs_default():
     return os.cpu_count() or 4
+
+
+# ---------------------------------------------------------------------------
+# batch mode (epq --batch, src/batch.cpp): many programs, one new dylib
+# ---------------------------------------------------------------------------
+
+BATCH_TIMEOUT_NOTE = b"TIMEOUT\n"
+BATCH_SIGNAL_NOTE = b"epq-batch: killed by signal "
+
+
+def is_batchable(engine):
+    """True for a ClaudeEPQ C-backend engine (possibly behind `env K=V` or
+    tools/fake_engine.py): its programs can go through `epq --batch`."""
+    a = engine.argv
+    if any(x in ("--engine=jit", "--jit") for x in a):
+        return False
+    return any(os.path.basename(x) == "epq" for x in a)
+
+
+def _batch_result(out, err, code_txt, max_output):
+    r = RunResult()
+    r.stdout = out
+    try:
+        rc = int(code_txt.strip())
+    except ValueError:
+        r.spawn_error = "batch produced no exit code"
+        r.rc = 127
+        r.stderr = err
+        return r
+    if rc == 124 and err.endswith(BATCH_TIMEOUT_NOTE):
+        r.timed_out = True
+        err = err[:-len(BATCH_TIMEOUT_NOTE)]
+    elif rc > 128:
+        i = err.rfind(BATCH_SIGNAL_NOTE)
+        if i >= 0 and (i == 0 or err[i - 1:i] == b"\n"):
+            err = err[:i]
+            r.signal = rc - 128
+            rc = -r.signal
+    r.rc = rc
+    r.stderr = err
+    if len(out) + len(err) > max_output:
+        r.truncated = True
+    return r
+
+
+def run_batch(engine, items, timeout=10.0, jobs=None, flags=(), chunk=300, max_output=64 << 20, env=None,
+              log=None):
+    """Run items = [(prog_path, stdin_path_or_None), ...] on a C-backend engine through
+    `epq --batch`, `chunk` programs per invocation (one new dylib per chunk, none when
+    the same chunk is run again).  Returns one RunResult per item, in order (wall = 0:
+    batch mode does not time single programs).  Raises RuntimeError if a batch fails."""
+    import shutil
+    import tempfile
+    jobs = jobs or jobs_default()
+    results = []
+    base = os.path.join(BUILD, "batchrun")
+    os.makedirs(base, exist_ok=True)
+    for c0 in range(0, len(items), chunk):
+        part = items[c0:c0 + chunk]
+        d = tempfile.mkdtemp(prefix="b%d-" % os.getpid(), dir=base)
+        try:
+            lines = []
+            for i, (prog, stdin) in enumerate(part):
+                stem = os.path.join(d, "%05d" % i)
+                for s in (prog, stdin or ""):
+                    if "\t" in s or "\n" in s:
+                        raise RuntimeError("tab/newline in path %r" % s)
+                lines.append("\t".join([os.path.abspath(prog), os.path.abspath(stdin) if stdin else "-",
+                                        stem + ".o", stem + ".e", stem + ".c"]))
+            man = os.path.join(d, "manifest.tsv")
+            with open(man, "w") as f:
+                f.write("\n".join(lines) + "\n")
+            argv = engine.argv + list(flags) + ["--batch", man, "-j", str(jobs), "--timeout", str(timeout)]
+            p = subprocess.run(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                               env=env)
+            if p.returncode != 0:
+                raise RuntimeError("%s --batch failed (exit %d): %s" % (engine.name, p.returncode,
+                                                                         short(p.stderr, 2000)))
+            if log:
+                log("  [%s] %s" % (engine.name, p.stderr.decode("utf-8", "replace").strip().splitlines()[-1:]))
+            for i in range(len(part)):
+                stem = os.path.join(d, "%05d" % i)
+                def rd(x):
+                    try:
+                        with open(stem + x, "rb") as f:
+                            return f.read()
+                    except OSError:
+                        return b""
+                results.append(_batch_result(rd(".o"), rd(".e"), rd(".c"), max_output))
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+    return results

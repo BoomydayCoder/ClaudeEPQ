@@ -1,0 +1,5 @@
+// Int < [] must still raise Invalid comparison (after evaluating both operands).
+f := (x) => { >> x; => x; };
+>> [] < [];
+>> f(1) < [];
+>> 2;

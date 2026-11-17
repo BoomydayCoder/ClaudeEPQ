@@ -1,0 +1,11 @@
+// recur: 10^7 iterations through a self tail call (no stack growth once it is a loop)
+down := (n, acc) => {
+    (n = 0) ? => acc;
+    => down(n - 1, acc + (n - (n / 7) * 7));
+};
+>> down(10000000, 0);
+cz := (n, c) => {
+    (n = 0) ? => c;
+    => cz(n - 1, c * 3 + 1);
+};
+>> cz(10000000, 1);

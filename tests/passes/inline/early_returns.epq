@@ -1,0 +1,27 @@
+classify := (x) => {
+    (x < 0) ? { => -1; }
+    (i := 0; i < 10; i := i + 1;) @ {
+        (x = i) ? {
+            (i > 5) ? { => 100 + i; } : { (i = 3) ? { => 33; } }
+            => i;
+        }
+    }
+    (x > 1000) ? { => 1000; }
+    w := x;
+    (w > 50) @ {
+        w := w - 7;
+        (w = 60) ? { => 60; }
+    }
+    => w;
+};
+s := 0;
+(k := -3; k < 1100; k := k + 1;) @ {
+    s := s + classify(k);
+}
+>> s;
+>> classify(-5);
+>> classify(3);
+>> classify(7);
+>> classify(67);
+>> classify(5000);
+>> [classify(1), classify(2), classify(8)];

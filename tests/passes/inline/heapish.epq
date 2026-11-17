@@ -1,0 +1,22 @@
+swap := (l, i, j) => { t := l[i]; l[i] := l[j]; l[j] := t; };
+sift := (l, s, e) => {
+    root := s;
+    (root * 2 + 1 <= e) @ {
+        c := root * 2 + 1;
+        sw := root;
+        (l[sw] < l[c]) ? { sw := c; }
+        (c + 1 <= e & l[sw] < l[c + 1]) ? { sw := c + 1; }
+        (sw = root) ? { => 0; }
+        swap(l, root, sw);
+        root := sw;
+    }
+};
+hs := (l) => {
+    n := |l|;
+    (s := (n - 2) / 2; s >= 0; s := s - 1;) @ { sift(l, s, n - 1); }
+    (e := n - 1; e > 0; e := e - 1;) @ { swap(l, e, 0); sift(l, 0, e - 1); }
+    => l;
+};
+>> hs([5, 3, 9, 1, 7, 2, 8, 6, 4, 0, 11, -3]);
+>> hs([]);
+>> hs([[2], [1, 5], [1]]);

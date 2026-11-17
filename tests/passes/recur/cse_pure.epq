@@ -1,0 +1,37 @@
+// recur: duplicate pure-call elimination, and calls that must NOT be merged
+K := 7;
+sq := (x) => { => x * x; };
+addk := (x) => { => x + K; };
+G := 1;
+rg := (x) => { => x + G; };
+pr := (x) => { >> x; => x; };
+inc := (x) => { => sq(x) + 1; };
+>> sq(3) + sq(3);
+>> addk(1) + addk(1) * addk(1);
+>> inc(4) - inc(4) + inc(5);
+// reads a global that changes between the calls: not pure
+>> rg(1) + (G := 5) + rg(1);
+G := 2;
+>> rg(1) + rg(1);
+// prints: not pure
+>> pr(1) + pr(1);
+// an argument variable is reassigned between the calls
+a := 3;
+>> sq(a) + (a := 4) + sq(a);
+>> [sq(a), sq(a), sq(a + 1), sq(1 + a)];
+// conditional duplicates
+b := 2;
+(b > 1) ? >> sq(b) + sq(b); : >> 0;
+>> (b > 5) & sq(b) | sq(b) + sq(b);
+// inside a loop that changes the argument
+i := 0;
+t := 0;
+(i < 5) @ {
+    t := t + sq(i) + sq(i);
+    i := i + 1;
+}
+>> t;
+// inside a loop whose argument does not change
+t := 0;
+(j := 0; j < 4; j := j + 1;) @ t := t + inc(b) + inc(b);
+>> t;

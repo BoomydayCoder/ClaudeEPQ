@@ -1,0 +1,13 @@
+// small conditional on pairs (ifconv-able shape) and min/max of pairs
+a := [3, 9]; b := [3, 8];
+m := a;
+(b < a) ? m := b;
+>> m;
+x := 0;
+(i := 0; i < 10; i := i + 1;) @ {
+  p := [i - (i / 3) * 3, 0 - i];
+  (p < m) ? m := p;
+  x := x + m[1];
+}
+>> m;
+>> x;

@@ -1,0 +1,12 @@
+// mutation through a returned alias and through a list-of-lists element popped out
+id := (x) => { => x; };
+p := [1, 2];
+id(p)[0] := 5;
+>> p;
+h := [];
+h :+ [4, 4];
+h :+ [2, 2];
+t := -h;
+t :+ 3;
+>> t;
+>> h;

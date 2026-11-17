@@ -1,0 +1,5 @@
+// pair-typed global read from a function before assignment: Undefined global
+f := () => { => P[0]; };
+>> 1;
+>> f();
+P := [1, 2];

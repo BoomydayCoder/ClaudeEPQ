@@ -6,7 +6,7 @@ baseline) and compares stdout bytes + exit code.  stderr is reported but only
 compared with --stderr=first-line / --stderr=full.
 
   tools/difftest.py PROGRAMS_OR_DIRS... [--engine NAME=CMD ...] [--timeout S]
-                    [--jobs N] [--out DIR] [--stderr none|first-line|full]
+                    [--jobs N] [--out DIR] [--stderr none|first-line|full] [--batch]
 
 A program's stdin is its sibling FILE.in (foo.epq -> foo.in), else /dev/null.
 Reference timeout/crash  -> "skipped (invalid test)", not a failure.
@@ -95,6 +95,30 @@ def run_one(prog, engines, timeout, flags):
     return prog, stdin_path, results
 
 
+def run_batched(ex, progs, engines, a):
+    """--batch: per-process engines (reference first) in the thread pool, then every
+    C-backend engine over all programs the reference ran validly through `epq --batch`."""
+    bidx = [i for i, e in enumerate(engines) if i > 0 and epqlib.is_batchable(e)]
+    per = [e for i, e in enumerate(engines) if i not in bidx]
+    print("batch mode: %s through epq --batch" % (", ".join(engines[i].name for i in bidx) or "(no C-backend engine)"))
+    pre = list(ex.map(lambda p: run_one(p, per, a.timeout, a.flag), progs))
+    # results back in engine order; batch slots filled below
+    full = []
+    for prog, stdin_path, rs in pre:
+        it = iter(rs)
+        full.append((prog, stdin_path, [epqlib.RunResult() if i in bidx else next(it) for i in range(len(engines))]))
+    valid = [k for k, (_, _, rs) in enumerate(full)
+             if not (rs[0].timed_out or rs[0].signal is not None or rs[0].truncated or rs[0].spawn_error)]
+    if valid:
+        t = max([a.timeout] + [10 * full[k][2][0].wall + 1 for k in valid])
+        for i in bidx:
+            rs = epqlib.run_batch(engines[i], [(full[k][0], full[k][1]) for k in valid], timeout=t, jobs=a.jobs,
+                                  flags=a.flag, chunk=a.batch_chunk)
+            for k, r in zip(valid, rs):
+                full[k][2][i] = r
+    return full
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("paths", nargs="+")
@@ -108,6 +132,10 @@ def main(argv=None):
     ap.add_argument("--stderr", choices=["none", "first-line", "full"], default="none")
     ap.add_argument("--flag", action="append", default=[], help="extra flag passed to every engine")
     ap.add_argument("--json", help="write a JSON summary here")
+    ap.add_argument("--batch", action="store_true",
+                    help="run C-backend engines through `epq --batch` (one new dylib per chunk instead of one per "
+                         "program); the reference and JIT engines still run per process")
+    ap.add_argument("--batch-chunk", type=int, default=300, help="programs per epq --batch (default 300)")
     ap.add_argument("-v", "--verbose", action="store_true")
     a = ap.parse_args(argv)
 
@@ -124,9 +152,12 @@ def main(argv=None):
     passed, failed, skipped = [], [], []
     summary = []
     with cf.ThreadPoolExecutor(max_workers=a.jobs) as ex:
-        futs = [ex.submit(run_one, p, engines, a.timeout, a.flag) for p in progs]
-        for fut in cf.as_completed(futs):
-            prog, stdin_path, results = fut.result()
+        if a.batch:
+            gen = run_batched(ex, progs, engines, a)
+        else:
+            futs = [ex.submit(run_one, p, engines, a.timeout, a.flag) for p in progs]
+            gen = (fut.result() for fut in cf.as_completed(futs))
+        for prog, stdin_path, results in gen:
             ref = results[0]
             entry = {"program": prog, "results": {e.name: r.to_dict() for e, r in zip(engines, results)}}
             if ref.spawn_error:

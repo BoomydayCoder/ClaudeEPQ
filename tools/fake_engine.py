@@ -16,6 +16,9 @@ must report SOME but not ALL cases):
 Flags understood by ClaudeEPQ only (--engine=..., --parse-only) are dropped
 before calling the wrapped engine; --parse-only is emulated by running the
 program with stdin closed and keeping only stderr.
+With `--batch MANIFEST` (ClaudeEPQ batch mode) the real batch runs and every
+test's output files are perturbed the same way (hang -> exit 124 + TIMEOUT,
+crash -> 139 + signal note, as batch mode reports them).
 """
 import os
 import signal
@@ -24,9 +27,46 @@ import sys
 import time
 
 
+def batch(modes, rest):
+    """`fake_engine.py MODE REAL_EPQ... --batch MANIFEST ...`: run the real batch,
+    then perturb every test's output files exactly as single mode would."""
+    man = rest[rest.index("--batch") + 1]
+    p = subprocess.run(rest)
+    if p.returncode != 0:
+        return p.returncode
+    for line in open(man).read().splitlines():
+        if not line or line.startswith("#"):
+            continue
+        prog, _, fo, fe, fc = line.split("\t")
+        out, err = open(fo, "rb").read(), open(fe, "rb").read()
+        rc = int(open(fc).read().strip())
+        if "parse" in modes:
+            src = open(prog, "rb").read()
+            if any(l.count(b"|") >= 2 for l in src.split(b"\n")):
+                out, err, rc = b"", ("%s:1.1: syntax error, unexpected '|'\n" % prog).encode(), 1
+        if "digit" in modes:
+            i = out.rfind(b"7")
+            if i >= 0:
+                out = out[:i] + b"8" + out[i + 1:]
+        if "exit" in modes and out.count(b"\n") % 2 == 1:
+            rc = 1 - rc if rc in (0, 1) else rc
+        if "ast" in modes:
+            err = err.replace(b"||", b"&&", 1)
+        if "hang" in modes and b">> 3\n" in out:
+            err, rc = err + b"TIMEOUT\n", 124
+        elif "crash" in modes and b">> 5\n" in out:
+            err, rc = err + b"epq-batch: killed by signal 11 (Segmentation fault: 11)\n", 139
+        open(fo, "wb").write(out)
+        open(fe, "wb").write(err)
+        open(fc, "w").write("%d\n" % rc)
+    return 0
+
+
 def main():
     modes = set(sys.argv[1].split(","))
     rest = sys.argv[2:]
+    if "--batch" in rest:
+        return batch(modes, rest)
     fname = rest[-1]
     parse_only = "--parse-only" in rest
     rest = [a for a in rest if not a.startswith("--engine=") and a != "--parse-only"]
