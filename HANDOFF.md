@@ -53,6 +53,13 @@ before it is merged.
 
 ## Things learned the hard way
 
+- **Testing fast:** run C-backend test suites with `python3 tools/fasttest.py tests/conformance
+  tests/core tests/hunt` (options `-k`, `--epq-arg`, `--env`, see `tools/README.md`). It pushes
+  every program through one `epq --batch` (one new dylib per run instead of one per program,
+  none when rerun), so it costs one macOS first-load scan instead of hundreds: ~2 s warm,
+  ~20 s cold for all 564 programs. Use `tests/conformance/run.py` per process only for
+  non-C engines or to test the single-program path itself.
+
 - Agent worktrees are cut from `origin/main`: push `main` before launching agents, and tell each agent to
   `git merge main` first.
 - Do not message a running workflow agent: it starts a second copy in the same folder.

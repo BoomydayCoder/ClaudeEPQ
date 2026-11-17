@@ -6,7 +6,53 @@ SIGKILLed on timeout), cap captured output, and run in parallel across all cores
 where that does not distort results (`bench.py` is deliberately serial).
 
 Scratch output goes to `build/` (git-ignored): `build/difftest/`, `build/fuzz/`,
-`build/parsefuzz/`, `build/bench/`.
+`build/parsefuzz/`, `build/bench/`, `build/fasttest/`.
+
+## fasttest.py — run test suites on the C backend fast (use this first)
+
+    python3 tools/fasttest.py tests/conformance tests/core tests/hunt
+    python3 tools/fasttest.py -k lists/ --epq-arg=--verify-tir --env EPQ_NO_PASS=listopt tests/conformance
+    python3 tools/fasttest.py [--epq PATH] [--epq-arg ARG ...] [--env K=V ...] [-k SUBSTR ...]
+                              [-j N] [--timeout SEC] [--max-diff LINES] [-q] [--keep] [--also CMD] DIR...
+
+**Why.** macOS security-scans every newly created binary on its first exec/dlopen
+(~200 ms or more each, strictly one at a time for the whole machine, however many cores).
+The per-process runners (`tests/conformance/run.py`, `difftest.py`) make the C backend
+create one new dylib per program: ~560 scans for conformance+core+hunt, and every agent
+on the machine waits in the same queue. `fasttest.py` creates **one** dylib per run, and
+**none** when the same set of programs is run again.
+
+**What it does.** Collects `X.epq` (recursively; `X.in` = stdin, expected `X.out` bytes and
+`X.code`, default 0; tests without `X.out` are skipped), writes a manifest to
+`build/fasttest/<run-id>/manifest.tsv`, runs `build/epq --engine=aot [ARGS] --batch MANIFEST`
+once, compares stdout + exit code, prints `FAIL path` with a short unified diff and the
+first stderr lines, then `N/M passed, K failed`. Exit 0 iff all pass. Output files of
+failures stay in `build/fasttest/<run-id>/` (`--keep`: all of them). `--epq-arg` options and
+`--env` variables apply to every program exactly as on a normal command line and are part
+of the cache key. `--also CMD` additionally runs every test through CMD per process (e.g.
+`--also "build/epq --engine=jit"`, which creates no new binaries) and checks it too.
+
+Measured (564 programs of conformance+core+hunt, 10 cores): cold (nothing cached) 21.5 s;
+objects cached, new link 2.0 s; fully warm 1.6 s. The old per-process runner on the same
+set pays one scan per uncached program (minutes, more when other agents are scanning too).
+
+**`epq --batch MANIFEST [-j N] [--timeout SEC]`** (src/batch.cpp) is the engine underneath and
+can be used directly: one test per line, five TAB-separated fields
+`PROGRAM  STDIN-or-'-'  STDOUT-FILE  STDERR-FILE  EXITCODE-FILE`. Per program it runs the
+normal pipeline in a child of `epq` itself (compile-time errors give exactly the normal
+stderr and exit code 1), compiles the C with `cc -c` into `$EPQ_CACHE_DIR/<key>.o` (same key
+as the dylib cache; parallel; reused), links all objects into one
+`$EPQ_CACHE_DIR/batch-<set-hash>.dylib` (reused for an identical object set), dlopens it once
+and runs every program in a forked child (no exec) with the normal run path (big stack,
+stack-overflow message, `-t`). Timeout ⇒ exit code 124 and `TIMEOUT` on stderr; killed by a
+signal ⇒ 128+signal and a note on stderr. A one-line summary goes to stderr. Verified
+byte-identical (stdout, stderr, exit code) to single-program runs on all 564 programs.
+
+**When to use the old runners instead:** for engines that are not the C backend (the
+baseline, the JIT — they create no new binaries, so per-process is fine), to test the
+single-program path itself (cache handling, `--verbose`, `dlopen` errors, unwritable cache
+directory), or for programs that depend on being the only program in their process image.
+`--verbose` output differs in batch mode (no per-program cc / cache lines).
 
 ## Engines
 
