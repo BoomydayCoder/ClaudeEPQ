@@ -1,4 +1,4 @@
-# Where this stands (paused 17 Nov 2026, ~00:50)
+# Where this stands (17 Nov 2026)
 
 ClaudeEPQ is a new implementation of the EPQ language (original: BoomydayCoder/EPQ). The design is in
 `docs/DESIGN.md`, the language spec in `docs/LANGUAGE.md`.
@@ -61,4 +61,11 @@ before it is merged.
   helper must load it once itself before marking it ready.
 - Known bug on `main`: with an unwritable cache directory the C backend refuses to run the program
   (`tests/hunt/runtime/bug01_unwritable_cache`).
+- **Every freshly compiled binary costs 3–5 s on its first run** (macOS scans it; the scanner handles one
+  at a time). C-backend tests compile one binary per program, so a 389-test run is ~30 minutes of scanner
+  time and many agents testing at once starve each other. Developer Tools was switched on for Claude on
+  17 Nov; it needs an app restart to take effect (unconfirmed whether it removes the delay). Until
+  confirmed: prefer the JIT for testing, keep C-backend test runs small, never run many in parallel.
+- The workflow tool runs at most 8 agents at once (CPUs − 2); extra agents queue silently. Use several
+  workflows of ≤ 8, and never try to redirect queued agents by editing files they read — they ignore it.
 - If-converting element stores made bubblesort 4.7× slower; only scalar cases are enabled.
