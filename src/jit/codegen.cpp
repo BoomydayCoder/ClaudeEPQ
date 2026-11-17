@@ -3147,6 +3147,101 @@ void on_overflow() {
 
 }  // namespace
 
+// ---- support check ---------------------------------------------------------------
+// Whitelists of what this code generator implements. A TIR op or type kind
+// added later lands in `default` and makes the module unsupported: the driver
+// then reports it (--engine=jit) or falls back to the C engine (--engine=auto),
+// never a silent miscompilation. To add an op: list it here, give it a case in
+// Compiler::expr (values) and/or Compiler::stmt (statements), in the prepass
+// (Compiler::kid / op_calls if it may call) and in cond() if it has a branch form.
+namespace {
+bool op_supported(Op o) {
+    switch (o) {
+    case Op::Seq: case Op::If: case Op::While: case Op::Return: case Op::Print:
+    case Op::ConstInt: case Op::ConstFn: case Op::Local: case Op::GetGlobal: case Op::Input:
+    case Op::SetLocal: case Op::SetGlobal:
+    case Op::Box: case Op::UnboxInt: case Op::Coerce: case Op::Comma: case Op::Fail:
+    case Op::AddI32: case Op::SubI32: case Op::MulI32: case Op::DivI32: case Op::NegI32: case Op::AbsI32:
+    case Op::NotI32: case Op::EqI32: case Op::NeI32: case Op::LtI32: case Op::LeI32: case Op::GtI32: case Op::GeI32:
+    case Op::DynArith: case Op::DynNeg: case Op::DynAbs: case Op::DynNot:
+    case Op::Eq: case Op::Ne: case Op::Cmp:
+    case Op::ListLit: case Op::Len: case Op::Index: case Op::SetIndex: case Op::Append: case Op::Pop:
+    case Op::DynIndex: case Op::DynSetIndex: case Op::DynAppend:
+    case Op::And: case Op::Or: case Op::CallDirect: case Op::CallDyn:
+    case Op::Select: case Op::InlineBlock: case Op::Break:
+    case Op::PairMake: case Op::PairFirst: case Op::PairSecond: case Op::PairIndex:
+    case Op::PairEq: case Op::PairNe: case Op::PairLt: case Op::PairLe: case Op::PairGt: case Op::PairGe:
+    case Op::ListData: case Op::ElemLoad: case Op::ElemStore: case Op::CheckIndex:
+    case Op::Free: case Op::SameList: case Op::Nop:
+        return true;
+    default: return false;
+    }
+}
+bool type_supported(Type t) {
+    switch (t.k) {
+    case TK::Bot: case TK::Int: case TK::List: case TK::Fn: case TK::Any: case TK::Pair: case TK::Ptr: return true;
+    default: return false;
+    }
+}
+bool sub_op_ok(const Node* n) {
+    if (n->op == Op::DynArith) {
+        Op s = (Op)n->a;
+        return s == Op::AddI32 || s == Op::SubI32 || s == Op::MulI32 || s == Op::DivI32;
+    }
+    if (n->op == Op::Cmp) {
+        Op s = (Op)n->c;
+        return s == Op::LtI32 || s == Op::LeI32 || s == Op::GtI32 || s == Op::GeI32;
+    }
+    return true;
+}
+bool check_tree(const Node* n, std::string& why) {
+    if (!op_supported(n->op)) {
+        why = std::string("TIR op ") + tir::op_name(n->op);
+        return false;
+    }
+    if (!sub_op_ok(n)) {
+        why = std::string("operator of TIR op ") + tir::op_name(n->op);
+        return false;
+    }
+    if (!type_supported(n->type)) {
+        why = std::string("type kind ") + std::to_string((int)n->type.k) + " (op " + tir::op_name(n->op) + ")";
+        return false;
+    }
+    for (uint32_t i = 0; i < n->nkids; ++i)
+        if (!check_tree(n->kids[i], why)) return false;
+    return true;
+}
+}  // namespace
+
+// EPQ_JIT_PRETEND_UNSUPPORTED=OPNAME (test hook): treat that op as unsupported.
+static const char* pretend_unsupported_ = nullptr;
+static bool check_tree_pretend(const Node* n) {
+    if (!std::strcmp(tir::op_name(n->op), pretend_unsupported_)) return false;
+    for (uint32_t i = 0; i < n->nkids; ++i)
+        if (!check_tree_pretend(n->kids[i])) return false;
+    return true;
+}
+
+std::string unsupported(const Module& m) {
+    std::string why;
+    pretend_unsupported_ = getenv("EPQ_JIT_PRETEND_UNSUPPORTED");
+    if (pretend_unsupported_)
+        for (auto& f : m.funcs)
+            if (f->body && !check_tree_pretend(f->body))
+                return std::string("TIR op ") + pretend_unsupported_ + " in function " + f->name + " (pretend)";
+    for (auto& r : m.regions)
+        if (!type_supported(r.elem)) return "region element type kind " + std::to_string((int)r.elem.k);
+    for (auto& g : m.globals)
+        if (!type_supported(g.type)) return "global type kind " + std::to_string((int)g.type.k);
+    for (auto& f : m.funcs) {
+        if (!type_supported(f->ret)) return "return type kind of " + f->name;
+        for (auto& l : f->locals)
+            if (!type_supported(l.type)) return "local type kind in " + f->name;
+        if (f->body && !check_tree(f->body, why)) return why + " in function " + f->name;
+    }
+    return "";
+}
+
 int run(const Module& m, const JitConfig& cfg) {
     static_assert(sizeof(tir::Desc) == 8, "EDesc layout");
     if (getenv("EPQ_JIT_QOS")) pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);

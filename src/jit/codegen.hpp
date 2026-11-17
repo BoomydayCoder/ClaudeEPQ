@@ -3,6 +3,7 @@
 #pragma once
 
 #include <cstdint>
+#include <string>
 
 #include "../backend.hpp"
 #include "../tir.hpp"
@@ -16,7 +17,11 @@ struct JitConfig {
     bool verbose = false;
 };
 
-// Compiles and runs the module. Returns the process exit status.
+// "" if the JIT implements every op and type of the module, else a short
+// description of the first unsupported one (e.g. "TIR op RecGet in function f2_g").
+std::string unsupported(const tir::Module& m);
+
+// Compiles and runs the module (which must pass unsupported()). Returns the process exit status.
 int run(const tir::Module& m, const JitConfig& cfg);
 
 }  // namespace epq::jitcg

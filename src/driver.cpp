@@ -311,7 +311,20 @@ int run_module(tir::Module& M, const Options& opts_in) {
         return 0;
     }
     uint64_t T1 = now_us();
-    if (opts.engine == Engine::Jit && !opts.emit_c) {
+    bool use_jit = opts.engine == Engine::Jit && !opts.emit_c && (opts.jit_mode != 0 || opts.dump_asm);
+    if (use_jit) {
+        std::string why = jitcg::unsupported(M);
+        if (!why.empty()) {
+            if (opts.jit_mode == 2) {
+                if (opts.verbose) std::fprintf(stderr, "epq: jit: unsupported %s; using the C engine\n", why.c_str());
+                use_jit = false;
+            } else {
+                std::fprintf(stderr, "epq: jit: unsupported %s (use --engine=aot or --engine=auto)\n", why.c_str());
+                return 2;
+            }
+        }
+    }
+    if (use_jit) {
         jitcg::JitConfig jc;
         jc.time = opts.time;
         jc.dump_asm = opts.dump_asm;

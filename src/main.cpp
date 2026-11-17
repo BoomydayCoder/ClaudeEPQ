@@ -1,6 +1,6 @@
 // ClaudeEPQ command line.
 //
-//   epq [--engine=jit|aot] [-t] [-e] [--parse-only] [--dump-resolved] FILE
+//   epq [--engine=aot|jit|auto] [-t] [-e] [--parse-only] [--dump-resolved] FILE
 //
 // Exit status: 0 ok, 1 syntax / compile / run-time error (as the original),
 // 2 usage error or missing back end.
@@ -31,7 +31,8 @@ void usage(FILE* f, const char* argv0) {
     std::fprintf(f,
                  "Usage: %s [options] FILE        (FILE '-' reads the program from stdin)\n"
                  "Options:\n"
-                 "  --engine=jit|aot   back end: ARM64 JIT (default) or C via cc (cached)\n"
+                 "  --engine=aot|jit|auto  back end: C via cc, cached (default); ARM64 JIT;\n"
+                 "                     auto = JIT, C for programs using ops the JIT lacks\n"
                  "  --emit-c           print the generated C and exit\n"
                  "  --dump-tir         print the typed IR and exit\n"
                  "  --dump-types       print inferred types of globals / instances and exit\n"
@@ -288,6 +289,10 @@ int main(int argc, char** argv) {
             return epq::tir_selftest(a + 15, opts);
         } else if (!std::strcmp(a, "--engine=jit") || !std::strcmp(a, "--jit")) {
             opts.engine = Engine::Jit;
+            opts.jit_mode = 1;
+        } else if (!std::strcmp(a, "--engine=auto")) {
+            opts.engine = Engine::Jit;
+            opts.jit_mode = 2;
         } else if (!std::strcmp(a, "--engine=aot") || !std::strcmp(a, "--aot")) {
             opts.engine = Engine::Aot;
         } else if (a[0] == '-' && a[1] != 0) {

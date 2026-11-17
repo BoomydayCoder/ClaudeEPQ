@@ -37,7 +37,8 @@ def suite(name, runner, epq, jobs, extra_env=None):
     env = dict(os.environ)
     if extra_env:
         env.update(extra_env)
-    r = run([sys.executable, runner, "-j", str(jobs), "-q", "--", epq, "--engine=jit"], env=env)
+    r = subprocess.run([sys.executable, runner, "-j", str(jobs), "-q", "--timeout", "120", "--", epq, "--engine=jit",
+                        "--verify-tir"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
     last = r.stdout.decode(errors="replace").strip().splitlines()[-1:] or [""]
     record(name, r.returncode == 0, last[0])
     if r.returncode != 0:
@@ -46,7 +47,7 @@ def suite(name, runner, epq, jobs, extra_env=None):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("-j", type=int, default=3)
+    ap.add_argument("-j", type=int, default=2)
     ap.add_argument("--epq", default=os.path.join(ROOT, "build", "epq"))
     a = ap.parse_args()
     epq = a.epq
@@ -118,9 +119,28 @@ def main():
     s = r.stdout.decode(errors="replace")
     ok = r.returncode == 0 and "<f2_bubblesort>:" in s and "<f3_swap>:" in s
     record("dumpasm", ok)
-    r = run([epq, "--jit-stats", p])
+    r = run([epq, "--engine=jit", "--jit-stats", p])
     se = r.stderr.decode(errors="replace")
     record("jitstats", r.returncode == 0 and "jit: compile" in se and "code" in se, se.strip())
+
+    # engine selection: the C engine is the default; --engine=jit reports an op
+    # the JIT lacks; --engine=auto falls back to the C engine for that program
+    p = os.path.join(tmp, "select.epq")
+    with open(p, "w") as f:
+        f.write("l := [3, 1, 2];\n>> l[1] + |l|;\n")
+    pe = dict(env)
+    pe["EPQ_JIT_PRETEND_UNSUPPORTED"] = "Index"
+    r = run([epq, "--engine=jit", p], env=pe)
+    se = r.stderr.decode(errors="replace")
+    record("unsupported_forced", r.returncode == 2 and r.stdout == b"" and "unsupported TIR op Index" in se, se.strip())
+    r = run([epq, "--engine=auto", "--verbose", p], env=pe)
+    se = r.stderr.decode(errors="replace")
+    record("unsupported_auto", r.returncode == 0 and r.stdout == b">> 4\n" and "using the C engine" in se,
+           r.stdout.decode(errors="replace").strip())
+    r = run([epq, "--engine=auto", "--jit-stats", p], env=env)
+    record("auto_uses_jit", r.returncode == 0 and r.stdout == b">> 4\n" and b"jit: compile" in r.stderr)
+    r = run([epq, "--jit-stats", p], env=env)
+    record("default_is_c", r.returncode == 0 and r.stdout == b">> 4\n" and b"jit: compile" not in r.stderr)
 
     bad = [n for n, ok in results if not ok]
     print("%d/%d JIT engine test groups passed" % (len(results) - len(bad), len(results)))
