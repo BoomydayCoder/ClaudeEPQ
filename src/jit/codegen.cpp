@@ -579,19 +579,22 @@ public:
         uint32_t en = pos_++;
         bool call = false;
         bool cref = false;
+        int32_t self_hoist = -1;
         auto kid = [&](uint32_t i, int d) {
             prepass(n->kids[i], d);
             call |= info.get(n->kids[i])->call;
         };
         switch (n->op) {
         case Op::ConstInt: {
-            // Constants needing more than one instruction, used inside loops,
-            // compete for registers as pseudo-locals (initialised at entry).
-            if (depth > 0 && !no_const_reg_ && (Assembler::load_imm_len(n->a, false) > 1 || want_const_reg_)) {
-                uint32_t id = const_local(n->a);
+            // Constants needing more than one instruction (or a mov at their use),
+            // used inside loops, compete for registers as pseudo-locals, loaded
+            // at the entry of the outermost enclosing loop.
+            if (depth > 0 && outer_loop_ && !no_const_reg_ && (Assembler::load_imm_len(n->a, false) > 1 || want_const_reg_)) {
+                uint32_t id = const_local(n->a, n);
                 L[id].refs.push_back(Ref{en, ctx_, false});
                 L[id].weight += 0.5 * wdepth(depth);
                 cref = true;
+                self_hoist = (int32_t)id;
             }
             break;
         }
@@ -625,6 +628,8 @@ public:
         }
         case Op::While: {
             LoopRec lr{en, 0, ctx_, 0, n};
+            bool outermost = outer_loop_ == nullptr;
+            if (outermost) outer_loop_ = n;
             size_t h0 = hoist_pending_.size();
             if (!no_hoist_) find_hoists(n);
             size_t h1 = hoist_pending_.size();
@@ -642,6 +647,16 @@ public:
                 L[id].refs.insert(L[id].refs.begin(), Ref{en, ctx_, true});
                 L[id].refs.push_back(Ref{lr.lv, ctx_, false});
                 hoists_[n].push_back(hoist_pending_[h]);
+            }
+            if (outermost) {
+                outer_loop_ = nullptr;
+                for (auto& c : const_nodes_)
+                    if (c.first == n) {
+                        uint32_t id = c.second.second;
+                        L[id].refs.insert(L[id].refs.begin(), Ref{en, ctx_, true});
+                        L[id].refs.push_back(Ref{lr.lv, ctx_, false});
+                        hoists_[n].push_back(c.second);
+                    }
             }
             break;
         }
@@ -690,7 +705,7 @@ public:
             call_pos.push_back(n->op == Op::ListLit ? en : lv);
         }
         if (!risky_ && n->nkids > 1) note_risk(n);
-        NInfo ni{en, lv, call, cref};
+        NInfo ni{en, lv, call, cref, self_hoist};
         if (!hoist_mark_.empty()) {
             auto it = hoist_mark_.find(n);
             if (it != hoist_mark_.end()) {
@@ -937,23 +952,27 @@ public:
         default: return false;
         }
     }
-    std::vector<std::pair<int64_t, uint32_t>> const_ids;  // constant -> pseudo-local id
-    uint32_t const_local(int64_t v) {
+    // constant pseudo-locals: (value, outermost loop) -> id; loaded at that loop's entry
+    struct ConstId {
+        int64_t v;
+        const Node* loop;
+        uint32_t id;
+    };
+    std::vector<ConstId> const_ids;
+    const Node* outer_loop_ = nullptr;
+    uint32_t const_local(int64_t v, const Node* node) {
         for (auto& c : const_ids)
-            if (c.first == v) return c.second;
+            if (c.v == v && c.loop == outer_loop_) return c.id;
         LocalInfo l;
         l.is_const = true;
         l.cval = v;
-        l.needs_init = true;
         L.push_back(l);
-        const_ids.push_back({v, (uint32_t)L.size() - 1});
-        return (uint32_t)L.size() - 1;
+        uint32_t id = (uint32_t)L.size() - 1;
+        const_ids.push_back({v, outer_loop_, id});
+        const_nodes_.push_back({outer_loop_, {node, id}});
+        return id;
     }
-    int const_reg(int64_t v) {
-        for (auto& c : const_ids)
-            if (c.first == v) return L[c.second].reg;
-        return -1;
-    }
+    std::vector<std::pair<const Node*, std::pair<const Node*, uint32_t>>> const_nodes_;
     // Result temporaries of inlined bodies: x := Comma[k.., Local t] where every
     // ref of t lies inside the Comma S (and t is written before it is read on
     // every path through S), x is not written in S, every ref of x in S precedes
@@ -1090,6 +1109,8 @@ public:
         hoist_mark_.clear();
         hoists_.clear();
         const_ids.clear();
+        const_nodes_.clear();
+        outer_loop_ = nullptr;
         copies_.clear();
         loops.clear();
         call_pos.clear();
@@ -1197,7 +1218,7 @@ public:
             // a constant is rematerialised (mov) rather than kept in a callee-saved
             // register across calls (that register costs a save/restore and is
             // better used for a variable)
-            if (l.is_const && pick < 0) continue;
+            if (l.is_const && pick < 0 && l.crosses_call) continue;
             // prefer callee-saved registers already in use
             for (int r = 19; r <= 28 && pick < 0; ++r)
                 if ((callee_used & bit(r)) && fits(r, l.lo, l.hi)) pick = r;
@@ -1378,8 +1399,8 @@ public:
     V expr(const Node* n, int want = -1) {
         switch (n->op) {
         case Op::ConstInt: {
-            if (!const_ids.empty() && !early_ && I(n).cref) {
-                int r = const_reg(n->a);
+            if (!const_ids.empty() && !early_ && !hoist_eval_ && I(n).cref) {
+                int r = L[(size_t)I(n).hoist].reg;
                 if (r >= 0) return V::reg(r, false);
             }
             return V::im(n->a);
@@ -3598,10 +3619,7 @@ public:
         }
         for (auto& l : L) {
             if (l.param || l.fn || !l.needs_init) continue;
-            if (l.is_const) {
-                if (l.reg >= 0) li(W(l.reg), (int32_t)l.cval);
-                continue;
-            }
+            if (l.is_const) continue;  // (loaded at its loop's entry)
             if (l.reg >= 0) {
                 if (l.any) A->movz(X(l.reg), 1);
                 else A->movz(X(l.reg), 0);
