@@ -3432,6 +3432,19 @@ public:
             }
             branch(n->kids[0], false, exit);
             A->bind(top);
+            const Node* body = n->kids[1];
+            while (body->op == Op::Seq && body->nkids == 1) body = body->kids[0];
+            const Node* step = n->kids[2];
+            if (n->kids[0]->op == Op::ConstInt && n->kids[0]->a != 0 && body->op == Op::InlineBlock &&
+                step->op == Op::Seq && step->nkids == 0) {
+                // While(1) { InlineBlock L {...} } (tail calls as loops): Break L is the back-edge
+                blocks.push_back({body->a, top});
+                stmt(body->kids[0]);
+                blocks.pop_back();
+                A->b(top);
+                A->bind(exit);
+                return;
+            }
             stmt(n->kids[1]);
             stmt(n->kids[2]);
             branch(n->kids[0], true, top);
