@@ -1,0 +1,6 @@
+// recur: a pure function that fails: the error fires once, at the first of two merged calls
+pf := (x) => { => 100 / x; };
+>> pf(2) + pf(2);
+>> 7;
+>> [1, pf(5) * 0 + pf(0) + pf(0)];
+>> 8;

@@ -1,0 +1,51 @@
+// recur: one-level self-unrolling + CSE of pure self-recursive functions
+fib := (k) => {
+    (k < 2) ? => k;
+    => fib(k - 1) + fib(k - 2);
+};
+fib2 := (k) => {
+    (k < 2) ? => k;
+    => fib2(k - 2) + fib2(k - 1);
+};
+trib := (n) => {
+    (n < 3) ? => 1;
+    => trib(n - 1) + trib(n - 2) + trib(n - 3);
+};
+binom := (n, k) => {
+    (k = 0) ? => 1;
+    (k = n) ? => 1;
+    => binom(n - 1, k - 1) + binom(n - 1, k);
+};
+// fib with a product: wrapping overflow must match
+fm := (k) => {
+    (k < 3) ? => k + 1;
+    => fm(k - 1) * fm(k - 2) + 1;
+};
+tak := (x, y, z) => {
+    (y < x) ? => tak(tak(x - 1, y, z), tak(y - 1, z, x), tak(z - 1, x, y));
+    => z;
+};
+ack := (m, n) => {
+    (m = 0) ? => n + 1;
+    (n = 0) ? => ack(m - 1, 1);
+    => ack(m - 1, ack(m, n - 1));
+};
+pow := (b, e) => {
+    (e = 0) ? => 1;
+    => b * pow(b, e - 1);
+};
+i := 0;
+(i < 25) @ {
+    >> [i, fib(i), fib2(i), trib(i)];
+    i := i + 3;
+}
+>> fib(30);
+>> binom(20, 10);
+>> binom(16, 3);
+>> fm(30);
+>> tak(18, 12, 6);
+>> ack(2, 9);
+>> ack(3, 5);
+>> pow(3, 19);
+>> pow(3, 21);
+>> fib(-5);

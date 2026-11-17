@@ -1,0 +1,29 @@
+// recur: tail-call arguments that print, in order, across iterations; callee read after the arguments
+p := (x) => { >> x; => x; };
+f := (a, b, n) => {
+    >> [n];
+    (n = 0) ? => a + b;
+    => f(p(a + 1), p(b * 2), n - 1);
+};
+>> f(0, 1, 3);
+g := (n, l) => {
+    (n = 0) ? => l;
+    l :+ n;
+    => g(n - 1, l);
+};
+>> g(5, []);
+cnt := 0;
+h := (n) => {
+    cnt := cnt + 1;
+    (n < 1) ? => cnt;
+    => h(n - 1 + 0 * (cnt := cnt + 10));
+};
+>> h(4);
+>> cnt;
+// tail call after side effects in the same statement list
+k := (n, acc) => {
+    acc :+ n * n;
+    (n > 0) ? { >> n; => k(n - 1, acc); }
+    => acc;
+};
+>> k(4, [9]);

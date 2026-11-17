@@ -1,0 +1,37 @@
+// recur: self tail calls become loops (gcd, accumulators, countdown, collatz)
+gcd := (a, b) => {
+    (b = 0) ? => a;
+    => gcd(b, a - (a / b) * b);
+};
+sum := (n, acc) => {
+    (n = 0) ? => acc;
+    => sum(n - 1, acc + n);
+};
+steps := (n, c) => {
+    (n = 1) ? => c;
+    (n - (n / 2) * 2 = 0) ? => steps(n / 2, c + 1);
+    => steps(3 * n + 1, c + 1);
+};
+pw := (b, e, acc) => {
+    (e = 0) ? => acc;
+    (e - (e / 2) * 2 = 1) ? => pw(b * b, e / 2, acc * b);
+    => pw(b * b, e / 2, acc);
+};
+>> gcd(1071, 462);
+>> gcd(17, 5);
+>> gcd(0, 9);
+>> sum(100, 0);
+>> sum(100000, 0);
+>> steps(27, 0);
+>> steps(97, 0);
+>> pw(3, 13, 1);
+>> pw(2, 31, 1);
+>> pw(7, 100, 1);
+i := 1;
+best := 0;
+(i < 300) @ {
+    s := steps(i, 0);
+    (s > best) ? best := s;
+    i := i + 1;
+}
+>> best;
