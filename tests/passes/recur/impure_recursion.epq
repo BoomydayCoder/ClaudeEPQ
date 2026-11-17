@@ -1,0 +1,33 @@
+// recur: recursive functions that look pure but are not (globals, prints, lists, input)
+G := 0;
+fg := (k) => {
+    G := G + 1;
+    (k < 2) ? => k;
+    => fg(k - 1) + fg(k - 2);
+};
+fp := (k) => {
+    (k < 2) ? { >> k; => k; }
+    => fp(k - 1) + fp(k - 2);
+};
+H := 1;
+fr := (k) => {
+    (k < 2) ? => k + H;
+    => fr(k - 1) + fr(k - 2);
+};
+fl := (k, l) => {
+    (k < 2) ? => l[0];
+    l[0] := l[0] + 1;
+    => fl(k - 1, l) + fl(k - 2, l);
+};
+fi := (k) => {
+    (k < 2) ? => <<;
+    => fi(k - 1) + fi(k - 2);
+};
+>> fg(10);
+>> G;
+>> fp(4);
+>> fr(10);
+H := 2;
+>> fr(10);
+>> fl(8, [0]);
+>> fi(4);

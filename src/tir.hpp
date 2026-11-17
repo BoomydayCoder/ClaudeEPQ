@@ -278,6 +278,16 @@ struct Func {
     std::vector<uint32_t> mutates;
     bool mutates_any = false;
     uint32_t next_label = 0;    // InlineBlock / Break labels: new_label(f)
+    // ---- recur pass (src/passes/recur.cpp) ----
+    // pure: set by pass "recur" (false until it runs / if disabled). The result
+    // depends only on the arguments: Int-only locals/params/result, no SetGlobal,
+    // Print, Input, CallDyn, no list values at all, reads only Fn-typed or
+    // Global::constant globals, calls only pure instances. It MAY fail or not
+    // terminate (deterministically, given the arguments). Two calls with equal
+    // arguments are interchangeable (call-CSE); a call whose result is unused may
+    // NOT be dropped (it may fail / diverge).
+    bool pure = false;
+    // ---- end recur pass ----
 };
 inline uint32_t new_label(Func& f) { return f.next_label++; }
 
