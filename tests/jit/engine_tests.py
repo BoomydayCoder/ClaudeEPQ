@@ -115,9 +115,13 @@ def main():
     record("huge_function", ok, "" if ok else "jit rc=%d aot rc=%d" % (rj.returncode, ra.returncode))
 
     p = os.path.join(ROOT, "bench", "original", "bubblesort.epq")
-    r = run([epq, "--dump-asm", p])
+    r = run([epq, "--engine=jit", "--dump-asm", p])
     s = r.stdout.decode(errors="replace")
-    ok = r.returncode == 0 and "<f2_bubblesort>:" in s and "<f3_swap>:" in s
+    # (the inline pass leaves bubblesort as one function; --no-pass=inline keeps the calls)
+    ok = r.returncode == 0 and "<f0_main>:" in s and "<rt_print>:" in s
+    r = run([epq, "--engine=jit", "--dump-asm", "--no-pass=inline", p])
+    s = r.stdout.decode(errors="replace")
+    ok = ok and r.returncode == 0 and "<f2_bubblesort>:" in s and "<f3_swap>:" in s
     record("dumpasm", ok)
     r = run([epq, "--engine=jit", "--jit-stats", p])
     se = r.stderr.decode(errors="replace")
@@ -129,10 +133,10 @@ def main():
     with open(p, "w") as f:
         f.write("l := [3, 1, 2];\n>> l[1] + |l|;\n")
     pe = dict(env)
-    pe["EPQ_JIT_PRETEND_UNSUPPORTED"] = "Index"
+    pe["EPQ_JIT_PRETEND_UNSUPPORTED"] = "Print"
     r = run([epq, "--engine=jit", p], env=pe)
     se = r.stderr.decode(errors="replace")
-    record("unsupported_forced", r.returncode == 2 and r.stdout == b"" and "unsupported TIR op Index" in se, se.strip())
+    record("unsupported_forced", r.returncode == 2 and r.stdout == b"" and "unsupported TIR op Print" in se, se.strip())
     r = run([epq, "--engine=auto", "--verbose", p], env=pe)
     se = r.stderr.decode(errors="replace")
     record("unsupported_auto", r.returncode == 0 and r.stdout == b">> 4\n" and "using the C engine" in se,
