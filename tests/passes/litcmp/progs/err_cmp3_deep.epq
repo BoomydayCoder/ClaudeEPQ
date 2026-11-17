@@ -1,0 +1,5 @@
+// The invalid pairing is reached only after a long equal deep prefix.
+mk := (d, v) => { (d = 0) ? => v; => [mk(d - 1, v), mk(d - 1, v)]; };
+a := [mk(6, 1), 1];
+b := [mk(6, 1), []];
+>> a < b;

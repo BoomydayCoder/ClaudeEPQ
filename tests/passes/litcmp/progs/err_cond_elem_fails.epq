@@ -1,0 +1,5 @@
+// The literal's element raises inside a condition: the error still fires.
+f := (x) => { >> x; => x; };
+l := [1];
+([f(1), l[3], f(2)]) ? >> 0;
+>> 99;

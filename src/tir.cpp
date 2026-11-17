@@ -36,6 +36,7 @@ const char* op_name(Op o) {
         C(Select) C(InlineBlock) C(Break) C(PairMake) C(PairFirst) C(PairSecond) C(PairIndex) C(PairEq) C(PairNe)
         C(PairLt) C(PairLe) C(PairGt) C(PairGe) C(ListData) C(ElemLoad) C(ElemStore) C(CheckIndex) C(Free)
         C(SameList) C(Nop)
+        C(DynIsEmptyList)  // litcmp extension
 #undef C
     }
     return "?";
@@ -113,6 +114,7 @@ bool is_pure(const Node* n) {
     case Op::Select: case Op::PairMake: case Op::PairFirst: case Op::PairSecond:
     case Op::PairEq: case Op::PairNe: case Op::PairLt: case Op::PairLe: case Op::PairGt: case Op::PairGe:
     case Op::SameList: case Op::ListData: case Op::ElemLoad: case Op::Nop:
+    case Op::DynIsEmptyList:  // litcmp extension
         for (uint32_t i = 0; i < n->nkids; ++i)
             if (!is_pure(n->kids[i])) return false;
         return true;
