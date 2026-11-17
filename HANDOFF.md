@@ -3,40 +3,32 @@
 ClaudeEPQ is a new implementation of the EPQ language (original: BoomydayCoder/EPQ). The design is in
 `docs/DESIGN.md`, the language spec in `docs/LANGUAGE.md`.
 
-## `main` — working and verified
+## `main` — working and verified (integration of 17 Nov, evening)
 
-- Front end, whole-program type inference with specialisation, typed IR (TIR) with the low-level
-  extension, shared runtime, **C backend** (`build/epq FILE`: emits C, compiles with `cc`, caches, runs).
-- 389/389 conformance tests, 50/50 core tests, 125 adversarial "hunt" programs: all match the original.
-- Measured with the C backend only, execution time, on a busy machine: roughly 20×–175× faster than the
-  original on the benchmarks (bubblesort 175×, sieve 56×, heapsort 51×, dijkstra 42×, mergesort 21×;
-  the slowest, a sort of records, 6.8×).
-- **Not on `main` yet:** the JIT and every optimisation pass (stubs only in `src/passes/`). Small programs
-  are therefore not faster end to end yet — the cached-code load costs more than they take to run.
+- Front end, whole-program type inference with specialisation, records (fixed-shape lists with
+  per-position types), typed IR (TIR) with the low-level extension, shared runtime (fast I/O,
+  three-way deep compare, grow-in-place lists), **C backend**, batch test mode, background tier-up.
+- **Optimisation pipeline, all ON by default** (`build/epq --list-passes`): simplify, litcmp, inline,
+  recur, pairs, ifconv (scalar only; stores behind `EPQ_IFCONV_STORES=1`), appendopt, listopt,
+  simplify2, reclaim. Default-off list (`kDefaultOff` in src/passes/registry.cpp, enabled with
+  `--enable-pass=NAME` / `EPQ_ENABLE_PASS`): currently empty.
+- Gates on main (fasttest, `--verify-tir`, -O1 and default flags, also `EPQ_POISON_FREED=1`): 389
+  conformance, 50 core, 125 hunt, every `tests/passes/*`, 26 records, 22 rtio (+10 checked by
+  `tests/rtio/run.py`), 14 `tests/integration/progs` (pass-interaction cases) — all pass; TIR
+  self-tests 21/21; tier-up scenarios 8/8. Differential fuzz: 3,000 programs (clean/mixed/nasty) +
+  1,000 with random `EPQ_NO_PASS` subsets: 0 divergences.
+- Benchmarks (C engine, `-t` self time, geomean over 24): passes off 38× the original, default 58×
+  (build/integ/bench1/bench.md has the table). No benchmark is slower with the passes on.
+- Rules for pass authors: `util::may_mutate_header` / `may_store_elems` (src/passes/util.hpp) list every
+  op; an unlisted op counts as "may do anything". `is_pure` does NOT mean "may be moved past a store":
+  `Len`, `ElemLoad`, `RecGet` read mutable memory (recur's `stable_pure` is the value-only whitelist).
 
-## `wip/*` branches — in progress, NOT verified, NOT merged
+## Branches
 
-Each was being written by one agent when the session was paused. "Snapshot" means the last commit is an
-automatic save of uncommitted files and may not even compile.
-
-| Branch | What it is | State when paused |
-|---|---|---|
-| `wip/jit` | ARM64 code generator (`src/jit/codegen*`) | 14 commits + snapshot; was tuning generated code |
-| `wip/pass-inline` | inlining | committed + snapshot |
-| `wip/pass-pairs` | pair unboxing | committed |
-| `wip/pass-ifconv` | branch removal (scalar cases only) | committed |
-| `wip/pass-listopt` | list-header caching, bounds-check elision | committed |
-| `wip/pass-simplify` | folding, dead code | committed + snapshot |
-| `wip/pass-reclaim` | compile-time freeing of dead lists | committed |
-| `wip/pass-appendopt` | capacity hints, bulk copy, grow in place | committed |
-| `wip/pass-litcmp` | no-allocation list comparisons, three-way compare | committed as "WIP" |
-| `wip/pass-recur` | tail calls to loops, pure-call merging | committed |
-| `wip/records` | per-position types for fixed-shape lists | snapshot only; early |
-| `wip/tierup` | background `cc -O3` + cache for the next run | committed |
-| `wip/runtime-io` | faster number printing and reading | committed + snapshot |
-
-None of these agents delivered a final report, so each branch needs its owner to finish, test and report
-before it is merged.
+| Branch | State |
+|---|---|
+| `wip/pass-*` (all ten), `wip/records`, `wip/runtime-io`, `wip/tierup` | merged into `main` |
+| `wip/jit` | ARM64 code generator, still in progress, NOT merged; must implement every TIR op listed in `src/tir.hpp` |
 
 ## To resume
 
