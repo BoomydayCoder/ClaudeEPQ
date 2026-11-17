@@ -1,0 +1,11 @@
+// element of an outer list mutated: the inner region must not become a pair
+outer := [[1, 2], [3, 4]];
+other := [[5, 6]];
+outer[1][0] := 7;
+>> outer;
+z := [8, 9];
+outer :+ z;
+>> z;
+z[1] := -1;
+>> outer;
+>> other;

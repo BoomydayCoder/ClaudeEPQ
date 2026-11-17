@@ -1,0 +1,13 @@
+// equality / order between a pair region and a non-pair region
+mk := (a) => { => [a, a]; };
+p := mk(4);
+m := [4, 4];
+m :+ 4;
+x := -m;
+>> [p = m, m = p, p < m, m < p, p = [4, 4]];
+lp := [p, mk(5)];
+lm := [m, [5, 5]];
+lm[1][0] := 5;
+>> [lp = lm, lm = lp, lp < lm, lm <= lp];
+>> lp;
+>> lm;

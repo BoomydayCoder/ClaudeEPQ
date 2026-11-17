@@ -1,0 +1,7 @@
+// p[i] with a variable index, then out of range
+p := [11, 22];
+(i := 0; i < 2; i := i + 1;) @ >> p[i];
+k := 2;
+>> 5;
+>> p[k];
+>> 6;
