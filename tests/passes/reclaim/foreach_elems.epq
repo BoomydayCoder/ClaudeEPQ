@@ -1,0 +1,21 @@
+// for-each element variables alias elements of the iterated list; inner lists outlive the outer;
+// a fresh list stored through two levels of calls; for-each over a fresh literal
+keep := [];
+st := (l) => { keep :+ l; => 0; };
+st2 := (l) => { => st(l); };
+f1 := (m) => { r := [0]; (x : m) @ { r := x; } => |r|; };
+f2 := () => { outer := [[1, 2], [3]]; y := outer[0]; z := [7]; => y; };
+f3 := () => { outer := [[5], [6, 6]]; e := [0]; (x : outer) @ { e := x; } => e; };
+f4 := () => { a := [4, 4]; t := st2(a); b := [1]; => t + |b|; };
+f5 := () => { s := 0; (x : [1, 2, 3, 4]) @ { s := s + x; } => s; };
+f6 := (c) => { outer := []; inner := [c]; outer :+ inner; => outer[0]; };
+f7 := () => { o := [[9]]; p := o; q := p[0]; p := [8]; => q; };
+ll := [[1], [2, 2], [3, 3, 3]];
+>> f1(ll); s := [11, 11, 11]; >> ll;
+r2 := f2(); s := [12, 12]; >> r2;
+r3 := f3(); s := [13, 13]; >> r3;
+>> f4(); s := [14, 14]; >> keep;
+>> f5(); s := [15]; >> s;
+r6 := f6(3); s := [16]; >> r6;
+r7 := f7(); s := [17]; >> r7;
+r2 :+ 1; r3 :+ 2; r6 :+ 3; r7 :+ 4; >> [r2, r3, r6, r7, keep];

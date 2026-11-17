@@ -1,0 +1,42 @@
+// mergesort variants where the sorted half may BE the unsorted half (identity on
+// short lists), with every alias combination observed afterwards
+merge := (a, b) => {
+    i := 0; j := 0; out := [];
+    (i < |a| & j < |b|) @ { (a[i] < b[j]) ? { out :+ a[i]; i := i + 1; } : { out :+ b[j]; j := j + 1; } }
+    (i < |a|) @ { out :+ a[i]; i := i + 1; }
+    (j < |b|) @ { out :+ b[j]; j := j + 1; }
+    => out;
+};
+sort := (list) => {
+    (|list| <= 1) ? => list;
+    mid := |list| / 2;
+    left := []; right := [];
+    (i := 0; i < mid; i := i + 1;) @ left :+ list[i];
+    (i := mid; i < |list|; i := i + 1;) @ right :+ list[i];
+    sorted_left := sort(left);
+    sorted_right := sort(right);
+    (|sorted_left| = 1 & |sorted_right| = 1) ? {
+        (sorted_left[0] < sorted_right[0]) ? => sorted_left :+ sorted_right[0];
+        => sorted_right :+ sorted_left[0];
+    }
+    => merge(sorted_left, sorted_right);
+};
+sort2 := (list) => {
+    (|list| <= 2) ? => list;
+    left := []; right := [];
+    (i := 0; i < |list|; i := i + 1;) @ (i < 2) ? left :+ list[i]; : right :+ list[i];
+    sl := sort2(left); sr := sort2(right);
+    (sl = sr) ? => sl;
+    => merge(sort(sl), sort(sr));
+};
+>> sort([3, 1, 2]);
+>> sort([9, 8, 7, 6, 5, 4, 3, 2, 1, 0]);
+>> sort2([5, 2, 8, 1, 9, 3, 3, 7]);
+>> sort2([4, 4, 4, 4]);
+l := [];
+s := 7;
+(i := 0; i < 500; i := i + 1;) @ { s := (s * 31 + 11) - 1009 * ((s * 31 + 11) / 1009); l :+ s; }
+r := sort(l);
+q := sort2(l);
+>> r = q;
+>> [r[0], r[250], r[499], |r|, l[0], l[499]];
