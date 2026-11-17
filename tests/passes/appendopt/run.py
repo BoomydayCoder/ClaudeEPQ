@@ -21,7 +21,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 # name: (AppendRange count, Reserve count); None = don't care
 FIRES = {
     'copy_basic': (3, 0),
-    'copy_self': (3, 1),  # l :+ l[i] gets only a hint; the alias and both instances of g copy (run-time guard)
+    'copy_self': (2, 2),  # integration: counts with inline+simplify before appendopt (was 3, 1 alone); l :+ l[i] gets only a hint; the alias and both instances of g copy (run-time guard)
     'copy_bound_aliases_dest': (0, None),  # bound reads a list of the destination's region
     'copy_bound_aliases_dest2': (0, None),
     'copy_bound_is_dest': (0, None),
@@ -30,7 +30,7 @@ FIRES = {
     'copy_dynamic': (1, None),
     'hint_counted': (0, 8),  # all counted loops but the one assigning i in its body
     'hint_nested': (1, 2),  # inner counted loop + outer loop's own append; the inner copy loop
-    'hint_foreach_merge': (6, 3),  # 4 merge instances; not the for-each over the appended list
+    'hint_foreach_merge': (3, 5),  # integration: merge is inlined 4x and simplified first (was 6, 3 alone); 4 merge instances; not the for-each over the appended list
 }
 
 

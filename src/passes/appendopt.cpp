@@ -222,6 +222,7 @@ struct AppendOpt {
             for (uint32_t i = 0; i < n->nkids; ++i) stmt(n->kids[i]);
             return;
         case Op::If:
+            expr(n->kids[0]);
             stmt(n->kids[1]);
             stmt(n->kids[2]);
             return;
@@ -229,6 +230,7 @@ struct AppendOpt {
             stmt(n->kids[0]);
             return;
         case Op::While: {
+            expr(n->kids[0]);
             stmt(n->kids[1]);
             stmt(n->kids[2]);
             if (Node* r = try_copy(n)) {
@@ -239,8 +241,19 @@ struct AppendOpt {
             return;
         }
         default:
-            return;  // expressions (incl. InlineBlocks inside expressions) are left alone
+            expr(n);  // integration: inlined calls with a value sit in expressions
+            return;
         }
+    }
+    // Integration: an InlineBlock inside an expression (an inlined call, Comma[...,
+    // InlineBlock{body}, Local res]) has a statement body like any other; optimise
+    // its loops too (each rewrite replaces one statement by statements).
+    void expr(Node* n) {
+        if (n->op == Op::InlineBlock) {
+            stmt(n->kids[0]);
+            return;
+        }
+        for (uint32_t i = 0; i < n->nkids; ++i) expr(n->kids[i]);
     }
 };
 
