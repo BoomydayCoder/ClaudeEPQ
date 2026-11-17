@@ -1,0 +1,21 @@
+// a list cached in a local, mutated through a global inside a called function
+gl := [5, 6, 7];
+push := (v) => { gl :+ v; => 0; };
+pop := () => { => -gl; };
+h := () => {
+    l := gl;
+    s := 0;
+    (i := 0; i < |l|; i := i + 1;) @ {
+        s := s + l[i];
+        (i < 2) ? push(l[i] * 2);
+    }
+    >> s;
+    >> l;
+    n := |l|;
+    >> l[n - 1];
+    pop();
+    pop();
+    >> |l|;
+    >> l[n - 2];
+};
+h();

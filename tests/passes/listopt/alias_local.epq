@@ -1,0 +1,19 @@
+// growing / shrinking a list through another local while indexing it
+f := (n) => {
+    a := [1, 2, 3];
+    b := a;
+    s := 0;
+    (i := 0; i < |a|; i := i + 1;) @ {
+        (i < n) ? b :+ i * 10;
+        s := s + a[i];
+        >> a[i];
+    }
+    >> s;
+    (i := 0; i < |a|; i := i + 1;) @ {
+        >> a[i];
+        -b;
+    }
+    >> a;
+    >> a[2];
+};
+f(4);

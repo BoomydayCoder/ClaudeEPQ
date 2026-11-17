@@ -1,0 +1,9 @@
+// i is the induction variable but is also assigned a negative value: checks must stay
+gn := () => {
+    l := [1, 2, 3];
+    (i := 0; i < |l|; i := i + 1;) @ {
+        >> l[i];
+        (i = 1) ? i := 0 - 5;
+    }
+};
+gn();

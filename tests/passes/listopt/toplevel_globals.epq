@@ -1,0 +1,15 @@
+// top-level (demoted / real globals) lists, with a function mutating one of them
+a := [3, 1, 2];
+b := [0];
+grow := () => { b :+ |b|; => 0; };
+(i := 0; i < |a|; i := i + 1;) @ {
+    (j := 0; j < |b|; j := j + 1;) @ {
+        a[i] := a[i] + b[j];
+    }
+    grow();
+}
+>> a;
+>> b;
+(x : b) @ {
+    >> x + a[x];
+}
