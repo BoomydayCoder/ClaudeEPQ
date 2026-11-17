@@ -1,0 +1,20 @@
+// tiny functions (inlining candidates) that mutate the list being indexed
+popper := (x) => { -x; => 0; };
+pusher := (x, v) => { x :+ v; => 0; };
+get := (x, i) => { => x[i]; };
+ic := () => {
+    l := [1, 2, 3, 4];
+    s := 0;
+    (i := 0; i < |l|; i := i + 1;) @ {
+        s := s + get(l, i);
+        (i = 0) ? pusher(l, 10);
+        (i = 2) ? popper(l);
+        s := s + l[i];
+    }
+    >> s;
+    >> l;
+    popper(l);
+    popper(l);
+    >> get(l, 2);
+};
+ic();
