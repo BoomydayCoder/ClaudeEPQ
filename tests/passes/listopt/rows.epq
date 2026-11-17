@@ -1,0 +1,18 @@
+// rows of a matrix cached in locals; mutation through the outer list
+rw := () => {
+    m := [[1, 2, 3], [4, 5, 6]];
+    (i := 0; i < |m|; i := i + 1;) @ {
+        row := m[i];
+        (j := 0; j < |row|; j := j + 1;) @ {
+            row[j] := row[j] * 10 + i;
+            (j = 0) ? m[i] :+ 0;
+        }
+    }
+    >> m;
+    (i := 0; i < 2; i := i + 1;) @ {
+        r := m[0];
+        -m[0];
+        >> r[3];
+    }
+};
+rw();

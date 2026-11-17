@@ -1,0 +1,17 @@
+// inner list cached, mutated through an element of the outer list
+k := () => {
+    outer := [[1, 2], [3]];
+    inner := outer[0];
+    (i := 0; i < |inner|; i := i + 1;) @ {
+        >> inner[i];
+        (|inner| < 5) ? outer[0] :+ inner[i] + 10;
+    }
+    >> outer;
+    (i := 0; i < 3; i := i + 1;) @ {
+        -outer[0];
+        >> |inner|;
+    }
+    >> inner[1];
+    >> inner[2];
+};
+k();
