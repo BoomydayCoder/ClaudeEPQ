@@ -454,6 +454,7 @@ void verify(Module& m, const char* after_pass);
 struct PassOptions {
     std::vector<std::string> disabled;  // --no-pass / EPQ_NO_PASS
     std::vector<std::string> only;      // --only-pass: if non-empty, only these optimisation passes run
+    std::vector<std::string> enabled;   // --enable-pass / EPQ_ENABLE_PASS: default-off passes to run
     bool verbose = false;
     bool verify = false;                // --verify-tir / EPQ_VERIFY_TIR=1: verify after every pass
     std::string dump_after;             // --dump-tir-after=NAME
@@ -464,5 +465,9 @@ bool run_passes(Module& m, const PassOptions& o);
 void run_passes(Module& m, const std::vector<std::string>& disabled, bool verbose);
 const std::vector<Pass>& passes();
 bool pass_is_optimisation(const char* name);
+// Passes that are registered but OFF by default (registry.cpp kDefaultOff, with
+// the reason); --enable-pass=NAME / EPQ_ENABLE_PASS=NAME (or --only-pass naming
+// them) runs them.
+bool pass_default_off(const char* name);
 
 }  // namespace epq::tir
