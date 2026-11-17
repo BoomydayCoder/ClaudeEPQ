@@ -8,7 +8,8 @@ Expected outputs were captured from the baseline with
 import os
 import sys
 
-HERE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "progs")
+# EPQ_PROGS_DIR selects another directory in the same format (tests/hunt/*).
+HERE = os.environ.get("EPQ_PROGS_DIR") or os.path.join(os.path.dirname(os.path.abspath(__file__)), "progs")
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "conformance"))
 import run as R  # noqa: E402
 

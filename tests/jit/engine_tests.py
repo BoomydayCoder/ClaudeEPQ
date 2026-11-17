@@ -57,6 +57,9 @@ def main():
     suite("progs", progs_runner, epq, a.j)
     suite("conform", os.path.join(ROOT, "tests", "conformance", "run.py"), epq, a.j)
     suite("core", os.path.join(ROOT, "tests", "core", "run.py"), epq, a.j)
+    for d in ("inference", "runtime", "semantics"):
+        if os.path.isdir(os.path.join(ROOT, "tests", "hunt", d)):
+            suite("hunt/" + d, progs_runner, epq, a.j, {"EPQ_PROGS_DIR": os.path.join(ROOT, "tests", "hunt", d)})
 
     r = run([epq, "--engine=jit", "--tir-selftest=all"])
     out = r.stdout.decode(errors="replace")
