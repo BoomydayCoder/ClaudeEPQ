@@ -45,7 +45,9 @@
 #include <utility>
 #include <vector>
 
+#include <pthread.h>
 #include <sys/mman.h>
+#include <sys/qos.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -228,7 +230,8 @@ public:
     uint32_t fl_off = 0;     // data: &epq_fl_small[0]
     bool poison = false;     // EPQ_POISON_FREED=1: never inline frees / free-list reuse
 
-    std::vector<Label> func_label;
+    bool getenv_always_dry_ = false;  // EPQ_JIT_ALWAYS_DRY: diagnostic, dry run for every function
+    int single_pass_ = 0, redone_ = 0;
     Label helper_label[H_COUNT];
     bool helper_used[H_COUNT] = {};
     Label dummy;  // dry run: stands for every external label
@@ -323,7 +326,6 @@ public:
         if (!p) bug("node without info");
         return *p;
     }
-    Label ext_func(uint32_t f) { return dry ? dummy : func_label[f]; }
     Label ext_helper(int h) {
         if (dry) return dummy;
         if (!helper_used[h]) {
@@ -647,7 +649,55 @@ public:
             call = true;
             call_pos.push_back(n->op == Op::ListLit ? en : lv);
         }
+        if (!risky_ && n->nkids > 1) note_risk(n);
         info.put(n, NInfo{en, lv, call, cref});
+    }
+    // Could the code generator have to keep a value across a call here (which
+    // needs a callee-saved register or a frame slot that only a dry run can
+    // count)? Kids of an operator are pending while later kids are evaluated.
+    bool risky_ = false;
+    void note_risk(const Node* n) {
+        switch (n->op) {
+        case Op::Seq: case Op::If: case Op::While: case Op::Comma: case Op::Fail: case Op::And: case Op::Or:
+        case Op::InlineBlock: case Op::Return: return;
+        case Op::ListLit:  // the new list is pending while its elements are evaluated
+            for (uint32_t i = 0; i < n->nkids; ++i)
+                if (info.get(n->kids[i])->call) risky_ = true;
+            return;
+        case Op::CallDyn:
+            if (n->nkids - 1 > 8) {  // argument array in frame slots
+                risky_ = true;
+                return;
+            }
+            break;
+        default: break;
+        }
+        bool value_before = false;
+        for (uint32_t i = 0; i < n->nkids; ++i) {
+            const Node* k = n->kids[i];
+            if (value_before && info.get(k)->call) {
+                risky_ = true;
+                return;
+            }
+            if (k->op != Op::ConstInt && k->op != Op::ConstFn) value_before = true;
+        }
+    }
+    // Direct calls / branches to function entries: own fixups, patched once every
+    // function is placed (a function may be regenerated, see compile_func).
+    struct CallFix {
+        uint32_t pos, func;
+        bool is_b;
+    };
+    std::vector<CallFix> call_fixes;
+    void call_func(uint32_t f, bool is_b = false) {
+        A->emit(is_b ? 0x14000000u : 0x94000000u);
+        if (!dry) call_fixes.push_back(CallFix{(uint32_t)(A->pos() - 4), f, is_b});
+    }
+    void patch_calls() {
+        for (auto& c : call_fixes) {
+            int64_t off = ((int64_t)func_off[c.func] - (int64_t)c.pos) / 4;
+            main_as.patch_word(c.pos, (c.is_b ? 0x14000000u : 0x94000000u) | (uint32_t)(off & 0x3ffffff));
+        }
     }
 
     // Definite assignment (for zero-initialisation): bits = assigned locals.
@@ -2299,7 +2349,7 @@ public:
         }
         parallel_move(mv);
         check_no_temps("call");
-        A->bl(ext_func(callee->id));
+        call_func(callee->id);
         Type rt = callee->ret;
         if (rt.k == TK::Fn) return V::none();
         if (rt.k == TK::Bot) return V::im(0);
@@ -2877,9 +2927,45 @@ public:
         }
     }
 
+    // A dry run into a scratch assembler measures the frame (dynamic slots,
+    // callee-saved registers used for held values) before the real run. When
+    // the prepass sees no value held across a call (risky_ false), the frame
+    // from register allocation is tried directly; if pressure spills prove it
+    // wrong, the attempt is abandoned (left as dead code) and redone.
     void compile_func(const Func& f) {
         F = &f;
+        risky_ = false;
         analyze();
+        if (!risky_ && !getenv_always_dry_) {
+            dry = false;
+            A = &main_as;
+            uint32_t guess_callee = used_callee;
+            max_slots = nfixed;
+            layout_frame();
+            func_off[f.id] = A->pos();
+            size_t sym = syms.size();
+            syms.push_back({A->pos(), f.name});
+            gen_body();
+            if (used_callee == guess_callee && max_slots <= nfixed) {
+                ++single_pass_;
+                return;
+            }
+            // redo with the measured frame
+            syms[sym].second = f.name + "_abandoned";
+            uint32_t mc = used_callee;
+            int ms = max_slots;
+            used_callee = mc;
+            max_slots = ms;
+            layout_frame();
+            uint32_t fixed_callee = used_callee;
+            int fixed_slots = max_slots;
+            func_off[f.id] = A->pos();
+            syms.push_back({A->pos(), f.name});
+            gen_body();
+            if (used_callee != fixed_callee || max_slots > fixed_slots) bug("redo mismatch");
+            ++redone_;
+            return;
+        }
         // dry run: measure the frame
         dry = true;
         scratch = std::make_unique<Assembler>();
@@ -2904,7 +2990,6 @@ public:
         layout_frame();
         uint32_t fixed_callee = used_callee;
         int fixed_slots = max_slots;
-        A->bind(func_label[f.id]);
         func_off[f.id] = A->pos();
         syms.push_back({A->pos(), f.name});
         gen_body();
@@ -2925,7 +3010,7 @@ public:
             if (n <= 8) {
                 A->mov(X(16), X(0));
                 for (size_t i = 0; i < n; ++i) A->ldr(X((int)i), mem(X(16), 8 * (int64_t)i));
-                A->b(func_label[f.id]);
+                call_func(f.id, true);
             } else {
                 uint32_t out = (uint32_t)((8 * (n - 8) + 15) & ~(size_t)15);
                 A->stp(X(29), X(30), pre(sp, -16));
@@ -2936,7 +3021,7 @@ public:
                     A->str(X(17), mem(sp, 8 * (int64_t)(i - 8)));
                 }
                 for (size_t i = 0; i < 8; ++i) A->ldr(X((int)i), mem(X(16), 8 * (int64_t)i));
-                A->bl(func_label[f.id]);
+                call_func(f.id);
                 A->add_imm(sp, sp, out);
                 A->ldp(X(29), X(30), post(sp, 16));
                 A->ret();
@@ -3018,13 +3103,13 @@ public:
             for (auto& f : M.funcs) nn += count_nodes(f->body);
             main_as.reserve(std::max<size_t>(4096, nn * 24));
         }
-        func_label.resize(M.funcs.size());
         func_off.assign(M.funcs.size(), 0);
-        for (auto& f : M.funcs) func_label[f->id] = main_as.new_label();
+        getenv_always_dry_ = getenv("EPQ_JIT_ALWAYS_DRY") != nullptr;
         for (auto& f : M.funcs) compile_func(*f);
         F = nullptr;
         emit_wrappers();
         emit_helper_stubs();
+        patch_calls();
         tm[3] = now_us();
         code = region.install(main_as);
         tm[4] = now_us();
@@ -3064,6 +3149,7 @@ void on_overflow() {
 
 int run(const Module& m, const JitConfig& cfg) {
     static_assert(sizeof(tir::Desc) == 8, "EDesc layout");
+    if (getenv("EPQ_JIT_QOS")) pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
     uint64_t t0 = now_us();
     if (const char* b = getenv("EPQ_JIT_BENCH")) {  // diagnostic: repeated compiles
         int n = atoi(b);
@@ -3087,9 +3173,12 @@ int run(const Module& m, const JitConfig& cfg) {
         std::fprintf(stderr, "jit: compile %llu us, code %zu bytes, %zu functions\n", (unsigned long long)(t1 - t0),
                      C->code_size, m.funcs.size());
         if (cfg.verbose)
-            std::fprintf(stderr, "jit: region %llu us, data %llu us, codegen %llu us, install %llu us\n",
+            std::fprintf(stderr,
+                         "jit: region %llu us, data %llu us, codegen %llu us, install %llu us; "
+                         "%d single-pass, %d redone, %d with dry run\n",
                          (unsigned long long)(C->tm[1] - C->tm[0]), (unsigned long long)(C->tm[2] - C->tm[1]),
-                         (unsigned long long)(C->tm[3] - C->tm[2]), (unsigned long long)(C->tm[4] - C->tm[3]));
+                         (unsigned long long)(C->tm[3] - C->tm[2]), (unsigned long long)(C->tm[4] - C->tm[3]),
+                         C->single_pass_, C->redone_, (int)m.funcs.size() - C->single_pass_ - C->redone_);
     }
     if (cfg.dump_asm) {
         std::string s = jit::disassemble(C->code, C->code_size, C->syms, (uint64_t)(uintptr_t)C->code);
