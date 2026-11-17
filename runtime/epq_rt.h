@@ -498,6 +498,26 @@ EPQ_RT_API int epq_lt(uint32_t da, EAny a, uint32_t db, EAny b) {
     return 0;
 }
 
+/* Fast paths for two lists whose elements are statically Int. */
+static inline __attribute__((unused)) int epq_lt_li(EList* a, EList* b) {
+    const EI32* pa = (const EI32*)a->data;
+    const EI32* pb = (const EI32*)b->data;
+    int32_t na = a->len, nb = b->len;
+    for (int32_t k = 0; k < nb; k++) {
+        if (k == na) return 1;
+        if (pa[k].v != pb[k].v) return pa[k].v < pb[k].v;
+    }
+    return 0;
+}
+static inline __attribute__((unused)) int epq_eq_li(EList* a, EList* b) {
+    if (a->len != b->len) return 0;
+    const EI32* pa = (const EI32*)a->data;
+    const EI32* pb = (const EI32*)b->data;
+    for (int32_t k = 0; k < a->len; k++)
+        if (pa[k].v != pb[k].v) return 0;
+    return 1;
+}
+
 EPQ_RT_API void epq_print_val(uint32_t d, EAny w) {
     epq_norm(&d, &w);
     uint32_t k = epq_rt_desc[d].kind;

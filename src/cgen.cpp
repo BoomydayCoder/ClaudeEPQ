@@ -184,12 +184,14 @@ struct CGen {
         case Op::Eq:
         case Op::Ne: {
             Kids k = kids(n, 0, 2, true);
+            if (std::string f = fast_cmp(n, k); !f.empty()) return se(k.pre, f);
             std::string a = word(n->kids[0]->type, k.v[0], true), b = word(n->kids[1]->type, k.v[1], true);
             std::string call = "epq_eq(" + std::to_string(n->a) + ", " + a + ", " + std::to_string(n->b) + ", " + b + ")";
             return se(k.pre, n->op == Op::Ne ? "(!" + call + ")" : call);
         }
         case Op::Cmp: {
             Kids k = kids(n, 0, 2, true);
+            if (std::string f = fast_cmp(n, k); !f.empty()) return se(k.pre, f);
             std::string a = word(n->kids[0]->type, k.v[0], true), b = word(n->kids[1]->type, k.v[1], true);
             std::string da = std::to_string(n->a), db = std::to_string(n->b);
             std::string lt_ab = "epq_lt(" + da + ", " + a + ", " + db + ", " + b + ")";
@@ -279,6 +281,42 @@ struct CGen {
             std::fprintf(stderr, "epq: cgen: unexpected op %s in expression\n", op_name(n->op));
             std::abort();
         }
+    }
+
+    // Inline fast paths for Eq / Ne / Cmp. Kids are temporaries or pure.
+    std::string fast_cmp(const Node* n, Kids& k) {
+        Type ta = n->kids[0]->type, tb = n->kids[1]->type;
+        Op c = n->op == Op::Cmp ? (Op)n->c : n->op == Op::Eq ? Op::EqI32 : Op::NeI32;
+        auto intish = [](Type t) { return t.k == TK::Int || t.k == TK::Any; };
+        if (intish(ta) && intish(tb)) {
+            // Tagged integers compare like the integers (signed 64-bit, same tag).
+            std::string a = any_of(ta, k.v[0]), b = any_of(tb, k.v[1]);
+            std::string wa = tmp(), wb = tmp();
+            k.pre += "EAny " + wa + " = " + a + "; EAny " + wb + " = " + b + "; ";
+            std::string sa = "(int64_t)" + wa, sb = "(int64_t)" + wb;
+            std::string fast, slow;
+            switch (c) {
+            case Op::EqI32: fast = wa + " == " + wb; slow = "epq_eq(1, " + wa + ", 1, " + wb + ")"; break;
+            case Op::NeI32: fast = wa + " != " + wb; slow = "!epq_eq(1, " + wa + ", 1, " + wb + ")"; break;
+            case Op::LtI32: fast = sa + " < " + sb; slow = "epq_lt(1, " + wa + ", 1, " + wb + ")"; break;
+            case Op::GtI32: fast = sa + " > " + sb; slow = "epq_lt(1, " + wb + ", 1, " + wa + ")"; break;
+            case Op::LeI32: fast = sa + " <= " + sb; slow = "!epq_lt(1, " + wb + ", 1, " + wa + ")"; break;
+            default: fast = sa + " >= " + sb; slow = "!epq_lt(1, " + wa + ", 1, " + wb + ")"; break;
+            }
+            return "(EPQ_LIKELY(" + wa + " & " + wb + " & 1) ? (" + fast + ") : " + slow + ")";
+        }
+        if (ta.k == TK::List && tb.k == TK::List && M.elem_is_i32(ta.a) && M.elem_is_i32(tb.a)) {
+            std::string a = k.v[0], b = k.v[1];
+            switch (c) {
+            case Op::EqI32: return "epq_eq_li(" + a + ", " + b + ")";
+            case Op::NeI32: return "(!epq_eq_li(" + a + ", " + b + "))";
+            case Op::LtI32: return "epq_lt_li(" + a + ", " + b + ")";
+            case Op::GtI32: return "epq_lt_li(" + b + ", " + a + ")";
+            case Op::LeI32: return "(!epq_lt_li(" + b + ", " + a + "))";
+            default: return "(!epq_lt_li(" + a + ", " + b + "))";
+            }
+        }
+        return "";
     }
 
     std::string dyn_arith(const Node* n) {
