@@ -19,14 +19,17 @@ EPQ = sys.argv[1] if len(sys.argv) > 1 else os.path.join(ROOT, "build", "epq")
 #          callee names that MUST still be called directly)
 CASES = {
     "tests/passes/inline/nested_args.epq": (["mod", "add", "p"], []),
-    "tests/passes/inline/early_returns.epq": (["classify"], []),
+    # classify is large (> 40 nodes) with several call sites: must stay a call
+    "tests/passes/inline/early_returns.epq": ([], ["classify"]),
+    "tests/passes/inline/value_unused.epq": (["bump", "noret"], []),
+    "tests/passes/inline/arg_effects.epq": (["two", "p", "first", "tick"], []),
     "tests/passes/inline/heapish.epq": (["swap"], []),
     "tests/passes/inline/recursion.epq": (["inc"], ["fib", "even", "odd", "depth", "self"]),
     "tests/passes/inline/short_circuit.epq": (["p", "gt"], []),
     "tests/passes/inline/multi_type.epq": (["id", "fst", "both"], []),
     "bench/original/bubblesort.epq": (["swap", "mod", "bubblesort", "lrandom"], []),
     "bench/original/heapsort.epq": (["swap", "mod"], []),
-    "bench/original/mergesort.epq": (["mod", "merge"], ["mergesort"]),
+    "bench/original/mergesort.epq": (["mod", "merge"], ["sort"]),
 }
 
 
