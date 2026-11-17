@@ -894,6 +894,7 @@ struct Solver {
         Snap run0, best;
         save(run0);
         bool have_best = false;  // `best` holds the last clean run with records
+        const bool dbg = std::getenv("EPQ_REC_DEBUG") != nullptr;
         enum { CUR, BEST, RUN0 } pick = RUN0;
         uint32_t runs = 0;
         for (;;) {
@@ -904,7 +905,15 @@ struct Solver {
             ++runs;
             if (!solve()) {
                 for (size_t e = 0; e < R.evars.size(); ++e)
-                    if (R.evars[e].flags & EV_BAD) demote_region(find((uint32_t)e));
+                    if (R.evars[e].flags & EV_BAD) {
+                        if (dbg) {
+                            std::fprintf(stderr, "records: run %u: bad region r%zu (root r%u) sites:", runs, e, find((uint32_t)e));
+                            for (const AllocSite& s : R.evars[find((uint32_t)e)].sites)
+                                std::fprintf(stderr, " %d:%d/len%u", s.node->line, s.node->col, s.len);
+                            std::fprintf(stderr, "\n");
+                        }
+                        demote_region(find((uint32_t)e));
+                    }
                 if (active() == 0) break;  // nothing left to try: run 0 is the answer
                 continue;
             }
