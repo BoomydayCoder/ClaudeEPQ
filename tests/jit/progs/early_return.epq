@@ -1,0 +1,42 @@
+// leading `cond ? => value` statements (generated before the frame is set up)
+fib := (k) => {
+    (k < 2) ? => k;
+    => fib(k - 1) + fib(k - 2);
+};
+>> fib(20);
+pick := (a, b, c, d) => {
+    (a > b & c < d) ? => a * 2 - d;
+    (a = 0 | b = 0) ? => -1;
+    (!(c = d)) ? => b;
+    => pick(a - 1, b, c, d) + 1;
+};
+>> pick(5, 3, 1, 2);
+>> pick(0, 3, 1, 1);
+>> pick(3, 5, 2, 2);
+>> pick(3, 3, 2, 3);
+lst := (l, n) => {
+    (n = 0) ? => l;
+    => lst([n, l], n - 1);
+};
+>> lst([], 4);
+ack := (m, n) => {
+    (m = 0) ? => n + 1;
+    (n = 0) ? => ack(m - 1, 1);
+    => ack(m - 1, ack(m, n - 1));
+};
+>> ack(2, 3);
+>> ack(3, 3);
+// tail shape: `(c) ? { ... }  => v;` -- `if (!c) return v` before the frame
+tak := (x, y, z) => {
+    (y < x) ? => tak(tak(x - 1, y, z), tak(y - 1, z, x), tak(z - 1, x, y));
+    => z;
+};
+>> tak(12, 6, 3);
+cnt := 0;
+adj := (a, b) => {
+    (a > b) ? { cnt := cnt + 1; a := adj(a - 7, b) + 100; }
+    => a - b;
+};
+>> adj(50, 3);
+>> adj(1, 3);
+>> cnt;

@@ -28,6 +28,8 @@ struct Options {
     bool mono = false;           // --mono: one instance per function (no call-site specialisation)
     bool no_dedup = false;       // --no-dedup
     bool verbose = false;        // --verbose: compile/cache diagnostics on stderr
+    bool dump_asm = false;       // --dump-asm: print the JIT's disassembly, exit
+    bool jit_stats = false;      // --jit-stats: JIT compile time / code size on stderr
     std::vector<std::string> no_pass;  // --no-pass=NAME (TIR passes and build options:
                                        // definite-assignment, demote-globals, constants)
     std::string file;            // source path as given on the command line

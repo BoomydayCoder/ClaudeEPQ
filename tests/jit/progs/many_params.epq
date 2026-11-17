@@ -1,0 +1,26 @@
+// more than 8 parameters: stack-passed arguments, values held across calls
+f9 := (a, b, c, d, e, f, g, h, i) => { => a - b + c * d - e + f * g - h + i * 1000; };
+f12 := (a, b, c, d, e, f, g, h, i, j, k, l) => {
+    (a <= 0) ? => [b, c, d, e, f, g, h, i, j, k, l];
+    => f12(a - 1, c, d, e, f, g, h, i, j, k, l, b + a);
+};
+id := (x) => { => x; };
+>> f9(1, 2, 3, 4, 5, 6, 7, 8, 9);
+>> f9(id(1), id(2), id(3), id(4), id(5), id(6), id(7), id(8), id(9));
+>> f9(f9(1, 2, 3, 4, 5, 6, 7, 8, 9), 2, 3, 4, 5, 6, 7, 8, f9(9, 8, 7, 6, 5, 4, 3, 2, 1));
+>> f12(10, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11);
+>> f12(1000, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11);
+// mixed static types in stack arguments
+g10 := (l, a, s, b, t, c, u, d, v, w) => { => [l[0] + a, s, b + c + d, t, u, v, w]; };
+>> g10([5], 1, [7, 8], 2, [[9]], 3, [], 4, [1, [2]], 99);
+// dynamic call with many arguments (generic entry, argument array)
+fs := [f9, (a, b, c, d, e, f, g, h, i) => { => a + b + c + d + e + f + g + h + i; }];
+ss := 0;
+(kk := 0; kk < 2; kk := kk + 1;) @ {
+    qq := fs[kk];
+    ss := ss + qq(kk, 1, 2, 3, 4, 5, 6, 7, 8);
+}
+>> ss;
+hh := fs[1];
+>> hh(1, 2, 3, 4, 5, 6, 7, 8, 9) + hh(9, 8, 7, 6, 5, 4, 3, 2, 1);
+>> hh(1, 2, 3);

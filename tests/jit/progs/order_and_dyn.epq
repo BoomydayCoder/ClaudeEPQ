@@ -1,0 +1,54 @@
+// evaluation order with assignments inside expressions, values borrowed from locals
+x := 1;
+>> x + (x := 5) * 10 + x;
+y := 2;
+f := (a, b, c) => { => a * 100 + b * 10 + c; };
+>> f(y, y := 7, y);
+z := [1, 2, 3];
+i := 0;
+>> z[i] + z[i := 2] + z[i];
+g := 10;
+k := (v) => { g := g + v; => g; };
+>> g + k(1) + g + k(100) + g;
+// dynamic comparisons: int vs list, list vs list, int vs int
+d := 0;
+d := 5;
+>> d = 5;
+>> d = [5];
+>> [5] = d;
+>> d != [5];
+q := [1, 2];
+q := 3;
+q := [1, 2];
+>> q = [1, 2];
+>> q < [1, 3];
+>> q > [1];
+>> |q|;
+>> -q;
+>> q;
+>> -q;
+>> |q|;
+q :+ 4;
+(q = 3) ? >> 1; : >> 0;
+(q != 3) ? >> 1; : >> 0;
+(3 = q) ? >> 1; : >> 0;
+// value-form and / or with dynamic values
+p := 0;
+p := [7];
+>> p & 3;
+>> 0 & p;
+>> p | 9;
+>> 0 | p;
+>> (p & 0) | [8];
+// big constants inside and outside loops
+cc := 0;
+(j := 0; j < 1000; j := j + 1;) @ cc := cc * 1664525 + 1013904223;
+>> cc;
+>> 1664525;
+>> 1013904223 + 0;
+(j := 0; j < 3; j := j + 1;) @ { (cc > 1664525) ? >> 1; : >> 1664525; cc := cc / 3; }
+// pop from an empty dynamic list
+e := 0;
+e := [];
+>> |e|;
+>> -e;

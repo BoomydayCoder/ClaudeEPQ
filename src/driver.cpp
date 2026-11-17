@@ -20,6 +20,7 @@
 #include "backend.hpp"
 #include "cgen.hpp"
 #include "infer.hpp"
+#include "jit/codegen.hpp"
 #include "tirbuild.hpp"
 
 extern char** environ;
@@ -310,13 +311,21 @@ int run_module(tir::Module& M, const Options& opts_in) {
         return 0;
     }
     uint64_t T1 = now_us();
+    if (opts.engine == Engine::Jit && !opts.emit_c) {
+        jitcg::JitConfig jc;
+        jc.time = opts.time;
+        jc.dump_asm = opts.dump_asm;
+        jc.stats = opts.jit_stats;
+        jc.verbose = opts.verbose;
+        if (opts.verbose) std::fprintf(stderr, "epq: passes %llu us\n", (unsigned long long)(T1 - Tb));
+        return jitcg::run(M, jc);
+    }
     std::string c = emit_c(M);
     uint64_t T2 = now_us();
     if (opts.emit_c) {
         write_all(1, c);
         return 0;
     }
-    // Engine::Jit falls back to the C backend until the JIT exists.
     std::string path = compile_cached(c, opts.verbose);
     if (path.empty()) return 2;
     void* h = dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL);
