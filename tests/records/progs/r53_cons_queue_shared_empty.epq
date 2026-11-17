@@ -1,0 +1,14 @@
+// one global empty shared by a cons list and a 3-node tree (lengths compete)
+E := [];
+ins := (t, v) => {
+    (|t| = 0) ? => [v, E, E];
+    (v < t[0]) ? t[1] := ins(t[1], v); : t[2] := ins(t[2], v);
+    => t;
+};
+tr := E;
+(i := 0; i < 5; i := i + 1;) @ tr := ins(tr, i * 3 - i * i);
+cl := E;
+(i := 0; i < 4; i := i + 1;) @ cl := [i, cl];
+>> tr;
+>> cl;
+>> E;

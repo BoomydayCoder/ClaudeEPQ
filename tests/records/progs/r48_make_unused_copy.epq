@@ -1,0 +1,19 @@
+// make() returns []: one copy grows a tree from a global, other copies are only
+// printed, compared, measured and finally indexed (an empty that never meets a node)
+make := () => { => []; };
+ins := (t, v) => {
+    (|t| = 0) ? => [v, [], []];
+    (v < t[0]) ? t[1] := ins(t[1], v); : (v > t[0]) ? t[2] := ins(t[2], v);
+    => t;
+};
+tree := make();
+(i := 0; i < 8; i := i + 1;) @ tree := ins(tree, (i * 5) - (i * 5) / 8 * 8);
+>> tree;
+e := make();
+>> e;
+>> |e|;
+>> e = [];
+>> e = tree[1];
+>> [e, e];
+>> e < [0];
+>> make()[2];

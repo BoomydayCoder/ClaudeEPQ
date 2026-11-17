@@ -314,6 +314,14 @@ one for all elements. Records stay heap objects with identity (a constant-index 
 is a typing refinement, not unboxing; pair unboxing (§5.4) then applies to record fields that qualify.
 Implemented as a second inference run in which candidate regions found by the first are records; a
 region that turns out to be used otherwise is demoted and inference repeats. Measured by hand: 2.6×.
+*Nullable records and pre-shaping.* `[]` meeting a record region becomes its null pointer. An empty
+literal that is indexed and stored into by literal index *before* it meets its first node (a global
+`tree := []` grown by `tree := insert(tree, v)`) collects those values in its single element type,
+which then floods every field and fails the run. After such a failed run the empty sites involved are
+*pre-shaped*: in the next run they are records of length k from the start (a per-site state, like the
+literals' candidate state). A wrong guess is an ordinary record violation of that region and demotes
+it, empty sites included, for good; every site moves only 0 → 1 → 2, so the scheme still terminates,
+and a program never ends worse off than without pre-shaping. bintree: 2.6× faster.
 
 **5.12 Byte lists — narrow element storage.** *(next wave)* When every value ever stored into a region
 is a constant in 0–255 (a sieve's flags, n-queens' column marks), the region is laid out one byte per

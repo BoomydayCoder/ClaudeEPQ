@@ -1,0 +1,17 @@
+// one function receives both a tree (grown from []) and an ordinary list
+ins := (t, v) => {
+    (t = []) ? => [v, [], []];
+    (v < t[0]) ? t[1] := ins(t[1], v); : (v > t[0]) ? t[2] := ins(t[2], v);
+    => t;
+};
+tree := [];
+(i := 0; i < 5; i := i + 1;) @ tree := ins(tree, 10 - i * 3);
+hd := (l) => { => l[0]; };
+>> hd(tree);
+>> hd([4, 5, 6, 7]);
+>> hd(tree[1]);
+other := [];
+other :+ 8;
+other :+ 9;
+>> hd(other);
+>> tree;

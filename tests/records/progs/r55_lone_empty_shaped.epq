@@ -1,0 +1,19 @@
+// a lone [] with a literal-index store, in a program whose tree needed pre-shaping
+ins := (t, v) => {
+    (t = []) ? => [v, [], []];
+    (v < t[0]) ? t[1] := ins(t[1], v); : (v > t[0]) ? t[2] := ins(t[2], v);
+    => t;
+};
+tree := [];
+(i := 0; i < 6; i := i + 1;) @ tree := ins(tree, (i * 5) - (i * 5) / 7 * 7);
+>> tree;
+junk := [];
+>> junk;
+>> |junk|;
+>> junk = [];
+>> junk < tree;
+>> [junk, 1];
+peek := (j) => { => j[1]; };
+(|junk| > 0) ? >> peek(junk);
+junk[0] := 5;
+>> junk;

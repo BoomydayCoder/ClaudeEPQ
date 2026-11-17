@@ -1,0 +1,18 @@
+// two record kinds that point to each other, both grown from [] (a list of trees as a cons list)
+ins := (t, v) => {
+    (t = []) ? => [v, [], []];
+    (v < t[0]) ? t[1] := ins(t[1], v); : (v > t[0]) ? t[2] := ins(t[2], v);
+    => t;
+};
+forest := [];
+(j := 0; j < 4; j := j + 1;) @ {
+    t := [];
+    (i := 0; i < j + 2; i := i + 1;) @ t := ins(t, (i * 7 + j) - (i * 7 + j) / 5 * 5);
+    forest := [t, forest];
+}
+sz := (t) => { (t = []) ? => 0; => 1 + sz(t[1]) + sz(t[2]); };
+f := forest; tot := 0;
+(f != []) @ { tot := tot * 10 + sz(f[0]); f := f[1]; }
+>> tot;
+>> forest[0];
+>> forest[1][1][0];
