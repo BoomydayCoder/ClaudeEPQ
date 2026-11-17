@@ -1,0 +1,4 @@
+// x = [] where evaluating x fails: the error fires.
+l := [];
+>> l = [];
+>> -l = [];

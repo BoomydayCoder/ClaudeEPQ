@@ -1,0 +1,5 @@
+// <= and >= : a mismatch after a decided element never fires.
+g := (y) => { => y; };
+>> [[1], g] <= [[2], 0];
+>> [[2], g] >= [[1], []];
+>> [[1, 2], 3] <= [[1, 2], []];

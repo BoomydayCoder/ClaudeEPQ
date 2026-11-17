@@ -1,0 +1,14 @@
+// Literal on the left with an element the right side changes: must read the old value.
+a := 1;
+z := [2];
+s := (v) => { a := v; => z; };
+>> [a] = s(2);
+>> a;
+>> [a] = s(3);
+>> [a, a] != s(5);
+>> a;
+>> s(2) = [a];
+w := [7];
+t := (v) => { w[0] := v; => w; };
+>> t(8) = [8];
+>> [w[0]] = t(9);
