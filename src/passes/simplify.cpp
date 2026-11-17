@@ -36,7 +36,7 @@
 //     once in the function, by a top-level statement of the body whose value is
 //     a constant (ConstInt / PairMake of constants) or a parameter that is never
 //     assigned, and not read at or before that statement: its uses are replaced
-//     and the assignment deleted.
+//     and the assignment deleted (also Fn locals assigned a ConstFn).
 // Iterated to a fixpoint (bounded).
 #include <cstdint>
 #include <vector>
@@ -713,6 +713,9 @@ struct Simp {
             if (v->op == Op::ConstInt) return true;
         } else if (tx.k == TK::Pair) {
             if (v->op == Op::PairMake && isc(v->kids[0]) && isc(v->kids[1])) return true;
+        } else if (tx.k == TK::Fn) {
+            // Fn(d) has no run-time representation: a statically known function value
+            if (v->op == Op::ConstFn) return true;
         } else {
             return false;
         }
