@@ -26,7 +26,7 @@ void usage(FILE* f, const char* argv0) {
     std::fprintf(f,
                  "Usage: %s [options] FILE        (FILE '-' reads the program from stdin)\n"
                  "Options:\n"
-                 "  --engine=jit|aot   back end (default: jit; the C backend until the JIT exists)\n"
+                 "  --engine=jit|aot   back end: ARM64 JIT (default) or C via cc (cached)\n"
                  "  --emit-c           print the generated C and exit\n"
                  "  --dump-tir         print the typed IR and exit\n"
                  "  --dump-types       print inferred types of globals / instances and exit\n"

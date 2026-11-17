@@ -359,9 +359,15 @@ public:
             }
             *lo12 = (uint32_t)(target & 0xfff);
         } else {
-            A->load_imm(t.xr(), (int64_t)target);
+            li(t.xr(), (int64_t)target);
             *lo12 = 0;
         }
+    }
+
+    // constant into a register (zero as a plain movz)
+    void li(Reg d, int64_t v) {
+        if (d.x ? v == 0 : (int32_t)v == 0) A->movz(d, 0);
+        else A->load_imm(d, v);
     }
 
     // ------------------------------------------------------------------ temporaries
@@ -425,8 +431,8 @@ public:
         case V::REG: return x64 ? X(v.r) : W(v.r);
         case V::IMM: {
             int r = talloc();
-            if (x64) A->load_imm(X(r), v.imm);
-            else A->load_imm(W(r), (int32_t)v.imm);
+            if (x64) li(X(r), v.imm);
+            else li(W(r), (int32_t)v.imm);
             v = V::reg(r, true);
             return x64 ? X(r) : W(r);
         }
@@ -888,7 +894,7 @@ public:
             switch (m.src.k) {
             case V::REG: A->str(X(m.src.r), mem(sp, off)); break;
             case V::IMM:
-                A->load_imm(X(16), m.src.imm);
+                li(X(16), m.src.imm);
                 A->str(X(16), mem(sp, off));
                 break;
             case V::SLOT:
@@ -926,8 +932,8 @@ public:
         for (auto& m : mv) {
             if (m.dst < 0) continue;
             if (m.src.k == V::IMM) {
-                if (m.x64) A->load_imm(X(m.dst), m.src.imm);
-                else A->load_imm(W(m.dst), (int32_t)m.src.imm);
+                if (m.x64) li(X(m.dst), m.src.imm);
+                else li(W(m.dst), (int32_t)m.src.imm);
             } else if (m.src.k == V::SLOT) {
                 A->ldr(X(m.dst), mem(sp, dyn_off(m.src.slot)));
             }
@@ -1215,8 +1221,8 @@ public:
             V v = expr(n->kids[0], l.reg);
             if (!(v.k == V::REG && v.r == l.reg)) {
                 if (v.k == V::IMM) {
-                    if (l.x64) A->load_imm(X(l.reg), v.imm);
-                    else A->load_imm(W(l.reg), (int32_t)v.imm);
+                    if (l.x64) li(X(l.reg), v.imm);
+                    else li(W(l.reg), (int32_t)v.imm);
                 } else if (v.k == V::NONE) {
                     A->movz(W(l.reg), 0);
                 } else {
@@ -1640,7 +1646,7 @@ public:
         save &= ~bit(d);
         if (sk == SLOW_CALL) {
             cold(slow, [=, this]() {
-                if (bimm_p) A->load_imm(X(17), bimm);
+                if (bimm_p) li(X(17), bimm);
                 fast_cmp_slow_call(n, ra, rb, save);
                 A->mov(W(d), W(16));
                 A->b(cont);
@@ -1702,7 +1708,7 @@ public:
             A->str(X(17), mem(X(16), 0));
             A->bind(cont);
             A->add(X(17), X(d), 16u);
-            A->load_imm(X(16), (int64_t)(((uint64_t)cap << 32) | cnt));
+            li(X(16), (int64_t)(((uint64_t)cap << 32) | cnt));
             A->stp(X(17), X(16), mem(X(d), 0));
             uint32_t save = live_caller_saved(bit(d));
             cold(slow, [=, this]() {
@@ -1742,6 +1748,8 @@ public:
             int32_t c = (int32_t)i.imm;
             if (c < 0) {
                 A->b(oob);
+            } else if (c == 0) {
+                A->cbz(W(17), oob);
             } else {
                 A->cmp_imm(W(17), c);
                 A->b(LS, oob);
@@ -1963,8 +1971,8 @@ public:
             if (temp_free & bit(dr)) temp_free &= ~bit(dr);
             else bug("and/or: result register taken");
             if (b.k == V::IMM) {
-                if (x64) A->load_imm(X(dr), b.imm);
-                else A->load_imm(W(dr), (int32_t)b.imm);
+                if (x64) li(X(dr), b.imm);
+                else li(W(dr), (int32_t)b.imm);
             } else if (b.k != V::NONE) {
                 Reg s = R(b, x64);
                 A->mov(x64 ? X(dr) : W(dr), s);
@@ -2060,7 +2068,7 @@ public:
             A->lsl(X(d), a, 32);
             uint32_t lo = (uint32_t)k[1].imm ^ 0x80000000u;
             if (lo) {
-                A->load_imm(X(16), lo);
+                li(X(16), lo);
                 A->orr(X(d), X(d), X(16));
             }
             return result(d, want);
@@ -2070,7 +2078,7 @@ public:
         if (k[0].k == V::IMM) {
             release(k[1]);
             int d = dest(want);
-            A->load_imm(X(17), (int64_t)((uint64_t)(uint32_t)k[0].imm << 32));
+            li(X(17), (int64_t)((uint64_t)(uint32_t)k[0].imm << 32));
             A->orr(X(d), X(16), X(17));
             return result(d, want);
         }
@@ -2310,7 +2318,7 @@ public:
             V v = expr(n->kids[i]);
             if (i < na) {
                 if (v.k == V::IMM) {
-                    A->load_imm(X(16), v.imm);
+                    li(X(16), v.imm);
                     A->str(X(16), mem(sp, dyn_off(base + (int)i)));
                 } else {
                     Reg s = R(v, true);
@@ -2444,7 +2452,7 @@ public:
                 uint32_t save = live_caller_saved(0);
                 if (sk == SLOW_CALL) {
                     cold(slow, [=, this]() {
-                        if (bimm_p) A->load_imm(X(17), bimm);
+                        if (bimm_p) li(X(17), bimm);
                         fast_cmp_slow_call(n, ra, rb, save);
                         if (sense) A->cbnz(W(16), target);
                         else A->cbz(W(16), target);
@@ -2540,8 +2548,8 @@ public:
                     bool x64 = is64(t);
                     V r = expr(v, -1);
                     if (r.k == V::IMM) {
-                        if (x64) A->load_imm(X(0), r.imm);
-                        else A->load_imm(W(0), (int32_t)r.imm);
+                        if (x64) li(X(0), r.imm);
+                        else li(W(0), (int32_t)r.imm);
                     } else if (r.k == V::NONE) {
                         A->movz(W(0), 0);
                     } else {
@@ -2670,7 +2678,7 @@ public:
         for (auto& l : L) {
             if (l.param || l.fn || !l.needs_init) continue;
             if (l.is_const) {
-                if (l.reg >= 0) A->load_imm(W(l.reg), (int32_t)l.cval);
+                if (l.reg >= 0) li(W(l.reg), (int32_t)l.cval);
                 continue;
             }
             if (l.reg >= 0) {
@@ -2745,8 +2753,8 @@ public:
             branch(s->kids[0], false, skip);
             V r = expr(early_return_value(s));
             if (r.k == V::IMM) {
-                if (x64) A->load_imm(X(0), r.imm);
-                else A->load_imm(W(0), (int32_t)r.imm);
+                if (x64) li(X(0), r.imm);
+                else li(W(0), (int32_t)r.imm);
             } else {
                 Reg src = R(r, x64);
                 if (src.id != 0) A->mov(x64 ? X(0) : W(0), src);
