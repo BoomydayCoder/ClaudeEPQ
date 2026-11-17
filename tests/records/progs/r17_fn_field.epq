@@ -1,0 +1,8 @@
+// function-valued fields and calls through them
+inc := (x) => { => x + 1; };
+r := [inc, 5, [1]];
+>> r[0](r[1]);
+r[1] := r[0](r[1]);
+>> r[1];
+>> r[2];
+>> r[0] = inc;

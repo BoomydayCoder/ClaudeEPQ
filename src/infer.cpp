@@ -54,6 +54,11 @@ struct Solver {
     std::vector<uint32_t> wo, wo_off, calls, calls_off, lits, lits_off, unclean, unclean_off;
     std::vector<uint8_t> body_completes;
     const uint32_t* wp = nullptr;  // cursor into wo during a walk
+    // Records (DESIGN.md §5.11). Global ordinal of node o of def d = node_base[d] + o.
+    // lit_state[global ordinal of a List literal]: 0 ordinary, 1 record candidate,
+    // 2 demoted (never a candidate again). Empty in run 0.
+    std::vector<uint32_t> node_base;
+    std::vector<uint8_t> lit_state;
 
     Solver(const Program& p, const Config& c, Result& r) : P(p), C(c), R(r) {}
 
@@ -86,6 +91,14 @@ struct Solver {
     void make_any(Ty t) {
         if (t.k == TyK::List) {
             uint32_t r = find(t.a);
+            if (R.evars[r].nf) {  // a record flows into Any: violation (condition 4)
+                if (R.evars[r].flags & EV_BAD) return;
+                R.evars[r].flags |= EV_BAD;
+                // As an ordinary list it would have Any elements: dynamise the fields.
+                for (uint32_t j = 0; j < R.evars[r].nf; ++j) make_any(R.evars[find(R.evars[r].fbase + j)].t);
+                return;
+            }
+            R.evars[r].flags |= EV_PLAIN;  // reachable from dynamic code: never a record
             if (R.evars[r].t.k != TyK::Any) {
                 Ty old = R.evars[r].t;
                 R.evars[r].t = Ty::any();
@@ -107,6 +120,11 @@ struct Solver {
         xs.insert(xs.end(), ys.begin(), ys.end());
         ys.clear();
         ys.shrink_to_fit();
+        if (R.evars[x].nf || R.evars[y].nf) {
+            unify_rec(x, y);
+            return;
+        }
+        R.evars[x].flags |= R.evars[y].flags & (EV_PLAIN | EV_BAD);
         Ty ty = R.evars[y].t;
         Ty res = lub(R.evars[x].t, ty);
         uint32_t rx = find(x);
@@ -114,6 +132,93 @@ struct Solver {
         if (rx != x) res = lub(curt, res);
         if (!same(res, curt)) R.evars[rx].t = res;
     }
+    // Records (§5.11): x (new root) and y (now x's child), at least one a record.
+    // Two records of the same length unify position-wise (records are mutable
+    // references, like the List rule of §2.2); a record meeting an ordinary list
+    // or a record of another length is a violation (condition 5). A record
+    // meeting an undetermined region (only `[]` sites so far) absorbs it; values
+    // stored into that region by literal index flow (conservatively) into every field.
+    void unify_rec(uint32_t x, uint32_t y) {
+        uint8_t fx = R.evars[x].flags, fy = R.evars[y].flags;
+        uint32_t nx = R.evars[x].nf, ny = R.evars[y].nf;
+        R.evars[x].flags = fx | (fy & (EV_PLAIN | EV_BAD));
+        if (nx && ny) {
+            if (nx != ny) {
+                R.evars[x].flags |= EV_BAD;
+                return;
+            }
+            uint32_t bx = R.evars[x].fbase, by = R.evars[y].fbase;
+            for (uint32_t j = 0; j < nx; ++j) unify(bx + j, by + j);
+            return;
+        }
+        uint8_t of = nx ? fy : fx;
+        Ty ot = nx ? R.evars[y].t : R.evars[x].t;
+        if (!nx) {
+            R.evars[x].fbase = R.evars[y].fbase;
+            R.evars[x].nf = (uint8_t)ny;
+            R.evars[x].t = Ty::bot();
+        }
+        if (of & EV_PLAIN) {
+            R.evars[x].flags |= EV_BAD;
+            return;
+        }
+        if (ot.k != TyK::Bot) {
+            uint32_t b = R.evars[x].fbase, k = R.evars[x].nf;
+            for (uint32_t j = 0; j < k; ++j) flow_elem(b + j, ot);
+        }
+    }
+    void bad(uint32_t e) { R.evars[find(e)].flags |= EV_BAD; }
+    static bool lit_index(const Node* i, int64_t& j) {
+        if (i->kind != NK::Int) return false;
+        j = i->ival;
+        return true;
+    }
+    // l[i] where l : List(e). A record needs a literal index (condition 2).
+    Ty index_read(Ty l, const Node* idx) {
+        uint32_t r = find(l.a);
+        int64_t j;
+        bool lit = lit_index(idx, j);
+        if (R.evars[r].nf) {
+            if (!lit) {
+                bad(r);
+                return Ty::bot();
+            }
+            if (j < 0 || j >= R.evars[r].nf) return Ty::bot();  // always Index out of bounds
+            return R.evars[find(R.evars[r].fbase + (uint32_t)j)].t;
+        }
+        if (!lit) R.evars[r].flags |= EV_PLAIN;
+        return R.evars[r].t;
+    }
+    // l[i] := v
+    void index_store(Ty l, const Node* idx, Ty v) {
+        if (l.k == TyK::Any) {
+            make_any(v);
+            return;
+        }
+        if (l.k != TyK::List) return;
+        uint32_t r = find(l.a);
+        int64_t j;
+        bool lit = lit_index(idx, j);
+        if (R.evars[r].nf) {
+            if (!lit) bad(r);
+            else if (j >= 0 && j < R.evars[r].nf) flow_elem(R.evars[r].fbase + (uint32_t)j, v);
+            return;
+        }
+        if (!lit) R.evars[r].flags |= EV_PLAIN;
+        flow_elem(l.a, v);
+    }
+    // A list-only use of l : List(e) (append, pop, for-each; condition 3).
+    // Returns false (and flags the violation) if l is a record.
+    bool list_use(Ty l) {
+        uint32_t r = find(l.a);
+        if (R.evars[r].nf) {
+            R.evars[r].flags |= EV_BAD;
+            return false;
+        }
+        R.evars[r].flags |= EV_PLAIN;
+        return true;
+    }
+
     Ty lub(Ty a, Ty b) {
         if (b.k == TyK::Bot) return a;
         if (a.k == TyK::Bot) return b;
@@ -239,7 +344,7 @@ struct Solver {
                 Ty l = ex(tg->kids[0]);
                 ex(tg->kids[1]);
                 Ty v = ex(n->kids[1]);
-                store_into(l, v);
+                index_store(l, tg->kids[1], v);
                 t = v;
             }
             break;
@@ -247,7 +352,7 @@ struct Solver {
         case NK::Append: {
             Ty l = ex(n->kids[0]);
             Ty v = ex(n->kids[1]);
-            store_into(l, v);
+            if (l.k != TyK::List || list_use(l)) store_into(l, v);
             t = (l.k == TyK::List || l.k == TyK::Any) ? l : Ty::bot();
             break;
         }
@@ -265,7 +370,7 @@ struct Solver {
         case NK::Neg: {
             Ty x = ex(n->kids[0]);
             if (x.k == TyK::Int) t = x;
-            else if (x.k == TyK::List) t = R.evars[find(x.a)].t;
+            else if (x.k == TyK::List) t = list_use(x) ? R.evars[find(x.a)].t : Ty::bot();
             else if (x.k == TyK::Any) t = x;
             break;
         }
@@ -280,7 +385,8 @@ struct Solver {
             Ty l = ex(n->kids[0]);
             Ty i = ex(n->kids[1]);
             bool iok = i.k == TyK::Int || i.k == TyK::Any;
-            if (l.k == TyK::List && iok) t = R.evars[find(l.a)].t;
+            if (l.k == TyK::List && iok) t = index_read(l, n->kids[1]);
+            else if (l.k == TyK::List && R.evars[find(l.a)].nf && n->kids[1]->kind != NK::Int) bad(l.a);
             else if (l.k == TyK::Any && iok) t = l;
             break;
         }
@@ -290,10 +396,26 @@ struct Solver {
                 e = (uint32_t)R.evars.size();
                 R.evars.push_back(EVar{e, Ty::bot(), {}});
                 R.evars[e].sites.push_back(AllocSite{n, cur, n->nkids});
+                if (n->nkids) {
+                    if (!lit_state.empty() && lit_state[node_base[CI->def] + o] == 1) {
+                        uint32_t fb = (uint32_t)R.evars.size();
+                        for (uint32_t j = 0; j < n->nkids; ++j)
+                            R.evars.push_back(EVar{fb + j, Ty::bot(), {}, kNone, 0, EV_FIELD});
+                        R.evars[e].fbase = fb;
+                        R.evars[e].nf = (uint8_t)n->nkids;
+                    } else {
+                        R.evars[e].flags |= EV_PLAIN;
+                    }
+                }
                 I().naux[o] = e;
                 ++changes;
             }
-            for (uint32_t i = 0; i < n->nkids; ++i) flow_elem(e, ex(n->kids[i]));
+            for (uint32_t i = 0; i < n->nkids; ++i) {
+                Ty v = ex(n->kids[i]);
+                uint32_t r = find(e);
+                if (!R.evars[r].nf) flow_elem(e, v);
+                else if (i < R.evars[r].nf) flow_elem(R.evars[r].fbase + i, v);
+            }
             t = Ty::list(e);
             break;
         }
@@ -366,7 +488,9 @@ struct Solver {
             const Node* x = n->kids[0];
             if (fe.var_preexisted) flow(var(x), Ty::i32());
             Ty Lt = I().locals[fe.list_slot];
-            if (Lt.k == TyK::List) flow(var(x), R.evars[find(Lt.a)].t);
+            if (Lt.k == TyK::List) {
+                if (list_use(Lt)) flow(var(x), R.evars[find(Lt.a)].t);
+            }
             else if (Lt.k == TyK::Any) flow(var(x), Ty::any());
             st(n->kids[2]);
             break;
@@ -644,14 +768,178 @@ struct Solver {
         lits_off[nd] = (uint32_t)lits.size();
         unclean_off[nd] = (uint32_t)unclean.size();
         new_instance(kMainDef, -1);
+        fixpoint();
+        mark_reachable();
+        if (C.dedup) dedup();
+        if (C.records) records();
+    }
+
+    void fixpoint() {
         for (;;) {
             changes = 0;
             for (uint32_t i = 0; i < R.insts.size(); ++i) walk(i);
             ++R.passes;
             if (changes == 0) break;
         }
+    }
+
+    // ---- records: speculate, check, demote, repeat (DESIGN.md §5.11) -------------
+    // The variable part of a Result (everything but the numbering).
+    struct Snap {
+        std::vector<Ty> globals;
+        std::vector<EVar> evars;
+        std::vector<std::unique_ptr<Instance>> insts;
+        std::vector<int32_t> generic_of, shared_of;
+        std::vector<uint8_t> escaped;
+        uint32_t passes = 0;
+    };
+    void save(Snap& s) {
+        s.globals = std::move(R.globals);
+        s.evars = std::move(R.evars);
+        s.insts = std::move(R.insts);
+        s.generic_of = std::move(R.generic_of);
+        s.shared_of = std::move(R.shared_of);
+        s.escaped = std::move(R.escaped);
+        s.passes = R.passes;
+    }
+    void load(Snap& s) {
+        R.globals = std::move(s.globals);
+        R.evars = std::move(s.evars);
+        R.insts = std::move(s.insts);
+        R.generic_of = std::move(s.generic_of);
+        R.shared_of = std::move(s.shared_of);
+        R.escaped = std::move(s.escaped);
+        R.passes = s.passes;
+    }
+    // A fresh inference run from scratch with the current lit_state. Returns
+    // false if some record region violated a record condition.
+    bool solve() {
+        size_t nd = P.funcs.size();
+        R.globals.assign(P.globals.size(), Ty::bot());
+        R.evars.clear();
+        R.insts.clear();
+        R.generic_of.assign(nd, -1);
+        R.shared_of.assign(nd, -1);
+        R.escaped.assign(nd, 0);
+        count_of.assign(nd, 0);
+        R.passes = 0;
+        new_instance(kMainDef, -1);
+        fixpoint();
+        for (auto& v : R.evars)
+            if (v.flags & EV_BAD) return false;
         mark_reachable();
         if (C.dedup) dedup();
+        return true;
+    }
+    uint32_t gid(const AllocSite& s) { return node_base[R.insts[s.inst]->def] + R.ord.at(s.node); }
+    static bool cand_len(uint32_t len) { return len >= 1 && len <= 16; }
+    // Ordinary list regions with Any elements: their literal sites (not yet
+    // tried) become candidates. Returns the number of new candidates.
+    size_t add_candidates() {
+        size_t n = 0;
+        for (size_t e = 0; e < R.evars.size(); ++e) {
+            const EVar& v = R.evars[e];
+            if (v.parent != e || v.nf || (v.flags & EV_FIELD) || v.t.k != TyK::Any) continue;
+            for (const AllocSite& s : v.sites) {
+                if (!cand_len(s.len)) continue;
+                uint8_t& st = lit_state[gid(s)];
+                if (st == 0) {
+                    st = 1;
+                    ++n;
+                }
+            }
+        }
+        return n;
+    }
+    void demote_region(uint32_t r) {
+        for (const AllocSite& s : R.evars[r].sites)
+            if (s.len) lit_state[gid(s)] = 2;
+    }
+    size_t active() {
+        size_t n = 0;
+        for (uint8_t st : lit_state) n += st == 1;
+        return n;
+    }
+    // After a clean run: records whose positions all have one static type and
+    // that have no `[]` site are better off as ordinary lists (pair unboxing,
+    // int arrays). Returns the number of regions demoted.
+    size_t demote_uniform() {
+        size_t n = 0;
+        for (size_t e = 0; e < R.evars.size(); ++e) {
+            const EVar& v = R.evars[e];
+            if (v.parent != e || !v.nf) continue;
+            bool empty = false;
+            for (const AllocSite& s : v.sites) empty |= s.len == 0;
+            if (empty) continue;
+            Ty f0 = R.evars[find(v.fbase)].t;
+            if (f0.k == TyK::Any) continue;
+            bool uni = true;
+            for (uint32_t j = 1; j < v.nf && uni; ++j) uni = same(f0, R.evars[find(v.fbase + j)].t);
+            if (!uni) continue;
+            demote_region((uint32_t)e);
+            ++n;
+        }
+        return n;
+    }
+    void records() {
+        size_t total = 0;
+        node_base.assign(P.funcs.size() + 1, 0);
+        for (size_t d = 0; d < P.funcs.size(); ++d) node_base[d + 1] = node_base[d] + R.nnodes[d];
+        total = node_base[P.funcs.size()];
+        lit_state.assign(total, 0);
+        if (add_candidates() == 0) {  // the common case: nothing is lost, nothing more to do
+            lit_state.clear();
+            return;
+        }
+        Snap run0, best;
+        save(run0);
+        bool have_best = false;  // `best` holds the last clean run with records
+        const bool dbg = std::getenv("EPQ_REC_DEBUG") != nullptr;
+        enum { CUR, BEST, RUN0 } pick = RUN0;
+        uint32_t runs = 0;
+        for (;;) {
+            if (runs == C.max_record_runs) {  // hard limit: the last clean run, else no records
+                pick = have_best ? BEST : RUN0;
+                break;
+            }
+            ++runs;
+            if (!solve()) {
+                for (size_t e = 0; e < R.evars.size(); ++e)
+                    if (R.evars[e].flags & EV_BAD) {
+                        if (dbg) {
+                            std::fprintf(stderr, "records: run %u: bad region r%zu (root r%u) sites:", runs, e, find((uint32_t)e));
+                            for (const AllocSite& s : R.evars[find((uint32_t)e)].sites)
+                                std::fprintf(stderr, " %d:%d/len%u", s.node->line, s.node->col, s.len);
+                            std::fprintf(stderr, "\n");
+                        }
+                        demote_region(find((uint32_t)e));
+                    }
+                if (active() == 0) break;  // nothing left to try: run 0 is the answer
+                continue;
+            }
+            size_t ch = demote_uniform();
+            ch += add_candidates();
+            if (ch == 0) {
+                pick = CUR;
+                break;
+            }
+            if (active() == 0) break;  // (a) demoted every record: run 0 is the answer
+            best = Snap{};
+            save(best);
+            have_best = true;
+        }
+        if (pick == BEST) load(best);
+        else if (pick == RUN0) load(run0);
+        R.record_runs = runs;
+        R.has_records = false;
+        for (size_t e = 0; e < R.evars.size(); ++e) {
+            EVar& v = R.evars[e];
+            if (v.parent != e || !v.nf) continue;
+            R.has_records = true;
+            for (const AllocSite& s : v.sites)
+                if (s.len == 0) v.flags |= EV_NULL;
+        }
+        lit_state.clear();
     }
 };
 
@@ -662,7 +950,10 @@ void infer(const Program& prog, const Config& cfg, Result& out) {
     s.run();
 }
 
-std::string ty_str(const Result& r, Ty t) {
+namespace {
+// Records print as Rec#r(field types) / Rec?#r(...) (nullable); a record
+// nested in a field prints as just Rec#r.
+std::string ty_str_(const Result& r, Ty t, bool deep) {
     switch (t.k) {
     case TyK::Bot: return "Bot";
     case TyK::Int: return "Int";
@@ -670,23 +961,40 @@ std::string ty_str(const Result& r, Ty t) {
     case TyK::Fn: return "Fn(def" + std::to_string(t.a) + ")";
     case TyK::List: {
         uint32_t e = r.find(t.a);
+        const EVar& v = r.evars[e];
+        if (v.nf) {
+            bool null = (v.flags & EV_NULL) != 0;
+            for (auto& s : v.sites) null |= s.len == 0;
+            std::string o = std::string(null ? "Rec?#" : "Rec#") + std::to_string(e);
+            if (!deep) return o;
+            o += "(";
+            for (uint32_t j = 0; j < v.nf; ++j) o += (j ? ", " : "") + ty_str_(r, r.evars[r.find(v.fbase + j)].t, false);
+            return o + ")";
+        }
         return "List(r" + std::to_string(e) + ")";
     }
     }
     return "?";
 }
+}  // namespace
+
+std::string ty_str(const Result& r, Ty t) { return ty_str_(r, t, true); }
 
 void dump_types(std::string& o, const Result& r) {
     const Program& P = *r.prog;
     o += "inference: " + std::to_string(r.passes) + " passes, " + std::to_string(r.insts.size()) + " instances, " +
-         std::to_string(r.evars.size()) + " element variables\n";
+         std::to_string(r.evars.size()) + " element variables";
+    if (r.has_records) o += ", records after " + std::to_string(r.record_runs) + " speculative runs";
+    o += "\n";
     o += "globals:\n";
     for (size_t g = 0; g < P.globals.size(); ++g)
         o += "  " + std::string(P.syms->name(P.globals[g])) + " : " + ty_str(r, r.globals[g]) + "\n";
     o += "regions:\n";
     for (size_t e = 0; e < r.evars.size(); ++e) {
         if (r.evars[e].parent != e) continue;
-        o += "  r" + std::to_string(e) + " elem " + ty_str(r, r.evars[e].t) + "  sites:";
+        if (r.evars[e].flags & EV_FIELD) continue;  // record positions print with their record
+        if (r.evars[e].nf) o += "  r" + std::to_string(e) + " record " + ty_str(r, Ty::list((uint32_t)e)) + "  sites:";
+        else o += "  r" + std::to_string(e) + " elem " + ty_str(r, r.evars[e].t) + "  sites:";
         for (auto& s : r.evars[e].sites)
             o += " " + std::to_string(s.node->line) + ":" + std::to_string(s.node->col) + "/i" +
                  std::to_string(s.inst) + "/len" + std::to_string(s.len);

@@ -30,6 +30,7 @@ struct CGen {
         case TK::Any: return "EAny";
         case TK::Pair: return "EPair";
         case TK::Ptr: return M.elem_is_i32(t.a) ? "EI32*" : "EW64*";
+        case TK::Rec: return "ERec*";  // records (cgen_rec.inc)
         default: return "int32_t";
         }
     }
@@ -79,6 +80,7 @@ struct CGen {
         case TK::Int:
         case TK::Bot: return "((EAny)(uint32_t)(" + e + "))";
         case TK::List: return "((EAny)(uintptr_t)(" + e + "))";
+        case TK::Rec: return "((EAny)(uintptr_t)(" + e + "))";  // records
         case TK::Fn:
             if (pure) return "epq_box_fn(" + std::to_string(t.a) + ")";
             return "((void)(" + e + "), epq_box_fn(" + std::to_string(t.a) + "))";
@@ -97,6 +99,7 @@ struct CGen {
     std::string from_word(Type t, const std::string& w) {
         switch (t.k) {
         case TK::List: return "((EList*)(uintptr_t)(" + w + "))";
+        case TK::Rec: return "((ERec*)(uintptr_t)(" + w + "))";  // records
         case TK::Any: return w;
         case TK::Fn: return "((void)(" + w + "), 0)";
         case TK::Pair: return "((EPair)(" + w + "))";
@@ -289,6 +292,7 @@ struct CGen {
         // ---- end litcmp extension ----
         default:
             if (std::string r; low_E(n, r)) return r;
+            if (std::string r; rec_E(n, r)) return r;  // records (cgen_rec.inc)
             std::fprintf(stderr, "epq: cgen: unexpected op %s in expression\n", op_name(n->op));
             std::abort();
         }
@@ -317,6 +321,7 @@ struct CGen {
             return "(EPQ_LIKELY(" + wa + " & " + wb + " & 1) ? (" + fast + ") : " + slow + ")";
         }
         if (ta.k == TK::Pair && tb.k == TK::Pair) return low_pair_cmp(c, k.v[0], k.v[1]);
+        if (ta.k == TK::Rec || tb.k == TK::Rec) return rec_cmp(n, c, k);  // records (cgen_rec.inc)
         if (ta.k == TK::List && tb.k == TK::List && M.elem_is_i32(ta.a) && M.elem_is_i32(tb.a)) {
             std::string a = k.v[0], b = k.v[1];
             switch (c) {
@@ -354,8 +359,8 @@ struct CGen {
             if (y->type.k == TK::Int) pre += "if (EPQ_UNLIKELY(" + b + " == 0)) epq_fail(EPQ_E_DIV_ZERO); ";
             else if (y->type.k == TK::Any) pre += "if (EPQ_UNLIKELY(" + b + " == 1)) epq_fail(EPQ_E_DIV_ZERO); ";
         }
-        bool xs = x->type.k == TK::List || x->type.k == TK::Fn || x->type.k == TK::Pair,
-             ys = y->type.k == TK::List || y->type.k == TK::Fn || y->type.k == TK::Pair;
+        bool xs = x->type.k == TK::List || x->type.k == TK::Fn || x->type.k == TK::Pair || x->type.k == TK::Rec,
+             ys = y->type.k == TK::List || y->type.k == TK::Fn || y->type.k == TK::Pair || y->type.k == TK::Rec;
         if (xs || ys) return "({ " + pre + "epq_fail(EPQ_E_OPERANDS_INT); (int32_t)0; })";
         bool xa = x->type.k == TK::Any, ya = y->type.k == TK::Any;
         if (xa && ya) pre += "if (EPQ_UNLIKELY(!(" + a + " & " + b + " & 1))) epq_fail(EPQ_E_OPERANDS_INT); ";
@@ -394,6 +399,8 @@ struct CGen {
     // Low-TIR / extension ops (Select, InlineBlock/Break, Pair*, ListData,
     // ElemLoad/ElemStore, CheckIndex, Free, SameList, Nop): src/cgen_low.inc.
 #include "cgen_low.inc"
+    // Records (RecLit/RecNull/RecGet/RecSet/RecLen, typed record comparisons).
+#include "cgen_rec.inc"
 
     void S(const Node* n, int d) {
         switch (n->op) {
@@ -495,7 +502,9 @@ struct CGen {
         }
         for (auto& f : M.funcs) out += proto(*f) + ";\n";
         out += "\n";
+        size_t rec_at = out.size();  // records: generated comparison helpers go here
         for (auto& f : M.funcs) func(*f);
+        out.insert(rec_at, rec_protos + rec_bodies);
         // Generic entry points for dynamic calls.
         for (size_t d = 0; d < M.defs.size(); ++d) {
             int32_t gf = M.defs[d].generic_func;

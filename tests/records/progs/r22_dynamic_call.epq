@@ -1,0 +1,6 @@
+// a function called dynamically with a record
+fs := [(x) => { => x[0]; }, 3];
+r := [1, [2]];
+f := fs[0];
+>> f(r);
+>> r;

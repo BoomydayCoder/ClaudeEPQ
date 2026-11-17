@@ -1,0 +1,6 @@
+// literal index out of range; the value is evaluated first
+r := [1, [2]];
+f := () => { >> 99; => 5; };
+>> r[1];
+r[5] := f();
+>> r;
