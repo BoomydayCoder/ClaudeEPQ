@@ -1,7 +1,7 @@
 #include "infer.hpp"
 
 #include <algorithm>
-#include <map>
+
 #include <string>
 
 namespace epq::infer {
@@ -42,7 +42,18 @@ struct Solver {
     Result& R;
     uint64_t changes = 0;
     uint32_t cur = 0;  // instance being walked
+    Instance* CI = nullptr;  // R.insts[cur] (Instances never move: unique_ptr)
     std::vector<uint32_t> count_of;  // DefId -> number of non-generic instances
+
+    // Per-def tables computed once (flat arrays + offsets, DefId-indexed):
+    //  wo       ordinals of the expression nodes in the exact order ex() visits
+    //           them, so the fixpoint walk never looks a node up;
+    //  calls    (ordinal of Call, ordinal of its callee expression), preorder;
+    //  lits     ordinals of List literals, preorder;
+    //  unclean  LF_UNCLEAN local slots.
+    std::vector<uint32_t> wo, wo_off, calls, calls_off, lits, lits_off, unclean, unclean_off;
+    std::vector<uint8_t> body_completes;
+    const uint32_t* wp = nullptr;  // cursor into wo during a walk
 
     Solver(const Program& p, const Config& c, Result& r) : P(p), C(c), R(r) {}
 
@@ -196,7 +207,7 @@ struct Solver {
     }
 
     // ---- walk ----------------------------------------------------------------
-    Instance& I() { return *R.insts[cur]; }
+    Instance& I() { return *CI; }
 
     Ty& var(const Node* id) {
         if (id->flags & NF_GLOBAL) return R.globals[(size_t)id->aux];
@@ -208,6 +219,7 @@ struct Solver {
     }
 
     Ty ex(const Node* n, bool cond = false) {
+        const uint32_t o = *wp++;  // this node's ordinal (ex visiting order == wnum_ex order)
         Ty t = Ty::bot();
         switch (n->kind) {
         case NK::Int:
@@ -273,7 +285,6 @@ struct Solver {
             break;
         }
         case NK::List: {
-            uint32_t o = R.ordinal(n);
             uint32_t e = I().naux[o];
             if (e == kNone) {
                 e = (uint32_t)R.evars.size();
@@ -303,7 +314,7 @@ struct Solver {
             if (f.k == TyK::Fn) {
                 const Function& fn = P.funcs[f.a];
                 if (fn.params.size() == args->nkids) {
-                    uint32_t J = callee_instance(R.ordinal(n), f.a);
+                    uint32_t J = callee_instance(o, f.a);
                     for (uint32_t i = 0; i < args->nkids; ++i) flow(R.insts[J]->locals[fn.params[i]], a[i]);
                     t = R.insts[J]->ret;
                 }
@@ -316,7 +327,7 @@ struct Solver {
         default:  // Class / Get / SGet are rejected by the resolver
             break;
         }
-        I().nty[R.ordinal(n)] = t;
+        I().nty[o] = t;
         return t;
     }
 
@@ -373,23 +384,113 @@ struct Solver {
 
     void walk(uint32_t inst) {
         cur = inst;
-        DefId d = R.insts[inst]->def;
+        CI = R.insts[inst].get();
+        DefId d = CI->def;
         const Function& f = P.funcs[d];
-        for (size_t s = 0; s < f.locals.size(); ++s)
-            if (f.locals[s].flags & LF_UNCLEAN) flow(I().locals[s], Ty::i32());
+        for (uint32_t i = unclean_off[d]; i < unclean_off[d + 1]; ++i) flow(CI->locals[unclean[i]], Ty::i32());
+        wp = wo.data() + wo_off[d];
         st(f.body);
-        if (d != kMainDef && completes(f.body)) flow(I().ret, Ty::i32());
+        if (wp != wo.data() + wo_off[d + 1]) __builtin_trap();  // wnum_* out of sync with ex / st
+        if (body_completes[d]) flow(CI->ret, Ty::i32());
     }
 
+    // ---- one-time numbering ------------------------------------------------------
+    // Preorder ordinals (Result::ord), not descending into nested FuncLits.
     void number(const Node* n, uint32_t& c) {
-        R.ord[n] = c++;
+        R.ord.put(n, c);
+        if (n->kind == NK::List) lits.push_back(c);
+        if (n->kind == NK::Call) {
+            calls.push_back(c);
+            calls.push_back(c + 1);  // kids[0] (the callee) is numbered next
+        }
+        ++c;
         if (n->kind == NK::FuncLit) return;
         for (uint32_t i = 0; i < n->nkids; ++i) number(n->kids[i], c);
+    }
+    static size_t count_nodes(const Node* n) {
+        size_t c = 1;
+        if (n->kind == NK::FuncLit) return c;
+        for (uint32_t i = 0; i < n->nkids; ++i) c += count_nodes(n->kids[i]);
+        return c;
+    }
+    // Mirrors ex() / st() exactly: records the ordinal of every node ex() visits,
+    // in visiting order (the walk checks that it consumed exactly these).
+    void wnum_ex(const Node* n) {
+        wo.push_back(R.ord.at(n));
+        switch (n->kind) {
+        case NK::Assign: {
+            const Node* tg = n->kids[0];
+            if (tg->kind != NK::Id) {
+                wnum_ex(tg->kids[0]);
+                wnum_ex(tg->kids[1]);
+            }
+            wnum_ex(n->kids[1]);
+            break;
+        }
+        case NK::Append:
+        case NK::Add: case NK::Sub: case NK::Mul: case NK::Div:
+        case NK::Eq: case NK::Gt: case NK::Lt: case NK::Ge: case NK::Le: case NK::Ne:
+        case NK::And: case NK::Or:
+        case NK::Index:
+            wnum_ex(n->kids[0]);
+            wnum_ex(n->kids[1]);
+            break;
+        case NK::Not: case NK::Abs: case NK::Neg:
+            wnum_ex(n->kids[0]);
+            break;
+        case NK::List:
+            for (uint32_t i = 0; i < n->nkids; ++i) wnum_ex(n->kids[i]);
+            break;
+        case NK::Call: {
+            const Node* args = n->kids[1];
+            for (uint32_t i = 0; i < args->nkids; ++i) wnum_ex(args->kids[i]);
+            wnum_ex(n->kids[0]);
+            break;
+        }
+        default:
+            break;
+        }
+    }
+    void wnum_st(const Node* n) {
+        switch (n->kind) {
+        case NK::Seq:
+            for (uint32_t i = 0; i < n->nkids; ++i) wnum_st(n->kids[i]);
+            break;
+        case NK::ExprStmt: case NK::Print: case NK::Return:
+            wnum_ex(n->kids[0]);
+            break;
+        case NK::Block:
+            wnum_st(n->kids[0]);
+            break;
+        case NK::If:
+            wnum_ex(n->kids[0]);
+            wnum_st(n->kids[1]);
+            wnum_st(n->kids[2]);
+            break;
+        case NK::While:
+            wnum_ex(n->kids[0]);
+            wnum_st(n->kids[1]);
+            break;
+        case NK::For:
+            wnum_st(n->kids[0]);
+            wnum_ex(n->kids[1]);
+            wnum_st(n->kids[3]);
+            wnum_st(n->kids[2]);
+            break;
+        case NK::ForEach:
+            wnum_ex(n->kids[1]);
+            wnum_st(n->kids[2]);
+            break;
+        default:
+            wnum_ex(n);
+            break;
+        }
     }
 
     // ---- post-fixpoint ---------------------------------------------------------
     void mark_reachable() {
         std::vector<uint32_t> work;
+        work.reserve(R.insts.size());
         auto push = [&](uint32_t i) {
             if (!R.insts[i]->reachable) {
                 R.insts[i]->reachable = true;
@@ -403,63 +504,99 @@ struct Solver {
             uint32_t i = work.back();
             work.pop_back();
             Instance& J = *R.insts[i];
-            reach_calls(J, P.funcs[J.def].body, push);
+            for (uint32_t k = calls_off[J.def]; k < calls_off[J.def + 1]; k += 2) {
+                Ty f = J.nty[calls[k + 1]];
+                uint32_t c = J.naux[calls[k]];
+                if (f.k == TyK::Fn && c != kNone && R.insts[c]->def == f.a) push(c);
+            }
         }
-    }
-    template <class F>
-    void reach_calls(Instance& J, const Node* n, F& push) {
-        if (n->kind == NK::FuncLit) return;
-        if (n->kind == NK::Call) {
-            uint32_t o = R.ordinal(n);
-            Ty f = J.nty[R.ordinal(n->kids[0])];
-            uint32_t c = J.naux[o];
-            if (f.k == TyK::Fn && c != kNone && R.insts[c]->def == f.a) push(c);
-        }
-        for (uint32_t i = 0; i < n->nkids; ++i) reach_calls(J, n->kids[i], push);
     }
 
-    void key_ty(std::string& k, Ty t) {
-        k += (char)('0' + (int)t.k);
-        if (t.k == TyK::List) k += std::to_string(find(t.a));
-        else if (t.k == TyK::Fn) k += std::to_string(t.a);
-        k += ',';
+    // Exact-match interning of u32 key strings -> dense class ids in order of
+    // first appearance (replaces std::map<std::string, uint32_t>). A candidate key
+    // is appended to buf, then commit() either keeps it or drops it as a duplicate.
+    struct KeyTab {
+        std::vector<uint32_t> buf, off, table;
+        std::vector<uint64_t> hash;
+        size_t mask = 0;
+        void reset(size_t n) {
+            buf.clear();
+            off.assign(1, 0);
+            hash.clear();
+            size_t cap = 16;
+            while (cap < n * 2) cap <<= 1;
+            table.assign(cap, kNone);
+            mask = cap - 1;
+        }
+        size_t size() const { return hash.size(); }
+        uint32_t commit() {
+            uint32_t b = off.back(), e = (uint32_t)buf.size();
+            uint64_t h = 0xcbf29ce484222325ull ^ (e - b);
+            for (uint32_t i = b; i < e; ++i) {
+                h = (h ^ buf[i]) * 0x100000001b3ull;
+                h ^= h >> 29;
+            }
+            size_t s = (size_t)((h * 0x9E3779B97F4A7C15ull) >> 32) & mask;
+            for (;; s = (s + 1) & mask) {
+                uint32_t id = table[s];
+                if (id == kNone) break;
+                if (hash[id] != h) continue;
+                uint32_t ob = off[id], oe = off[id + 1];
+                if (oe - ob == e - b && std::equal(buf.begin() + ob, buf.begin() + oe, buf.begin() + b)) {
+                    buf.resize(b);
+                    return id;
+                }
+            }
+            uint32_t id = (uint32_t)hash.size();
+            table[s] = id;
+            hash.push_back(h);
+            off.push_back(e);
+            return id;
+        }
+    };
+    void key_ty(std::vector<uint32_t>& k, Ty t) {
+        k.push_back((uint32_t)t.k);
+        k.push_back(t.k == TyK::List ? find(t.a) : t.k == TyK::Fn ? t.a : 0);
     }
     // Partition refinement over reachable instances.
     void dedup() {
         size_t n = R.insts.size();
-        std::vector<uint32_t> cls(n, kNone);
-        std::vector<std::string> base(n);
-        std::map<std::string, uint32_t> ids;
+        std::vector<uint32_t> cls(n, kNone), ncls(n, kNone);
+        KeyTab ids, nids;
+        ids.reset(n);
         for (size_t i = 0; i < n; ++i) {
             Instance& J = *R.insts[i];
             if (!J.reachable) continue;
-            std::string& k = base[i];
-            k = std::to_string(J.def) + (J.generic ? "g" : "n") + ":";
-            if (i == 0) k += "main";
+            std::vector<uint32_t>& k = ids.buf;
+            k.push_back(J.def);
+            k.push_back((J.generic ? 1u : 0u) | (i == 0 ? 2u : 0u));
             for (Ty t : J.locals) key_ty(k, t);
-            k += '|';
             key_ty(k, J.ret);
-            for (size_t o = 0; o < J.nty.size(); ++o) key_ty(k, J.nty[o]);
-            k += '|';
+            for (Ty t : J.nty) key_ty(k, t);
             // List literal regions (callees are refined below).
-            lits_key(J, P.funcs[J.def].body, k);
-            auto it = ids.emplace(k, (uint32_t)ids.size()).first;
-            cls[i] = it->second;
+            for (uint32_t x = lits_off[J.def]; x < lits_off[J.def + 1]; ++x) {
+                uint32_t e = J.naux[lits[x]];
+                k.push_back(e == kNone ? kNone : find(e));
+            }
+            cls[i] = ids.commit();
         }
         for (int round = 0; round < 1000; ++round) {
-            std::map<std::string, uint32_t> nids;
-            std::vector<uint32_t> ncls(n, kNone);
+            nids.reset(n);
             for (size_t i = 0; i < n; ++i) {
                 Instance& J = *R.insts[i];
+                ncls[i] = kNone;
                 if (!J.reachable) continue;
-                std::string k = std::to_string(cls[i]) + ":";
-                calls_key(J, P.funcs[J.def].body, cls, k);
-                auto it = nids.emplace(k, (uint32_t)nids.size()).first;
-                ncls[i] = it->second;
+                std::vector<uint32_t>& k = nids.buf;
+                k.push_back(cls[i]);
+                for (uint32_t x = calls_off[J.def]; x < calls_off[J.def + 1]; x += 2) {
+                    uint32_t c = J.naux[calls[x]];
+                    k.push_back((c == kNone || !R.insts[c]->reachable) ? kNone : cls[c]);
+                }
+                ncls[i] = nids.commit();
             }
             bool stable = nids.size() == ids.size();
             cls.swap(ncls);
-            ids.swap(nids);
+            std::swap(ids, nids);
             if (stable) break;
         }
         std::vector<int32_t> first(ids.size(), -1);
@@ -468,23 +605,6 @@ struct Solver {
             if (first[cls[i]] < 0) first[cls[i]] = (int32_t)i;
             R.insts[i]->rep = (uint32_t)first[cls[i]];
         }
-    }
-    void lits_key(Instance& J, const Node* n, std::string& k) {
-        if (n->kind == NK::FuncLit) return;
-        if (n->kind == NK::List) {
-            uint32_t e = J.naux[R.ordinal(n)];
-            k += (e == kNone ? std::string("-") : std::to_string(find(e))) + ",";
-        }
-        for (uint32_t i = 0; i < n->nkids; ++i) lits_key(J, n->kids[i], k);
-    }
-    void calls_key(Instance& J, const Node* n, const std::vector<uint32_t>& cls, std::string& k) {
-        if (n->kind == NK::FuncLit) return;
-        if (n->kind == NK::Call) {
-            uint32_t c = J.naux[R.ordinal(n)];
-            k += (c == kNone || !R.insts[c]->reachable) ? std::string("-") : std::to_string(cls[c]);
-            k += ',';
-        }
-        for (uint32_t i = 0; i < n->nkids; ++i) calls_key(J, n->kids[i], cls, k);
     }
 
     void run() {
@@ -496,11 +616,33 @@ struct Solver {
         R.escaped.assign(nd, 0);
         count_of.assign(nd, 0);
         R.globals.assign(P.globals.size(), Ty::bot());
+        size_t total = 0;
+        for (size_t d = 0; d < nd; ++d) total += count_nodes(P.funcs[d].body);
+        R.ord.init(total);
+        wo.reserve(total);
+        wo_off.resize(nd + 1);
+        calls_off.resize(nd + 1);
+        lits_off.resize(nd + 1);
+        unclean_off.resize(nd + 1);
+        body_completes.resize(nd);
         for (size_t d = 0; d < nd; ++d) {
+            const Function& f = P.funcs[d];
+            calls_off[d] = (uint32_t)calls.size();
+            lits_off[d] = (uint32_t)lits.size();
             uint32_t c = 0;
-            number(P.funcs[d].body, c);
+            number(f.body, c);
             R.nnodes[d] = c;
+            wo_off[d] = (uint32_t)wo.size();
+            wnum_st(f.body);
+            unclean_off[d] = (uint32_t)unclean.size();
+            for (size_t sl = 0; sl < f.locals.size(); ++sl)
+                if (f.locals[sl].flags & LF_UNCLEAN) unclean.push_back((uint32_t)sl);
+            body_completes[d] = d != kMainDef && completes(f.body);
         }
+        wo_off[nd] = (uint32_t)wo.size();
+        calls_off[nd] = (uint32_t)calls.size();
+        lits_off[nd] = (uint32_t)lits.size();
+        unclean_off[nd] = (uint32_t)unclean.size();
         new_instance(kMainDef, -1);
         for (;;) {
             changes = 0;
