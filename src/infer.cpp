@@ -57,8 +57,10 @@ struct Solver {
     // Records (DESIGN.md §5.11). Global ordinal of node o of def d = node_base[d] + o.
     // lit_state[global ordinal of a List literal]: 0 ordinary, 1 record candidate,
     // 2 demoted (never a candidate again). Empty in run 0.
+    // An empty literal `[]` uses the same states; in state 1 it is *pre-shaped*:
+    // its region is a (nullable) record of length empty_k[gid] from the start.
     std::vector<uint32_t> node_base;
-    std::vector<uint8_t> lit_state;
+    std::vector<uint8_t> lit_state, empty_k;
 
     Solver(const Program& p, const Config& c, Result& r) : P(p), C(c), R(r) {}
 
@@ -124,7 +126,7 @@ struct Solver {
             unify_rec(x, y);
             return;
         }
-        R.evars[x].flags |= R.evars[y].flags & (EV_PLAIN | EV_BAD);
+        R.evars[x].flags |= R.evars[y].flags & (EV_PLAIN | EV_BAD | EV_ABS);
         Ty ty = R.evars[y].t;
         Ty res = lub(R.evars[x].t, ty);
         uint32_t rx = find(x);
@@ -141,7 +143,7 @@ struct Solver {
     void unify_rec(uint32_t x, uint32_t y) {
         uint8_t fx = R.evars[x].flags, fy = R.evars[y].flags;
         uint32_t nx = R.evars[x].nf, ny = R.evars[y].nf;
-        R.evars[x].flags = fx | (fy & (EV_PLAIN | EV_BAD));
+        R.evars[x].flags = fx | (fy & (EV_PLAIN | EV_BAD | EV_ABS));
         if (nx && ny) {
             if (nx != ny) {
                 R.evars[x].flags |= EV_BAD;
@@ -163,6 +165,8 @@ struct Solver {
             return;
         }
         if (ot.k != TyK::Bot) {
+            // A failure from here on may be an artefact of this: pre-shape next time.
+            if (!(R.evars[x].flags & EV_BAD)) R.evars[x].flags |= EV_ABS;
             uint32_t b = R.evars[x].fbase, k = R.evars[x].nf;
             for (uint32_t j = 0; j < k; ++j) flow_elem(b + j, ot);
         }
@@ -406,6 +410,13 @@ struct Solver {
                     } else {
                         R.evars[e].flags |= EV_PLAIN;
                     }
+                } else if (!lit_state.empty() && lit_state[node_base[CI->def] + o] == 1) {
+                    // pre-shaped `[]`: a null record of length empty_k from the start
+                    uint32_t k = empty_k[node_base[CI->def] + o];
+                    uint32_t fb = (uint32_t)R.evars.size();
+                    for (uint32_t j = 0; j < k; ++j) R.evars.push_back(EVar{fb + j, Ty::bot(), {}, kNone, 0, EV_FIELD});
+                    R.evars[e].fbase = fb;
+                    R.evars[e].nf = (uint8_t)k;
                 }
                 I().naux[o] = e;
                 ++changes;
@@ -851,9 +862,64 @@ struct Solver {
         }
         return n;
     }
+    // Every site of region r (literals and empty literals) leaves speculation for good.
     void demote_region(uint32_t r) {
-        for (const AllocSite& s : R.evars[r].sites)
-            if (s.len) lit_state[gid(s)] = 2;
+        for (const AllocSite& s : R.evars[r].sites) lit_state[gid(s)] = 2;
+    }
+    // After a failed run: the empty literals that should be pre-shaped next time.
+    // A record region that failed after absorbing an undetermined region with
+    // content (EV_ABS; e.g. a global `tree := []` indexed and stored into before
+    // it met its first `[v, l, r]`) may have failed only because that content
+    // went into every field. Its empty sites that are still state 0 and whose
+    // every copy (one per instance) lies in a record region of the same length
+    // k, or in an unused undetermined region, are pre-shaped as k-records, and
+    // the region is not demoted this time. Everything else is demoted as before.
+    // Each call moves at least one site 0 -> 1 or 1 -> 2 (termination).
+    void fail_run(bool dbg, uint32_t runs) {
+        constexpr uint8_t CONFLICT = 0xff;
+        std::vector<uint8_t> want(lit_state.size(), 0);
+        for (size_t e = 0; e < R.evars.size(); ++e) {
+            const EVar& v = R.evars[e];
+            if (v.parent != e || (v.flags & EV_FIELD)) continue;
+            bool unused = !v.nf && !(v.flags & EV_PLAIN) && v.t.k == TyK::Bot;
+            for (const AllocSite& s : v.sites) {
+                if (s.len) continue;
+                uint32_t g = gid(s);
+                if (lit_state[g] != 0 || unused) continue;
+                uint8_t k = v.nf ? v.nf : CONFLICT;
+                want[g] = (want[g] == 0 || want[g] == k) ? k : CONFLICT;
+            }
+        }
+        for (size_t e = 0; e < R.evars.size(); ++e) {
+            if (!(R.evars[e].flags & EV_BAD)) continue;
+            uint32_t r = find((uint32_t)e);
+            if (r != e) continue;  // flags are or-ed into the root on union
+            const EVar& v = R.evars[r];
+            if (dbg) {
+                std::fprintf(stderr, "records: run %u: bad region r%u flags %x sites:", runs, r, v.flags);
+                for (const AllocSite& s : v.sites) std::fprintf(stderr, " %d:%d/len%u", s.node->line, s.node->col, s.len);
+                std::fprintf(stderr, "\n");
+            }
+            // (EV_PLAIN is no evidence against: dynamising a bad record's fields spreads it.)
+            bool retry = v.nf && (v.flags & EV_ABS);
+            for (const AllocSite& s : v.sites)
+                if (s.len && s.len != v.nf) retry = false;  // records of different lengths met
+            size_t shaped = 0;
+            if (retry)
+                for (const AllocSite& s : v.sites) {
+                    uint32_t g = gid(s);
+                    if (s.len == 0 && lit_state[g] == 0 && want[g] == v.nf) {
+                        lit_state[g] = 1;
+                        empty_k[g] = v.nf;
+                        ++shaped;
+                    }
+                }
+            if (shaped) {
+                if (dbg) std::fprintf(stderr, "records: run %u: pre-shaping %zu empty site(s) of r%u as %u-records\n", runs, shaped, r, v.nf);
+                continue;
+            }
+            demote_region(r);
+        }
     }
     size_t active() {
         size_t n = 0;
@@ -891,6 +957,7 @@ struct Solver {
             lit_state.clear();
             return;
         }
+        empty_k.assign(total, 0);
         Snap run0, best;
         save(run0);
         bool have_best = false;  // `best` holds the last clean run with records
@@ -904,16 +971,7 @@ struct Solver {
             }
             ++runs;
             if (!solve()) {
-                for (size_t e = 0; e < R.evars.size(); ++e)
-                    if (R.evars[e].flags & EV_BAD) {
-                        if (dbg) {
-                            std::fprintf(stderr, "records: run %u: bad region r%zu (root r%u) sites:", runs, e, find((uint32_t)e));
-                            for (const AllocSite& s : R.evars[find((uint32_t)e)].sites)
-                                std::fprintf(stderr, " %d:%d/len%u", s.node->line, s.node->col, s.len);
-                            std::fprintf(stderr, "\n");
-                        }
-                        demote_region(find((uint32_t)e));
-                    }
+                fail_run(dbg, runs);
                 if (active() == 0) break;  // nothing left to try: run 0 is the answer
                 continue;
             }
@@ -940,6 +998,7 @@ struct Solver {
                 if (s.len == 0) v.flags |= EV_NULL;
         }
         lit_state.clear();
+        empty_k.clear();
     }
 };
 
