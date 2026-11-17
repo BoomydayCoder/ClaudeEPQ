@@ -1,0 +1,8 @@
+// popped through an alias (-p) somewhere else: not a pair
+shrink := (l) => { => -l; };
+p := [5, 6];
+q := p;
+>> shrink(q);
+>> p;
+>> |p|;
+>> p = [5];

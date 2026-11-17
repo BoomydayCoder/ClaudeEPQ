@@ -1,0 +1,9 @@
+// a literal returned from a function is aliased through a global and mutated elsewhere
+mk := (a) => { => [a, a + 1]; };
+g := mk(5);
+h := g;
+bump := () => { g :+ 100; };
+>> h;
+bump();
+>> h;
+>> g = h;

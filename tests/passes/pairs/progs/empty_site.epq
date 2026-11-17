@@ -1,0 +1,5 @@
+// an empty literal in the same region: not a pair
+mk := (n) => { (n) ? => []; => [n, n]; };
+p := mk(0);
+q := mk(1);
+>> p; >> q; >> |q|; >> q < p;

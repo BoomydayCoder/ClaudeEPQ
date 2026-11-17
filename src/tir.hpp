@@ -230,6 +230,14 @@ enum class Op : uint8_t {
     Free,       // [l: List(r)]                            statement
     SameList,   // [a: List, b: List] -> Int               pointer identity
     Nop,        // statement
+    // ---- litcmp extension (src/passes/litcmp.cpp) ---------------------------------
+    // DynIsEmptyList [x: Any] -> Int: evaluates x, then 1 if x is a list (tag
+    //   (x & 3) == 0) whose length is 0, else 0. Never fails; pure if x is pure.
+    //   It is `x = []` for a dynamic x without allocating the literal.
+    //   C: epq_is_empty_list(x) (runtime/epq_rt.h). JIT: tst x,#3; b.ne -> 0;
+    //   ldr w, [x, #8] (EList::len); cmp w, #0; cset.
+    DynIsEmptyList,
+    // ---- end litcmp extension ------------------------------------------------------
 };
 const char* op_name(Op o);
 
@@ -278,6 +286,16 @@ struct Func {
     std::vector<uint32_t> mutates;
     bool mutates_any = false;
     uint32_t next_label = 0;    // InlineBlock / Break labels: new_label(f)
+    // ---- recur pass (src/passes/recur.cpp) ----
+    // pure: set by pass "recur" (false until it runs / if disabled). The result
+    // depends only on the arguments: Int-only locals/params/result, no SetGlobal,
+    // Print, Input, CallDyn, no list values at all, reads only Fn-typed or
+    // Global::constant globals, calls only pure instances. It MAY fail or not
+    // terminate (deterministically, given the arguments). Two calls with equal
+    // arguments are interchangeable (call-CSE); a call whose result is unused may
+    // NOT be dropped (it may fail / diverge).
+    bool pure = false;
+    // ---- end recur pass ----
 };
 inline uint32_t new_label(Func& f) { return f.next_label++; }
 

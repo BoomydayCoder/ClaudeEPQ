@@ -1,0 +1,8 @@
+// index-assigned through a global from a function
+G := [10, 20];
+set := (v) => { G[1] := v; };
+>> G;
+set(99);
+>> G;
+H := [10, 99];
+>> G = H;

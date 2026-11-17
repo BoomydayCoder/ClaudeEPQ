@@ -1,0 +1,12 @@
+fib := (n) => { (n < 2) ? { => n; } => fib(n - 1) + fib(n - 2); };
+>> fib(20);
+even := (n) => { (n = 0) ? { => 1; } => odd(n - 1); };
+odd := (n) => { (n = 0) ? { => 0; } => even(n - 1); };
+>> even(10);
+>> odd(7);
+>> even(7);
+inc := (x) => { => x + 1; };
+depth := (n) => { (n = 0) ? { => 0; } => inc(depth(n - 1)); };
+>> depth(50000);
+self := (n, acc) => { (n = 0) ? { => acc; } => self(n - 1, inc(acc)); };
+>> self(30000, 5);

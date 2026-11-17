@@ -306,6 +306,8 @@ struct Verifier {
         case Op::Free: nk(n, 1); kid_kind(n, 0, TK::List, "List"); break;
         case Op::SameList: nk(n, 2); kid_kind(n, 0, TK::List, "List"); kid_kind(n, 1, TK::List, "List"); res_int(n); break;
         case Op::Nop: nk(n, 0); break;
+        // litcmp extension
+        case Op::DynIsEmptyList: nk(n, 1); kid_kind(n, 0, TK::Any, "Any"); res_int(n); break;
         }
         // Ptr values only come from ListData / Local reads of Cache locals / assignments to them.
         if (n->type.k == TK::Ptr && n->op != Op::ListData && n->op != Op::Local && n->op != Op::SetLocal && n->op != Op::Comma &&

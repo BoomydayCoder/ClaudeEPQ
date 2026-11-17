@@ -1,0 +1,6 @@
+// two-element list whose elements are not both ints
+f := () => { => 1; };
+p := [f, 1];
+>> p[0]();
+q := [[1], 2];
+>> q;

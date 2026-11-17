@@ -1,0 +1,10 @@
+twice := (f, x) => { => f(f(x)); };
+inc := (x) => { => x + 1; };
+dbl := (x) => { => x * 2; };
+>> twice(inc, 3);
+>> twice(dbl, 3);
+pick := (c) => { (c) ? { => inc; } => dbl; };
+>> pick(1)(10);
+>> pick(0)(10);
+k := inc;
+(i := 0; i < 3; i := i + 1;) @ { >> twice(k, i); k := dbl; }

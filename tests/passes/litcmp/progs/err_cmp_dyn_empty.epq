@@ -1,0 +1,5 @@
+// Dynamic x: a list compares fine, a function raises.
+g := (y) => { => y; };
+d := [[3], [], g];
+(e : d) @ >> e > [];
+>> 9;

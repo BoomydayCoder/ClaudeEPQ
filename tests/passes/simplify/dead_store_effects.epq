@@ -1,0 +1,15 @@
+cnt := 0;
+tick := () => { cnt := cnt + 1; >> cnt; => cnt; };
+f := (l) => {
+    a := tick();
+    b := l :+ 4;
+    c := -l;
+    d := [tick(), tick()];
+    e := tick() + 0;
+    >> l;
+    unused := 3;
+    unused := 4;
+    => 0;
+};
+f([1, 2]);
+>> cnt;
