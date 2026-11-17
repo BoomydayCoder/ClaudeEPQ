@@ -542,23 +542,25 @@ int helper_main(CompileUnit& cu, const Options& opts) {
         return 0;
     }
     // At most EPQ_TIER_JOBS (default 2) compiles of different programs run at
-    // once: take a free slot, else queue on one (holding the key lock, so
-    // other helpers for this key still bow out at once).
+    // once. No free slot: give up quietly (a later long run retries) rather
+    // than queue, so bursts of runs never pile up sleeping helpers.
     int jobs = 2;
     if (const char* j = std::getenv("EPQ_TIER_JOBS"); j && *j) jobs = std::max(1, std::atoi(j));
     int sfd = -1;
-    for (int pass = 0; pass < 2 && sfd < 0; ++pass) {
-        for (int i = 0; i < jobs && sfd < 0; ++i) {
-            int slot = (i + (int)getpid()) % jobs;
-            std::string sp = dir + "/.slot-" + std::to_string(slot);
-            int fd = ::open(sp.c_str(), O_RDWR | O_CREAT | O_CLOEXEC, 0644);
-            if (fd < 0) continue;
-            if (::flock(fd, pass == 0 ? LOCK_EX | LOCK_NB : LOCK_EX) == 0)
-                sfd = fd;
-            else
-                ::close(fd);
-            if (pass == 1) break;  // blocked on one slot (and got it), or failed
-        }
+    for (int i = 0; i < jobs && sfd < 0; ++i) {
+        std::string sp = dir + "/.slot-" + std::to_string((i + (int)getpid()) % jobs);
+        int fd = ::open(sp.c_str(), O_RDWR | O_CREAT | O_CLOEXEC, 0644);
+        if (fd < 0) continue;
+        if (::flock(fd, LOCK_EX | LOCK_NB) == 0)
+            sfd = fd;
+        else
+            ::close(fd);
+    }
+    if (sfd < 0) {
+        tier_log("helper-busy %s", key.c_str());
+        ::unlink(lock.c_str());
+        ::close(lfd);
+        return 0;
     }
     tier_log("compile-start %s after %.1f ms", key.c_str(), (now_us() - t0) / 1000.0);
     t0 = now_us();

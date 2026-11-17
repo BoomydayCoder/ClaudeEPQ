@@ -52,6 +52,7 @@ void usage(FILE* f, const char* argv0) {
                  "  --frontend-time    print front-end phase timings to stderr\n"
                  "  --frontend-bench=N run parse..TIR passes N times in process, report per-phase timing\n"
                  "                     (with --parse-only: lex+parse+resolve only)\n"
+                 "  --tier-status FILE / --tier-clear   background-compiled cache (src/tierup.hpp)\n"
                  "  -h, --help         this help\n",
                  argv0);
 }

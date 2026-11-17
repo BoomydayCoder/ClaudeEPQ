@@ -12,7 +12,8 @@ Scenarios (each in its own EPQ_CACHE_DIR under build/tierup/test/):
   disabled    EPQ_NO_TIERUP=1 is inert (no files, no helper, no log)
   pipe        piped stdout reaches EOF while the helper is still compiling; the
               helper holds no pipe and its stdio is /dev/null
-  status      --tier-status / --tier-clear
+  status      --tier-status / --tier-clear; EPQ_CFLAGS and --no-pass are in the key
+  evict       oldest-first eviction beyond EPQ_TIER_CACHE_MB
 --suites additionally runs tests/conformance and tests/core in auto mode with a
 cold cache, a warm cache and EPQ_TIER_MS=0 (EPQ_CFLAGS=-O1).
 """
@@ -328,6 +329,22 @@ def t_status():
     check(rc == 0 and status(c, LONG)[0] == 1, "--tier-clear")
 
 
+def t_evict():
+    c = fresh("evict")
+    env = env_for(c, EPQ_TIER_MS=0, EPQ_TIER_CACHE_MB=0)  # cap 0: keep only the newest
+    other = os.path.join(REPO, "bench", "extra", "tak.epq")
+    run([LONG], env)
+    wait_idle(c)
+    check(status(c, LONG)[0] == 0, "first artefact missing")
+    run([other], env)
+    wait_idle(c)
+    check(status(c, other)[0] == 0, "newest artefact was evicted")
+    check(status(c, LONG)[0] == 1, "oldest artefact was not evicted")
+    check(len(events(c, "evict")) == 1, "expected one evict event")
+    r = run([LONG], env_for(c, EPQ_TIER_MS=10 ** 6))
+    check(r[:2] == expected(c, LONG), "output after eviction")
+
+
 def suite(name, env, jobs):
     ok = True
     for s in ("conformance", "core"):
@@ -339,14 +356,30 @@ def suite(name, env, jobs):
     return ok
 
 
+def fill(env, jobs):
+    """Runs the helper synchronously for every suite program (the cold run's
+    helpers skip programs while both compile slots are busy)."""
+    import concurrent.futures as cf
+    import glob
+    progs = sorted(glob.glob(os.path.join(REPO, "tests", "conformance", "*", "*.epq")) +
+                   glob.glob(os.path.join(REPO, "tests", "core", "**", "*.epq"), recursive=True))
+    e = dict(env, EPQ_TIER_JOBS=str(jobs + 1))
+    with cf.ThreadPoolExecutor(jobs) as ex:
+        list(ex.map(lambda p: run(["--tier-compile", p], e, timeout=600), progs))
+    return len(progs)
+
+
 def t_suites(jobs):
     c = fresh("suites")
     env = env_for(c, EPQ_CFLAGS="-O1")
     suite("cold", env, jobs)
     check(wait_idle(c, 1800), "helpers did not finish")
+    n_cold = len(tier_files(c, ".ready"))
+    n_progs = fill(env, jobs)
     n_ready = len(tier_files(c, ".ready"))
     suite("warm", env, jobs)
-    print("    %d artefacts after cold run, %d hits in warm run" % (n_ready, len(events(c, "hit"))))
+    print("    %d artefacts after the cold run, %d after filling (%d programs), %d hits in the warm run" % (
+        n_cold, n_ready, n_progs, len(events(c, "hit"))))
     check(len(events(c, "hit")) > 0, "warm run had no hits")
     c0 = fresh("suites0")
     env0 = env_for(c0, EPQ_CFLAGS="-O1", EPQ_TIER_MS=0)
@@ -368,7 +401,7 @@ def main():
     EPQ = os.path.abspath(a.epq)
     os.makedirs(WORK, exist_ok=True)
     tests = [("threshold", t_threshold), ("short", t_short), ("concurrent", t_concurrent), ("corrupt", t_corrupt),
-             ("disabled", t_disabled), ("pipe", t_pipe), ("status", t_status)]
+             ("disabled", t_disabled), ("pipe", t_pipe), ("status", t_status), ("evict", t_evict)]
     if a.suites:
         tests.append(("suites", lambda: t_suites(a.j)))
     for name, fn in tests:
