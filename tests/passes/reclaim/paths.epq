@@ -1,0 +1,29 @@
+// early returns before assignment, loops, params reassigned, recursion, mutual recursion
+f := (c) => {
+    (c = 0) ? => 0;
+    a := [1, 2];
+    (c = 1) ? => |a|;
+    b := [3];
+    (c = 2) ? { b :+ 4; => |a| + |b|; }
+    => a[0] + b[0];
+};
+lp := (n) => {
+    s := 0;
+    (i := 0; i < n; i := i + 1;) @ { t := [i, i]; s := s + t[0]; (i = 7) ? => s; }
+    => s;
+};
+pr := (p) => { p := [9]; q := p; => |q|; };
+pr2 := (p) => { q := [1]; (|p| > 2) ? q := p; => q; };
+build := (n) => { (n = 0) ? => []; r := build(n - 1); r :+ n; => r; };
+ev := (n) => { a := [n]; (n = 0) ? => a; => od(n - 1); };
+od := (n) => { b := [n, n]; (n = 0) ? => b; => ev(n - 1); };
+tr := (n) => { (n = 0) ? => 0; a := [n]; x := tr(n - 1); => x + a[0]; };
+>> [f(0), f(1), f(2), f(3)];
+>> [lp(5), lp(20)];
+>> pr([1]);
+z := [1, 2, 3];
+y := pr2(z); s := [77, 77]; >> y; y :+ 4; >> z;
+y := pr2([1]); s := [76]; >> y;
+>> build(6);
+>> [ev(5), od(4), ev(0)];
+>> tr(30);
