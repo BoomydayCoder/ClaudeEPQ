@@ -1,0 +1,6 @@
+// recur: a pure function whose callee global is not assigned yet: Undefined global, once
+early := (x) => { => later(x) + 1; };
+>> 1;
+>> early(1) + early(1);
+later := (x) => { => x; };
+>> 2;

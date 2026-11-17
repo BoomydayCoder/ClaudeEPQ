@@ -1,0 +1,9 @@
+// recur: a tail-call argument fails after an earlier argument printed; output order and error preserved
+p := (x) => { >> x; => x; };
+f := (n, a) => {
+    (n = 0) ? => a;
+    => f(p(n - 1), a + 100 / (n - 3));
+};
+>> f(2, 0);
+>> f(6, 0);
+>> 999;

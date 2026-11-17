@@ -1,0 +1,26 @@
+// recur: one function specialised at several types; tail calls that change argument types
+id := (x, n) => {
+    (n = 0) ? => x;
+    => id(x, n - 1);
+};
+wrap := (x, n) => {
+    (n = 0) ? => x;
+    => wrap([x], n - 1);
+};
+alt := (x, n) => {
+    (n = 0) ? => x;
+    (n - (n / 2) * 2 = 0) ? => alt([n], n - 1);
+    => alt(n, n - 1);
+};
+last := (l, n) => {
+    (n = |l|) ? => l[n - 1];
+    => last(l, n + 1);
+};
+>> id(5, 10);
+>> id([1, 2], 10);
+>> id(id, 3) = id;
+>> wrap(1, 4);
+>> alt(0, 5);
+>> alt(0, 6);
+>> last([4, 5, 6], 1);
+>> last([[1], [2, 3]], 1);

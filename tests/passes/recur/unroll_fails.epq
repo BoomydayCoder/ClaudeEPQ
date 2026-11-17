@@ -1,0 +1,10 @@
+// recur: an unrolled pure function that fails deep inside: same error, after the same output
+ff := (n) => {
+    (n = 5) ? => 1 / (n - 5);
+    (n < 2) ? => n;
+    => ff(n - 1) + ff(n - 2);
+};
+>> ff(4);
+>> ff(3);
+>> ff(9);
+>> 1;
