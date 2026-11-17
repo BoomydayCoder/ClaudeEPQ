@@ -171,6 +171,7 @@ struct NInfo {
     uint32_t en = 0, lv = 0;
     bool call = false;
     bool cref = false;  // ConstInt read through its pseudo-local register
+    int32_t hoist = -1; // loop-invariant arithmetic: read from this pseudo-local
 };
 
 struct Ref {
@@ -585,7 +586,7 @@ public:
         case Op::ConstInt: {
             // Constants needing more than one instruction, used inside loops,
             // compete for registers as pseudo-locals (initialised at entry).
-            if (depth > 0 && !no_const_reg_ && Assembler::load_imm_len(n->a, false) > 1) {
+            if (depth > 0 && !no_const_reg_ && (Assembler::load_imm_len(n->a, false) > 1 || want_const_reg_)) {
                 uint32_t id = const_local(n->a);
                 L[id].refs.push_back(Ref{en, ctx_, false});
                 L[id].weight += 0.5 * wdepth(depth);
@@ -623,6 +624,9 @@ public:
         }
         case Op::While: {
             LoopRec lr{en, 0, ctx_, 0};
+            size_t h0 = hoist_pending_.size();
+            if (!no_hoist_) find_hoists(n);
+            size_t h1 = hoist_pending_.size();
             kid(0, depth + 1);
             push_ctx();
             lr.body_ctx = ctx_;
@@ -631,6 +635,13 @@ public:
             pop_ctx();
             lr.lv = pos_;
             loops.push_back(lr);
+            // hoisted values: written at loop entry, live over the whole loop
+            for (size_t h = h0; h < h1; ++h) {
+                uint32_t id = hoist_pending_[h].second;
+                L[id].refs.insert(L[id].refs.begin(), Ref{en, ctx_, true});
+                L[id].refs.push_back(Ref{lr.lv, ctx_, false});
+                hoists_[n].push_back(hoist_pending_[h]);
+            }
             break;
         }
         case Op::If:
@@ -661,7 +672,15 @@ public:
             break;
         }
         default:
-            for (uint32_t i = 0; i < n->nkids; ++i) kid(i, depth);
+            for (uint32_t i = 0; i < n->nkids; ++i) {
+                if (depth > 0 && const_wants_reg(n, i)) {
+                    want_const_reg_ = true;
+                    kid(i, depth);
+                    want_const_reg_ = false;
+                } else {
+                    kid(i, depth);
+                }
+            }
             break;
         }
         uint32_t lv = pos_++;
@@ -670,7 +689,17 @@ public:
             call_pos.push_back(n->op == Op::ListLit ? en : lv);
         }
         if (!risky_ && n->nkids > 1) note_risk(n);
-        info.put(n, NInfo{en, lv, call, cref});
+        NInfo ni{en, lv, call, cref};
+        if (!hoist_mark_.empty()) {
+            auto it = hoist_mark_.find(n);
+            if (it != hoist_mark_.end()) {
+                ni.hoist = (int32_t)it->second;
+                LocalInfo& h = L[it->second];
+                h.refs.push_back(Ref{en, ctx_, false});
+                h.weight += wdepth(depth);
+            }
+        }
+        info.put(n, ni);
     }
     // Could the code generator have to keep a value across a call here (which
     // needs a callee-saved register or a frame slot that only a dry run can
@@ -802,6 +831,33 @@ public:
     std::vector<std::pair<int32_t, Bits*>> da_blocks;
 
     bool no_const_reg_ = false;
+    bool want_const_reg_ = false;  // the parent would materialise this constant with a mov
+    static bool imm12ish(int64_t v) {
+        int32_t x = (int32_t)v;
+        int64_t a = x < 0 ? -(int64_t)x : x;
+        return a < 4096 || ((a & 0xfff) == 0 && a < (1 << 24));
+    }
+    static bool mul_cheap(int64_t c) {  // Assembler::mul_imm without a constant load
+        uint32_t u = (uint32_t)c, nu = 0u - u;
+        auto p2 = [](uint32_t x) { return x && !(x & (x - 1)); };
+        if (u == 0 || u == 1 || nu == 1 || p2(u) || p2(nu) || p2(u - 1) || p2(nu + 1) || p2(u + 1) || p2(nu - 1)) return true;
+        uint32_t odd = u >> __builtin_ctz(u);
+        return p2(odd - 1) || p2(odd + 1);
+    }
+    // kid i of n is a constant the code for n would load with a mov
+    bool const_wants_reg(const Node* n, uint32_t i) {
+        const Node* k = n->kids[i];
+        if (k->op != Op::ConstInt) return false;
+        switch (n->op) {
+        case Op::AddI32: case Op::SubI32: return i == 1 && !imm12ish(k->a);
+        case Op::MulI32: return !mul_cheap(k->a);
+        case Op::EqI32: case Op::NeI32: case Op::LtI32: case Op::LeI32: case Op::GtI32: case Op::GeI32:
+            if (k->a == 0) return false;
+            return !imm12ish(k->a);
+        case Op::CheckIndex: return !imm12ish(k->a);
+        default: return false;
+        }
+    }
     std::vector<std::pair<int64_t, uint32_t>> const_ids;  // constant -> pseudo-local id
     uint32_t const_local(int64_t v) {
         for (auto& c : const_ids)
@@ -892,8 +948,68 @@ public:
         while (L[id].alias >= 0) id = (uint32_t)L[id].alias;
         return id;
     }
+    // ---- loop-invariant arithmetic (hoisted to the loop entry) -------------
+    // A subtree of a loop made of AddI32/SubI32/MulI32/NegI32 (at least two
+    // operations) over constants and Int locals that nothing in the loop writes
+    // cannot fail and has the same value in every iteration: it is computed
+    // once before the loop (first test included) into a pseudo-local.
+    bool no_hoist_ = false;
+    std::vector<std::pair<const Node*, uint32_t>> hoist_pending_;
+    std::unordered_map<const Node*, uint32_t> hoist_mark_;
+    std::unordered_map<const Node*, std::vector<std::pair<const Node*, uint32_t>>> hoists_;
+    bool hoist_eval_ = false;
+    std::vector<uint8_t> written_;
+    void mark_written(const Node* n) {
+        if (n->op == Op::SetLocal) written_[(size_t)n->a] = 1;
+        for (uint32_t i = 0; i < n->nkids; ++i) mark_written(n->kids[i]);
+    }
+    // number of operations if n is invariant arithmetic, else -1
+    int inv_ops(const Node* n) {
+        switch (n->op) {
+        case Op::ConstInt: return 0;
+        case Op::Local: {
+            size_t id = (size_t)n->a;
+            if (id >= F->locals.size() || written_[id] || F->locals[id].type.k != TK::Int) return -1;
+            return 0;
+        }
+        case Op::AddI32: case Op::SubI32: case Op::MulI32: case Op::NegI32: {
+            int c = 1;
+            for (uint32_t i = 0; i < n->nkids; ++i) {
+                int k = inv_ops(n->kids[i]);
+                if (k < 0) return -1;
+                c += k;
+            }
+            return c;
+        }
+        default: return -1;
+        }
+    }
+    void hoist_walk(const Node* n) {
+        if (hoist_mark_.count(n)) return;
+        if (n->op == Op::AddI32 || n->op == Op::SubI32 || n->op == Op::MulI32 || n->op == Op::NegI32) {
+            int c = inv_ops(n);
+            if (c >= 2) {
+                LocalInfo l;
+                L.push_back(l);
+                uint32_t id = (uint32_t)L.size() - 1;
+                hoist_mark_[n] = id;
+                hoist_pending_.push_back({n, id});
+                return;
+            }
+        }
+        if (n->op == Op::While) return;  // an inner loop decides for itself (it runs per entry)
+        for (uint32_t i = 0; i < n->nkids; ++i) hoist_walk(n->kids[i]);
+    }
+    void find_hoists(const Node* w) {
+        written_.assign(F->locals.size(), 0);
+        mark_written(w);
+        for (uint32_t i = 0; i < w->nkids; ++i) hoist_walk(w->kids[i]);
+    }
     void analyze() {
         info.reset(count_nodes(F->body));
+        hoist_pending_.clear();
+        hoist_mark_.clear();
+        hoists_.clear();
         const_ids.clear();
         copies_.clear();
         loops.clear();
@@ -1216,6 +1332,7 @@ public:
         case Op::MulI32: return arith(n, want);
         case Op::DivI32: return div(n, want);
         case Op::NegI32: {
+            if (!hoist_mark_.empty() && !hoist_eval_ && I(n).hoist >= 0) return read_local((uint32_t)I(n).hoist);
             V v = expr(n->kids[0]);
             if (v.k == V::IMM) return V::im((int32_t)(0u - (uint32_t)v.imm));
             Reg s = R(v, false);
@@ -1483,6 +1600,16 @@ public:
         return v;
     }
 
+    void store_local(uint32_t id, V v) {
+        LocalInfo& l = L[id];
+        if (l.reg >= 0) {
+            if (v.k == V::IMM) li(l.x64 ? X(l.reg) : W(l.reg), l.x64 ? v.imm : (int32_t)v.imm);
+            else if (!(v.k == V::REG && v.r == l.reg)) A->mov(l.x64 ? X(l.reg) : W(l.reg), R(v, l.x64));
+        } else if (l.slot >= 0) {
+            A->str(R(v, l.x64), mem(sp, fix_off(l.slot)));
+        }
+        release(v);
+    }
     V set_global(const Node* n) {
         uint32_t g = (uint32_t)n->a;
         Type t = M.globals[g].type;
@@ -1526,6 +1653,7 @@ public:
     // ---- integer arithmetic
     static int32_t wrap(int64_t v) { return (int32_t)(uint32_t)(uint64_t)v; }
     V arith(const Node* n, int want) {
+        if (!hoist_mark_.empty() && !hoist_eval_ && I(n).hoist >= 0) return read_local((uint32_t)I(n).hoist);
         V k[2];
         eval_kids(n, 0, 2, k);
         Op op = n->op;
@@ -3102,6 +3230,16 @@ public:
         }
         case Op::While: {
             Label top = A->new_label(), exit = A->new_label();
+            if (!hoists_.empty()) {
+                auto it = hoists_.find(n);
+                if (it != hoists_.end())
+                    for (auto& h : it->second) {
+                        hoist_eval_ = true;
+                        V v = expr(h.first, L[h.second].reg);
+                        hoist_eval_ = false;
+                        store_local(h.second, v);
+                    }
+            }
             branch(n->kids[0], false, exit);
             A->bind(top);
             stmt(n->kids[1]);
@@ -3611,6 +3749,7 @@ public:
         func_off.assign(M.funcs.size(), 0);
         getenv_always_dry_ = getenv("EPQ_JIT_ALWAYS_DRY") != nullptr;
         getenv_no_coalesce_ = getenv("EPQ_JIT_NO_COALESCE") != nullptr;
+        no_hoist_ = getenv("EPQ_JIT_NO_HOIST") != nullptr;
         for (auto& f : M.funcs) compile_func(*f);
         F = nullptr;
         emit_rec_stubs();
