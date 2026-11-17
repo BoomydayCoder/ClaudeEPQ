@@ -31,6 +31,7 @@ const Pass kPipeline[] = {
     {"recur", "recursion: purity, self tail calls -> loops, pure-call CSE, self-unrolling", pass_recur},
     {"pairs", "pair unboxing (§5.4)", pass_pairs},
     {"ifconv", "if-conversion to Select (§5.5)", pass_ifconv},
+    {"appendopt", "append loops: capacity hints (Reserve) and bulk copies (AppendRange)", pass_appendopt},
     {"listopt", "header caching and check elision (§5.2/§5.3)", pass_listopt},
     {"simplify2", "local simplification, late (§5.6; same implementation as simplify)", pass_simplify},
     {"reclaim", "static reclamation: Free dead lists (§5.7)", pass_reclaim},

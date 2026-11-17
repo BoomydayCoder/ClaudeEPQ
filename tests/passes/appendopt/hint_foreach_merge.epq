@@ -1,0 +1,22 @@
+// for-each and merge-shaped loops with hints
+src := [3, 1, 4, 1, 5, 9, 2, 6];
+dst := [];
+(x : src) @ { dst :+ x * 2; dst :+ x; }
+>> dst;
+g := [1, 2];
+(x : g) @ { (|g| < 6) ? g :+ x + 10; }
+>> g;
+merge := (pa, pb) => {
+  i := 0; j := 0; o := [];
+  (i < |pa| & j < |pb|) @ {
+    (pa[i] < pb[j]) ? { o :+ pa[i]; i := i + 1; } : { o :+ pb[j]; j := j + 1; }
+  }
+  (i < |pa|) @ { o :+ pa[i]; i := i + 1; }
+  (j < |pb|) @ { o :+ pb[j]; j := j + 1; }
+  => o;
+};
+>> merge([1, 4, 9], [2, 3, 10, 11]);
+>> merge([], [5]);
+>> merge([5, 6], []);
+a := [1, 5];
+>> merge(a, a);

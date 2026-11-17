@@ -31,7 +31,8 @@
  *   Elements are accessed through the one-member structs EI32 / EW64 so that
  *   type-based alias analysis knows element stores never touch a header.
  *   A list literal of n elements is allocated with its buffer directly behind
- *   the header; growth doubles the capacity into a fresh arena buffer.
+ *   the header; growth doubles the capacity, in place when the buffer is the
+ *   most recent arena allocation (epq_list_grow_to), else into a fresh buffer.
  *
  * Descriptors (EDesc table, set in epq_rt_desc by the program's entry): static
  * type descriptions for deep equality / ordering / printing.
@@ -281,12 +282,21 @@ EPQ_RT_API int32_t epq_read_int(void) {
 static char* epq_bump;
 static char* epq_bump_end;
 
+/* The bump arena is a sequence of large lazily-committed virtual reservations
+ * (anonymous mmap: pages cost nothing until touched). A request that does not
+ * fit opens a new reservation of max(1 GB, 2 x request) and bumps from it, so
+ * even a huge list stays the most recent allocation and keeps growing in place
+ * (epq_list_grow_to). The tail of the abandoned reservation is never touched. */
+#define EPQ_ARENA_CHUNK ((size_t)1 << 30)
 EPQ_RT_API void* epq_alloc_slow(size_t n) {
-    size_t chunk = (size_t)64 << 20;
-    if (n > chunk / 4) chunk = (n + 4095) & ~(size_t)4095;
+    size_t chunk = EPQ_ARENA_CHUNK;
+    if (n > chunk / 2) chunk = ((n + 4095) & ~(size_t)4095) * 2;
     void* p = mmap(0, chunk, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
-    if (p == MAP_FAILED) epq_fail(EPQ_E_MEMORY);
-    if (n > ((size_t)64 << 20) / 4) return p; /* big block: keep the current chunk */
+    if (p == MAP_FAILED) {
+        chunk = (n + 4095) & ~(size_t)4095; /* retry without the headroom */
+        p = mmap(0, chunk, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+        if (p == MAP_FAILED) epq_fail(EPQ_E_MEMORY);
+    }
     epq_bump = (char*)p + n;
     epq_bump_end = (char*)p + chunk;
     return p;
@@ -301,6 +311,9 @@ EPQ_RT_API void* epq_alloc_slow(size_t n) {
  * EPQ_POISON_FREED=1: freed memory is filled with a garbage pattern (headers
  * get len 0x7fffffff and an unmapped data pointer) and never reused. */
 #define EPQ_FL_SMALL_MAX 512
+#ifndef EPQ_GROW_FACTOR
+#define EPQ_GROW_FACTOR 2 /* list capacity growth factor (epq_list_grow) */
+#endif
 static void* epq_fl_small[EPQ_FL_SMALL_MAX / 16 + 1];
 static void* epq_fl_big[64];
 static int epq_poison_mode = -1; /* -1: not yet read from the environment */
@@ -370,9 +383,30 @@ EPQ_INLINE EList* epq_list_new(int32_t n, uint32_t esz) {
     return l;
 }
 
-EPQ_RT_API void epq_list_grow(EList* l, uint32_t esz) {
-    int64_t ncap = l->cap < 4 ? 8 : (int64_t)l->cap * 2;
+/* Grows l's capacity to at least ncap elements (clamped to INT32_MAX).
+ * Invariant used for in-place growth: a list buffer carved from the bump arena
+ * occupies exactly r16(cap * esz) bytes from data (epq_alloc rounds to 16;
+ * epq_list_new and this function keep cap * esz a multiple of 16 unless clamped).
+ * So if data + r16(cap * esz) == epq_bump, the buffer (or the header block with
+ * its inline buffer) is the most recent allocation and is extended by bumping.
+ * A buffer taken from a free list may be larger than r16(cap * esz); then
+ * data + r16(cap * esz) lies strictly inside that block, below epq_bump, and the
+ * test fails safely. In-place growth frees nothing, so it is also correct with
+ * EPQ_POISON_FREED=1 and for header blocks with inline buffers (epq_list_free
+ * then returns sizeof(EList) + cap * esz, the extended block). */
+EPQ_RT_API void epq_list_grow_to(EList* l, uint32_t esz, int64_t ncap) {
     if (ncap > 0x7fffffff) ncap = 0x7fffffff;
+    if (ncap <= l->cap) return;
+    size_t old = ((size_t)l->cap * esz + 15) & ~(size_t)15;
+    size_t nb = ((size_t)ncap * esz + 15) & ~(size_t)15;
+#ifndef EPQ_NO_GROW_IN_PLACE /* (measurement switch: EPQ_CFLAGS=-DEPQ_NO_GROW_IN_PLACE) */
+    if ((char*)l->data + old == epq_bump && (size_t)(epq_bump_end - epq_bump) >= nb - old) {
+        epq_bump += nb - old;
+        int64_t c = (int64_t)(nb / esz);
+        l->cap = (int32_t)(c > 0x7fffffff ? 0x7fffffff : c);
+        return;
+    }
+#endif
     void* nd = epq_alloc((size_t)ncap * esz);
     memcpy(nd, l->data, (size_t)l->len * esz);
     /* An outgrown out-of-line buffer is only reachable through this header:
@@ -380,6 +414,42 @@ EPQ_RT_API void epq_list_grow(EList* l, uint32_t esz) {
     if (l->data != (void*)((char*)l + sizeof(EList))) epq_free_block(l->data, (size_t)l->cap * esz);
     l->data = nd;
     l->cap = (int32_t)ncap;
+}
+
+EPQ_RT_API void epq_list_grow(EList* l, uint32_t esz) {
+    epq_list_grow_to(l, esz, l->cap < 4 ? 8 : (int64_t)l->cap * EPQ_GROW_FACTOR);
+}
+
+/* ---- capacity hints and bulk copy (appendopt, src/tir.hpp Reserve / AppendRange) ---- */
+#define EPQ_RESERVE_MAX ((int32_t)1 << 26)
+/* cap(l) >= len(l) + min(max(n, 0), 2^26); never changes len or contents. */
+EPQ_RT_API void epq_list_reserve(EList* l, int32_t n, uint32_t esz) {
+    if (!l || n <= 0) return;
+    if (n > EPQ_RESERVE_MAX) n = EPQ_RESERVE_MAX;
+    int64_t need = (int64_t)l->len + n;
+    if (need > l->cap) {
+        /* A hint repeated inside an outer loop must not defeat amortised growth
+         * (exact-fit growth would copy the whole list every outer iteration). */
+        if (l->len > 0 && (int64_t)l->cap * EPQ_GROW_FACTOR > need) need = (int64_t)l->cap * EPQ_GROW_FACTOR;
+        epq_list_grow_to(l, esz, need);
+    }
+}
+/* Appends m[lo..hi) to l if that is certainly what the element-by-element loop
+ * would do without failing (value 1); otherwise does nothing (value 0). */
+EPQ_RT_API int32_t epq_append_range(EList* l, EList* m, int32_t lo, int32_t hi, uint32_t esz) {
+    if (hi <= lo) return 1;
+    if (!l || !m || l == m || lo < 0 || hi > m->len) return 0;
+    int64_t n = (int64_t)hi - lo;
+    int64_t need = (int64_t)l->len + n;
+    if (need > 0x7fffffff) return 0;
+    if (need > l->cap) {
+        int64_t c = need;
+        if (l->len > 0 && (int64_t)l->cap * 2 > c) c = (int64_t)l->cap * 2; /* keep appends amortised */
+        epq_list_grow_to(l, esz, c);
+    }
+    memcpy((char*)l->data + (size_t)l->len * esz, (const char*)m->data + (size_t)lo * esz, (size_t)n * esz);
+    l->len = (int32_t)need;
+    return 1;
 }
 
 /* Frees list l (element size esz): its header and its buffer, never what the

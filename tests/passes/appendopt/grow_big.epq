@@ -1,0 +1,18 @@
+// large lists: in-place growth, interleaved growth of two lists, copies of big ranges
+a := [];
+b := [];
+(i := 0; i < 3000000; i := i + 1;) @ { a :+ i; }
+(i := 0; i < 200000; i := i + 1;) @ { a :+ i; b :+ i; }
+>> |a|;
+>> |b|;
+c := [];
+(i := 100; i < |a|; i := i + 1;) @ { c :+ a[i]; }
+>> |c|;
+>> c[0] + c[2999899] + c[|c| - 1];
+s := 0;
+(x : b) @ { s := s + x; }
+>> s;
+w := [[1]];
+(i := 0; i < 500000; i := i + 1;) @ { w :+ w[0]; }
+w[0] :+ 2;
+>> w[499999];

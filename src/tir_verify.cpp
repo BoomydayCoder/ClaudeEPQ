@@ -308,6 +308,15 @@ struct Verifier {
         case Op::Nop: nk(n, 0); break;
         // litcmp extension
         case Op::DynIsEmptyList: nk(n, 1); kid_kind(n, 0, TK::Any, "Any"); res_int(n); break;
+        // ---- appendopt ----
+        case Op::Reserve: nk(n, 2); kid_kind(n, 0, TK::List, "List"); kid_int(n, 1); break;
+        case Op::AppendRange:
+            nk(n, 4); kid_kind(n, 0, TK::List, "List"); kid_kind(n, 1, TK::List, "List"); kid_int(n, 2); kid_int(n, 3); res_int(n);
+            if (elem_of(M, n->kids[0]->type) != elem_of(M, n->kids[1]->type) ||
+                M.elem_is_i32(n->kids[0]->type.a) != M.elem_is_i32(n->kids[1]->type.a))
+                fail(n, "lists have different element types");
+            break;
+        // ---- end appendopt ----
         }
         // Ptr values only come from ListData / Local reads of Cache locals / assignments to them.
         if (n->type.k == TK::Ptr && n->op != Op::ListData && n->op != Op::Local && n->op != Op::SetLocal && n->op != Op::Comma &&

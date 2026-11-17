@@ -1,0 +1,11 @@
+// as above but the source is long enough to stop... never: |k| keeps growing; m runs out
+m := [];
+(i := 0; i < 50; i := i + 1;) @ { m :+ i; }
+l := [0, 0, 0];
+k := l;
+h := (pl, pk, pm) => {
+  i := 0;
+  (i < |pk|) @ { pl :+ pm[i]; i := i + 1; }
+  => i;
+};
+>> h(l, k, m);

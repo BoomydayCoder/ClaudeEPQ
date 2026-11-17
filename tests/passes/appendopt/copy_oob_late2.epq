@@ -1,0 +1,9 @@
+// partial appends before the error are visible through an alias printed by the loop bound
+m := [10, 20, 30];
+l := [0];
+f := (pl, pm) => {
+  i := 1;
+  (i < 6) @ { pl :+ pm[i]; i := i + 1; }
+  => pl;
+};
+>> f(l, m);

@@ -37,6 +37,7 @@ const char* op_name(Op o) {
         C(PairLt) C(PairLe) C(PairGt) C(PairGe) C(ListData) C(ElemLoad) C(ElemStore) C(CheckIndex) C(Free)
         C(SameList) C(Nop)
         C(DynIsEmptyList)  // litcmp extension
+        C(Reserve) C(AppendRange)  // appendopt
 #undef C
     }
     return "?";
@@ -127,6 +128,7 @@ bool is_stmt_op(Op o) {
     switch (o) {
     case Op::Seq: case Op::If: case Op::While: case Op::Return: case Op::Print:
     case Op::InlineBlock: case Op::Break: case Op::Free: case Op::Nop:
+    case Op::Reserve:  // appendopt
         return true;
     default:
         return false;

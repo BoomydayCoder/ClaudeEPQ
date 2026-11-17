@@ -1,0 +1,11 @@
+// the bound reads the destination's length through an alias: the loop follows the growth
+// and fails when the source runs out
+m := [1, 2, 3, 4, 5];
+l := [0];
+k := l;
+f := (pl, pk, pm) => {
+  (i := 0; i < |pk|; i := i + 1;) @ { pl :+ pm[i]; }
+  => 0;
+};
+>> |l|;
+f(l, k, m);

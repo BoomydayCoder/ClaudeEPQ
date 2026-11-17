@@ -1,0 +1,22 @@
+// a Reserve hint inside an outer loop, with other allocations in between (no in-place growth):
+// growth must stay amortised (exact-fit regrowth would copy the list every outer iteration)
+l := [];
+keep := [];
+(k := 0; k < 60000; k := k + 1;) @ {
+  (j := 0; j < 3; j := j + 1;) @ { l :+ j + k; }
+  keep :+ [k];
+}
+>> |l|;
+>> l[0];
+>> l[179999];
+>> |keep|;
+// nested copies: inner bulk copy inside an outer loop, source grows between copies
+src := [1, 2];
+dst := [];
+(k := 0; k < 2000; k := k + 1;) @ {
+  (j := 0; j < |src|; j := j + 1;) @ { dst :+ src[j]; }
+  src :+ k;
+  (|src| > 40) ? src := [k];
+}
+>> |dst|;
+>> dst[|dst| - 1];
