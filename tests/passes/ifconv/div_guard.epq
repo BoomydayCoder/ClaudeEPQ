@@ -1,0 +1,11 @@
+// division in a guarded body must not be speculated
+d := [2, 0, 5, 0];
+r := 0;
+(i := 0; i < |d|; i := i + 1;) @ {
+  (d[i] != 0) ? r := r + 100 / d[i];
+}
+>> r;
+(i := 0; i < 2; i := i + 1;) @ {
+  (i = 1) ? r := r / (i - 1);
+}
+>> r;

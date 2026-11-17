@@ -1,0 +1,9 @@
+// the body's index is valid only when the condition holds: must stay guarded
+l := [1, 2, 3];
+s := 0;
+(i := 0; i < 6; i := i + 1;) @ {
+  (i < 3) ? s := s + l[i];
+  (i < |l|) ? l[i] := l[i] * 10;
+  (i < 3 & l[i] > 15) ? l[i] := 0;
+}
+>> s; >> l;

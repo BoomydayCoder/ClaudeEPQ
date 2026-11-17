@@ -1,0 +1,10 @@
+l := [3, -7, 12, 0, 12, -7, 44, 1];
+mn := l[0]; mx := l[0]; cnt := 0; arg := 0;
+(i := 0; i < |l|; i := i + 1;) @ {
+  v := l[i];
+  (v < mn) ? mn := v;
+  (v > mx) ? { mx := v; arg := i; }
+  (v = 12) ? cnt := cnt + 1;
+  (l[i] > 0) ? { cnt := cnt * 2; cnt := cnt - 1; }
+}
+>> mn; >> mx; >> cnt; >> arg;

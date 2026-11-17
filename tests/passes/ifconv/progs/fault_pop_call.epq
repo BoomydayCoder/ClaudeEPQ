@@ -1,0 +1,9 @@
+// an index established before a call that pops must not be trusted
+q := [1, 2, 3, 4];
+sh := (z) => { -z; => 0; };
+(i := 0; i < 3; i := i + 1;) @ {
+  x := q[3];
+  sh(q);
+  (x > 0) ? q[3] := 7;
+}
+>> q;
