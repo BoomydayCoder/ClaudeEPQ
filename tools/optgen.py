@@ -1,0 +1,985 @@
+"""optgen -- optimisation-targeted program snippets for the fuzzer (profile `opt`).
+
+tools/epqgen.py builds programs from a small kind system; it almost never produces
+the shapes that ClaudeEPQ's optimisation passes look for (fixed-shape records
+mutated through aliases, pairs, tail / doubly-recursive pure functions, copy loops,
+guarded conditional updates, short-lived lists, ...).  This module generates
+self-contained *snippets* of such code, with deliberate variety, and then
+*perturbs* them so that a pass precondition is sometimes violated far away (a
+"tail" statement placed at the end of the program, or in a function defined early
+and only called late).
+
+Guarantees (same as epqgen, by construction):
+* Every name a snippet uses starts with `O` followed by a family tag and a
+  program-unique number (epqgen only produces lower-case names), every parameter
+  name is unique in the program (so no `Argument shadows global variable`), and
+  every function only reads globals and its own parameters / locals.
+* Locals are only defined by statement-level `x := e;` in a statement list, block
+  or loop body, or by a for-init; every top-level variable is first assigned in
+  straight-line top-level code (so it is a global that is defined before use).
+* Termination: every loop is counted (literal or clamped bounds), walks a finite
+  acyclic structure (cons lists / trees, built from fresh nodes only, never
+  linked into themselves), or makes strict progress on a bounded index (heap
+  sift).  Recursion depth is bounded by a literal or clamped argument.
+* Cost is small (sizes <= ~40, fib/binomial arguments <= 14).
+* `<<` is only read in straight-line top-level code; each read is immediately
+  clamped into a small range, so any input (also epqgen's huge values) is fine.
+  `reads` counts them.
+* Functions are never printed.  Lists stay acyclic.  Comparisons with `<` only
+  meet int/int or list/list at every position actually reached, unless the
+  snippet is marked `risky`.
+* `risky` snippets may stop the program with a run-time error that depends on
+  the input (division by zero in a pure function, out-of-bounds copy ranges,
+  error-order checks); a program has at most one, placed last.
+
+Constants / globals are checked by the caller (epqgen.generate) on the AST.
+"""
+
+
+class Snip:
+    __slots__ = ("head", "tail", "reads", "risky", "fam", "nglob")
+
+    def __init__(self, fam):
+        self.fam = fam
+        self.head = []
+        self.tail = []
+        self.reads = 0
+        self.risky = False
+        self.nglob = 0
+
+
+FAMILIES = ["rec", "tree", "cons", "pairs", "helpers", "recur", "append", "copy", "idxloop",
+            "ifconv", "litcmp", "reclaim"]
+
+
+class OptGen:
+    def __init__(self, rng, start=0):
+        self.r = rng
+        self.k = start
+
+    # ------------------------------------------------------------------ utils
+    def nm(self, t):
+        self.k += 1
+        return "O%s%d" % (t, self.k)
+
+    def ch(self, p):
+        return self.r.random() < p
+
+    def ri(self, a, b):
+        return self.r.randint(a, b)
+
+    def pick(self, xs):
+        return self.r.choice(xs)
+
+    def read(self, s, lo, hi, tag="n"):
+        """Top-level clamped input read; returns the global's name."""
+        v = self.nm(tag)
+        s.reads += 1
+        s.nglob += 1
+        s.head.append("%s := <<;" % v)
+        s.head.append("(%s > %d) ? %s := %d;" % (v, hi, v, hi))
+        s.head.append("(%s < %d) ? %s := %d;" % (v, lo, v, lo))
+        return v
+
+    def size(self, s, lo, hi):
+        """A size: literal or clamped input."""
+        if self.ch(0.35):
+            return self.read(s, lo, hi)
+        return str(self.ri(lo, hi))
+
+    def iexp(self, vs, d=2):
+        r = self.r
+        if d <= 0 or r.random() < 0.35:
+            if vs and r.random() < 0.75:
+                return r.choice(vs)
+            return str(r.randint(0, 9))
+        op = r.choice(["+", "-", "*", "+", "-"])
+        return "(%s %s %s)" % (self.iexp(vs, d - 1), op, self.iexp(vs, d - 1))
+
+    def mod(self, a, m):
+        """a mod m (m a positive literal), as a - a / m * m (sign follows a)."""
+        return "(%s - %s / %d * %d)" % (a, a, m, m)
+
+    def glob(self, s, t, init):
+        v = self.nm(t)
+        s.nglob += 1
+        s.head.append("%s := %s;" % (v, init))
+        return v
+
+    def fn(self, s, t, params, body):
+        """Defines a global function; params are fresh names given as count or list."""
+        f = self.nm(t)
+        s.nglob += 1
+        s.head.append("%s := (%s) => { %s };" % (f, ", ".join(params), " ".join(body)))
+        return f
+
+    def params(self, n, t="p"):
+        return [self.nm(t) for _ in range(n)]
+
+    # =============================================================== records
+    def f_rec(self):
+        """Fixed-shape heterogeneous records, mutated through aliases."""
+        s = Snip("rec")
+        shape = self.pick(["il", "ip", "ili", "iii"])
+        a, b = self.params(2)
+        if shape == "il":
+            lit = "[%s, [%s]]" % (a, b)
+            l0 = "[%d, [%d]]" % (self.ri(0, 9), self.ri(0, 9))
+            inner = "[%d]" % self.ri(0, 9)
+        elif shape == "ip":
+            lit = "[%s, [%s, %s + 1]]" % (a, b, a)
+            l0 = "[%d, [%d, %d]]" % (self.ri(0, 9), self.ri(0, 9), self.ri(0, 9))
+            inner = "[%d, %d]" % (self.ri(0, 9), self.ri(0, 9))
+        elif shape == "ili":
+            lit = "[%s, [%s, %s], %s * 2]" % (a, b, b, b)
+            l0 = "[%d, [%d, %d], %d]" % (self.ri(0, 9), self.ri(0, 9), self.ri(0, 9), self.ri(0, 9))
+            inner = "[%d, %d]" % (self.ri(0, 9), self.ri(0, 9))
+        else:
+            lit = "[%s, %s, %s + %s]" % (a, b, a, b)
+            l0 = "[%d, %d, %d]" % (self.ri(0, 9), self.ri(0, 9), self.ri(0, 9))
+            inner = None
+        mk = self.fn(s, "mk", [a, b], ["=> %s;" % lit])
+        # a pure helper: either inlinable or recursive (not inlined -> recur CSE)
+        q = self.nm("p")
+        if self.ch(0.5):
+            sq = self.fn(s, "sq", [q], ["=> %s * %s + 1;" % (q, q)])
+        else:
+            sq = self.fn(s, "sq", [q], ["(%s < 1) ? => 0;" % q, "=> %s + %s(%s - 1) + 1;" % (q, "SELF", q)])
+            s.head[-1] = s.head[-1].replace("SELF", sq)
+        r1 = self.glob(s, "r", "%s(%d, %d)" % (mk, self.ri(0, 9), self.ri(0, 9)) if self.ch(0.6) else l0)
+        r2 = self.glob(s, "r", r1)
+        hold = self.glob(s, "hd", "[%s, %s(%d, %d)]" % (r1, mk, self.ri(0, 9), self.ri(0, 9)))
+        rp, vp = self.params(2)
+        setf = self.fn(s, "set", [rp, vp], ["%s[0] := %s;" % (rp, vp), "=> %s;" % vp])
+        bump = self.fn(s, "bmp", [], ["%s[0] := %s[0] + 1;" % (r1, r1), "=> 0;"])
+        fp = self.nm("p")
+        tail1 = "%s[1][0]" % fp if inner else "%s[1]" % fp
+        fs = self.fn(s, "fs", [fp], ["=> %s[0] * 2 + %s;" % (fp, tail1)])
+        K = lambda: str(self.ri(0, 12))
+        stm = [
+            ">> %s(%s[0]) + (%s[0] := %s) + %s(%s[0]);" % (sq, r1, r2, K(), sq, r1),
+            ">> %s[0] + %s(%s, %s) + %s[0];" % (r1, setf, r2, K(), r1),
+            ">> %s[0] + (%s[0][0] := %s) + %s[0];" % (r1, hold, K(), r2),
+            ">> %s(%s[0]) + %s(%s[0], %s) + %s(%s[0]);" % (sq, r2, setf, hold, K(), sq, r2),
+            ">> %s[0] + %s() + %s[0];" % (r2, bump, r2),
+            ">> %s(%s) + (%s[0] := %s) + %s(%s);" % (fs, r1, r2, K(), fs, r2),
+            ">> %s; >> %s;" % (r1, hold),
+            ">> %s = %s; >> %s = %s(%d, %d); >> %s[1] = %s;" % (r1, r2, r1, mk, self.ri(0, 9), self.ri(0, 9), hold, r1),
+            ">> %s < %s(%d, %d); >> %s(%d, %d) < %s;" % (r1, mk, self.ri(0, 9), self.ri(0, 9), mk, self.ri(0, 9),
+                                                    self.ri(0, 9), r2),
+        ]
+        if inner:
+            stm += [
+                "%s[1][0] := %s; >> %s;" % (r2, K(), r1),
+                "%s[1] := %s; >> %s; >> %s[1][0] + %s[1][0];" % (r2, inner, r1, r1, r2),
+                "%s[1] :+ %s; >> %s[1];" % (r1, K(), r2),
+                ">> %s[1][0] + (%s[1][0] := %s) + %s[1][0];" % (r1, r2, K(), r1),
+            ]
+        self.r.shuffle(stm)
+        s.head += stm[:self.ri(3, len(stm))]
+        # list of records, loops, a function over records
+        n = self.size(s, 0, 12)
+        rs = self.glob(s, "rs", "[]")
+        i = self.nm("i")
+        s.head.append("(%s := 0; %s < %s; %s := %s + 1;) @ %s :+ %s(%s, %s * 2);" % (i, i, n, i, i, rs, mk, i, i))
+        acc = self.glob(s, "ac", "0")
+        x = self.nm("x")
+        s.head.append("(%s : %s) @ %s := %s + %s(%s);" % (x, rs, acc, acc, fs, x))
+        if self.ch(0.5):
+            j = self.nm("i")
+            s.head.append("(%s := 0; %s < |%s|; %s := %s + 1;) @ { (%s[%s][0] > 3) ? %s[%s][0] := %s[%s][0] - 1; }"
+                          % (j, j, rs, j, j, rs, j, rs, j, rs, j))
+        s.head.append(">> %s; >> %s;" % (acc, rs))
+        self.rec_violation(s, [r1], inner is not None, mk)
+        return s
+
+    def rec_violation(self, s, names, has_inner, mk):
+        """Sometimes break the record shape far away (in the tail)."""
+        if not self.ch(0.45):
+            return
+        r = names[0]
+        kv = self.read(s, 0, 1, "kv")
+        idf = self.nm("id")
+        pp = self.nm("p")
+        s.nglob += 1
+        s.head.append("%s := (%s) => { => %s; };" % (idf, pp, pp))
+        v = self.pick(["idx", "app", "pop", "each", "dyn", "store", "storeT", "fnapp", "len"])
+        if v == "idx":
+            s.tail.append(">> %s[%s];" % (r, kv))
+        elif v == "app":
+            s.tail.append("%s :+ %d; >> %s;" % (r, self.ri(0, 9), r))
+        elif v == "pop":
+            s.tail.append(">> -%s; >> %s;" % (r, r))
+        elif v == "each":
+            x = self.nm("x")
+            s.tail.append("(%s : %s) @ >> %s;" % (x, r, x))
+        elif v == "dyn":
+            fl = self.glob(s, "fl", "[%s, %s]" % (idf, idf))
+            s.tail.append(">> %s[%s](%s);" % (fl, kv, r))
+        elif v == "store":
+            s.tail.append("%s[%s] := %d; >> %s;" % (r, kv, self.ri(0, 9), r))
+        elif v == "storeT":
+            s.tail.append("%s[0] := [%d]; >> %s;" % (r, self.ri(0, 9), r))
+        elif v == "fnapp":
+            pp2 = self.nm("p")
+            vf = self.fn(s, "vf", [pp2], ["%s :+ %d;" % (pp2, self.ri(0, 9)), "=> |%s|;" % pp2])
+            s.tail.append(">> %s(%s(%d, %d)); >> %s(%s);" % (vf, mk, self.ri(0, 9), self.ri(0, 9), vf, r))
+        else:
+            s.tail.append(">> |%s|; >> %s(%s) = %s;" % (r, idf, r, r))
+
+    # ================================================================== trees
+    def f_tree(self):
+        s = Snip("tree")
+        d, v, t, t2, w = self.params(5)
+        mkT = self.nm("mkT")
+        s.nglob += 1
+        s.head.append("%s := (%s, %s) => { (%s < 1) ? => []; => [%s, %s(%s - 1, %s * 2), %s(%s - 1, %s * 2 + 1)]; };"
+                      % (mkT, d, v, d, v, mkT, d, v, mkT, d, v))
+        sumT = self.nm("sumT")
+        s.nglob += 1
+        s.head.append("%s := (%s) => { (%s = []) ? => 0; => %s[0] + %s(%s[1]) + %s(%s[2]); };"
+                      % (sumT, t, t, t, sumT, t, sumT, t))
+        ins = self.nm("ins")
+        s.nglob += 1
+        s.head.append("%s := (%s, %s) => { (%s = []) ? => [%s, [], []]; (%s < %s[0]) ? %s[1] := %s(%s[1], %s); : "
+                      "%s[2] := %s(%s[2], %s); => %s; };"
+                      % (ins, t2, w, t2, w, w, t2, t2, ins, t2, w, t2, ins, t2, w, t2))
+        T = self.glob(s, "T", "%s(%s, 1)" % (mkT, self.size(s, 0, 4)))
+        n = self.size(s, 0, 14)
+        U = self.glob(s, "U", "[]")
+        i = self.nm("i")
+        m = self.pick([7, 11, 13, 17])
+        s.head.append("(%s := 0; %s < %s; %s := %s + 1;) @ %s := %s(%s, %s);"
+                      % (i, i, n, i, i, U, ins, U, self.mod("(%s * %d + %d)" % (i, self.ri(2, 9), self.ri(0, 9)), m)))
+        s.head.append(">> %s(%s); >> %s(%s); >> %s;" % (sumT, T, sumT, U, U))
+        # iterative walk down a path (nullable record loop)
+        p = self.glob(s, "pw", self.pick([T, U]))
+        c = self.glob(s, "cw", "0")
+        s.head.append("(%s != []) @ { %s := %s + %s[0]; %s := %s[%d]; }" % (p, c, c, p, p, p, self.ri(1, 2)))
+        s.head.append(">> %s;" % c)
+        if self.ch(0.6):
+            dp = self.nm("p")
+            a1, b1 = self.nm("a"), self.nm("b")
+            dep = self.nm("dep")
+            s.nglob += 1
+            s.head.append("%s := (%s) => { (%s = []) ? => 0; %s := %s(%s[1]); %s := %s(%s[2]); (%s > %s) ? => %s + 1; "
+                          "=> %s + 1; };" % (dep, dp, dp, a1, dep, dp, b1, dep, dp, a1, b1, a1, b1))
+            s.head.append(">> %s(%s) + %s(%s);" % (dep, T, dep, U))
+        # mutate through an alias, read back through the other
+        q = self.glob(s, "q", T)
+        s.head.append("(%s != []) ? >> %s[0] + (%s[0] := %d) + %s(%s);" % (T, T, q, self.ri(0, 9), sumT, T))
+        if self.ch(0.5):
+            s.head.append("(%s != []) ? %s[1] := %s(%s[1], %d);" % (U, U, ins, U, self.ri(0, 20)))
+            s.head.append(">> %s = %s; >> %s < %s; >> %s;" % (U, T, T, U, U))
+        if self.ch(0.4):
+            # an outer list of trees
+            fr = self.glob(s, "fr", "[%s, %s, []]" % (T, U))
+            x = self.nm("x")
+            tot = self.glob(s, "tt", "0")
+            s.head.append("(%s : %s) @ %s := %s + %s(%s);" % (x, fr, tot, tot, sumT, x))
+            s.head.append(">> %s;" % tot)
+        if self.ch(0.4):
+            kv = self.read(s, 0, 2, "kv")
+            v2 = self.pick(["idx", "app", "pop", "each", "len"])
+            if v2 == "idx":
+                s.tail.append("(%s != []) ? >> %s[%s];" % (U, U, kv))
+            elif v2 == "app":
+                s.tail.append("%s :+ %d; >> %s;" % (T, self.ri(0, 9), T))
+            elif v2 == "pop":
+                s.tail.append("(%s != []) ? >> -%s;" % (U, U))
+                s.tail.append(">> %s;" % U)
+            elif v2 == "each":
+                x = self.nm("x")
+                s.tail.append("(%s : %s) @ >> %s = [];" % (x, T, x))
+            else:
+                s.tail.append(">> |%s| + |%s|;" % (T, U))
+        return s
+
+    # ============================================================== cons lists
+    def f_cons(self):
+        s = Snip("cons")
+        n = self.size(s, 0, 15)
+        C = self.glob(s, "C", "[]")
+        i = self.nm("i")
+        s.head.append("(%s := 0; %s < %s; %s := %s + 1;) @ %s := [%s, %s];"
+                      % (i, i, n, i, i, C, self.iexp([i], 2), C))
+        c1, c2, acc, c3, r = self.params(5)
+        cs = self.nm("cs")
+        s.nglob += 1
+        s.head.append("%s := (%s) => { (%s = []) ? => 0; => %s[0] + %s(%s[1]); };" % (cs, c1, c1, c1, cs, c1))
+        ca = self.nm("ca")
+        s.nglob += 1
+        s.head.append("%s := (%s, %s) => { (%s = []) ? => %s; => %s(%s[1], %s + %s[0]); };"
+                      % (ca, c2, acc, c2, acc, ca, c2, acc, c2))
+        rev = self.fn(s, "rev", [c3], ["%s := [];" % r, "(%s != []) @ { %s := [%s[0], %s]; %s := %s[1]; }"
+                                       % (c3, r, c3, r, c3, c3), "=> %s;" % r])
+        s.head.append(">> %s; >> %s(%s); >> %s(%s) = %s(%s, 0);" % (C, rev, C, cs, C, ca, C))
+        bn, bi, bc = self.nm("p"), self.nm("i"), self.nm("c")
+        bld = self.fn(s, "bld", [bn], ["%s := [];" % bc, "(%s := 0; %s < %s; %s := %s + 1;) @ %s := [%s * %d, %s];"
+                                      % (bi, bi, bn, bi, bi, bc, bi, self.ri(1, 5), bc), "=> %s;" % bc])
+        D = self.glob(s, "D", "%s(%d)" % (bld, self.ri(0, 8)))
+        E = self.glob(s, "E", D)
+        s.head.append("(%s != []) ? >> %s[0] + (%s[0] := %d) + %s[0];" % (D, D, E, self.ri(0, 9), D))
+        s.head.append(">> %s < %s; >> %s = %s(%s(%s)); >> %s = [];" % (C, D, D, rev, rev, D, C))
+        if self.ch(0.5):
+            # destructive append at the end of a cons list
+            p = self.glob(s, "pw", D)
+            s.head.append("(%s != []) ? { (%s[1] != []) @ %s := %s[1]; %s[1] := [%d, []]; }"
+                          % (p, p, p, p, p, self.ri(0, 9)))
+            s.head.append(">> %s; >> %s(%s, 0);" % (E, ca, E))
+        if self.ch(0.4):
+            v = self.pick(["app", "idx", "each", "pop", "store"])
+            kv = self.read(s, 0, 1, "kv")
+            if v == "app":
+                s.tail.append("%s :+ 1; >> %s;" % (D, D))
+            elif v == "idx":
+                s.tail.append("(%s != []) ? >> %s[%s];" % (C, C, kv))
+            elif v == "each":
+                x = self.nm("x")
+                s.tail.append("(%s : %s) @ >> %s;" % (x, D, x))
+            elif v == "pop":
+                s.tail.append("(%s != []) ? { >> -%s; >> %s; }" % (C, C, C))
+            else:
+                s.tail.append("(%s != []) ? %s[%s] := [%d]; >> %s;" % (C, C, kv, self.ri(0, 9), C))
+        return s
+
+    # =================================================================== pairs
+    def f_pairs(self):
+        s = Snip("pairs")
+        n = self.size(s, 0, 16)
+        P = self.glob(s, "P", "[]")
+        i = self.nm("i")
+        m = self.pick([5, 7, 9, 11])
+        s.head.append("(%s := 0; %s < %s; %s := %s + 1;) @ %s :+ [%s, %s];"
+                      % (i, i, n, i, i, P, self.mod("(%s * %d + %d)" % (i, self.ri(2, 9), self.ri(0, 9)), m),
+                         self.iexp([i], 1)))
+        kind = self.pick(["isort", "heap", "adj", "isort", "heap"])
+        if kind == "isort":
+            a, j, t = self.nm("i"), self.nm("j"), self.nm("t")
+            s.head.append("(%s := 1; %s < |%s|; %s := %s + 1;) @ { %s := %s; (%s > 0 & %s[%s] < %s[%s - 1]) @ "
+                          "{ %s := %s[%s]; %s[%s] := %s[%s - 1]; %s[%s - 1] := %s; %s := %s - 1; } }"
+                          % (a, a, P, a, a, j, a, j, P, j, P, j, t, P, j, P, j, P, j, P, j, t, j, j))
+            s.head.append(">> %s;" % P)
+        elif kind == "heap":
+            h, x, k, p, t = self.params(5)
+            hp = self.fn(s, "hp", [h, x], [
+                "%s :+ %s;" % (h, x), "%s := |%s| - 1;" % (k, h),
+                "(%s > 0 & %s[%s] < %s[(%s - 1) / 2]) @ { %s := (%s - 1) / 2; %s := %s[%s]; %s[%s] := %s[%s]; "
+                "%s[%s] := %s; %s := %s; }" % (k, h, k, h, k, p, k, t, h, k, h, k, h, p, h, p, t, k, p),
+                "=> 0;"])
+            h2, top, last, k2, go, c, t2 = self.params(7)
+            hpop = self.fn(s, "hpop", [h2], [
+                "%s := %s[0];" % (top, h2), "%s := -%s;" % (last, h2),
+                "(|%s| > 0) ? { %s[0] := %s; %s := 0; %s := 1; (%s) @ { %s := 2 * %s + 1; "
+                "(%s + 1 < |%s| & %s[%s + 1] < %s[%s]) ? %s := %s + 1; "
+                "(%s < |%s| & %s[%s] < %s[%s]) ? { %s := %s[%s]; %s[%s] := %s[%s]; %s[%s] := %s; %s := %s; } : %s := 0; } }"
+                % (h2, h2, last, k2, go, go, c, k2, c, h2, h2, c, h2, c, c, c,
+                   c, h2, h2, c, h2, k2, t2, h2, c, h2, c, h2, k2, h2, k2, t2, k2, c, go),
+                "=> %s;" % top])
+            H = self.glob(s, "H", "[]")
+            x2 = self.nm("x")
+            s.head.append("(%s : %s) @ %s(%s, %s);" % (x2, P, hp, H, x2))
+            s.head.append("%s(%s, [%d, %d]);" % (hp, H, self.ri(0, 9), self.ri(0, 9)))
+            s.head.append("(|%s| > 0) @ >> %s(%s);" % (H, hpop, H))
+        else:
+            V = self.ri(2, 6)
+            A = self.glob(s, "A", "[%s]" % ", ".join(["[]"] * V))
+            e, u = self.nm("e"), self.nm("u")
+            s.head.append("(%s : %s) @ %s[%s[0] - %s[0] / %d * %d] :+ [%s[1], %s[0]];" % (e, P, A, e, e, V, V, e, e))
+            tot = self.glob(s, "tt", "0")
+            e2 = self.nm("e")
+            s.head.append("(%s := 0; %s < %d; %s := %s + 1;) @ (%s : %s[%s]) @ %s := %s + %s[0] * %s[1];"
+                          % (u, u, V, u, u, e2, A, u, tot, tot, e2, e2))
+            s.head.append(">> %s; >> %s;" % (tot, A))
+        best = self.glob(s, "bp", "[%d, %d]" % (self.ri(0, 9), self.ri(0, 9)))
+        x3 = self.nm("x")
+        s.head.append("(%s : %s) @ (%s < %s) ? %s := %s;" % (x3, P, x3, best, best, x3))
+        s.head.append(">> %s; >> %s = [%d, %d]; >> %s != [];" % (best, best, self.ri(0, 9), self.ri(0, 9), P))
+        if self.ch(0.45):
+            v = self.pick(["setel", "app", "pop", "each", "dyn"])
+            if v == "setel":
+                s.tail.append("(|%s| > 0) ? %s[0][1] := %d; >> %s;" % (P, P, self.ri(0, 9), P))
+            elif v == "app":
+                s.tail.append("(|%s| > 0) ? %s[0] :+ %d; >> %s;" % (P, P, self.ri(0, 9), P))
+            elif v == "pop":
+                s.tail.append("(|%s| > 0) ? >> -%s[0]; >> %s;" % (P, P, P))
+            elif v == "each":
+                x = self.nm("x")
+                s.tail.append("(%s : %s) @ >> %s;" % (x, best, x))
+            else:
+                pp = self.nm("p")
+                g = self.fn(s, "dg", [pp], ["=> %s[1];" % pp])
+                gl = self.glob(s, "fl", "[%s]" % g)
+                s.tail.append(">> %s[0](%s);" % (gl, best))
+        return s
+
+    # ================================================================ helpers
+    def f_helpers(self):
+        """Small helper functions called in loops (inlining)."""
+        s = Snip("helpers")
+        l, a, b, t = self.params(4)
+        swap = self.fn(s, "sw", [l, a, b], ["%s := %s[%s];" % (t, l, a), "%s[%s] := %s[%s];" % (l, a, l, b),
+                                           "%s[%s] := %s;" % (l, b, t), "=> 0;"])
+        x, y = self.params(2)
+        mn = self.fn(s, "mn", [x, y], ["(%s < %s) ? => %s;" % (x, y, x), "=> %s;" % y])
+        x2, y2 = self.params(2)
+        mx = self.fn(s, "mx", [x2, y2], ["(%s > %s) ? => %s;" % (x2, y2, x2), "=> %s;" % y2])
+        x3, m3 = self.params(2)
+        md = self.fn(s, "md", [x3, m3], ["=> %s - %s / %s * %s;" % (x3, x3, m3, m3)])
+        x4 = self.nm("p")
+        ev = self.fn(s, "ev", [x4], ["=> %s - %s / 2 * 2 = 0;" % (x4, x4)])
+        n = self.size(s, 0, 14)
+        L = self.glob(s, "L", "[]")
+        i = self.nm("i")
+        mm = self.pick([7, 10, 13])
+        s.head.append("(%s := 0; %s < %s; %s := %s + 1;) @ %s :+ %s(%s * %d + %d, %d);"
+                      % (i, i, n, i, i, L, md, i, self.ri(3, 11), self.ri(0, 9), mm))
+        # bubble sort with swap
+        i2, j2 = self.nm("i"), self.nm("j")
+        s.head.append("(%s := 0; %s < |%s|; %s := %s + 1;) @ (%s := 0; %s + 1 < |%s| - %s; %s := %s + 1;) @ "
+                      "(%s[%s] > %s[%s + 1]) ? %s(%s, %s, %s + 1);"
+                      % (i2, i2, L, i2, i2, j2, j2, L, i2, j2, j2, L, j2, L, j2, swap, L, j2, j2))
+        s.head.append(">> %s;" % L)
+        lo = self.glob(s, "lo", "%d" % self.ri(50, 99))
+        hi = self.glob(s, "hi", "-1")
+        ce = self.glob(s, "ce", "0")
+        e = self.nm("e")
+        body = ["%s := %s(%s, %s);" % (lo, mn, lo, e), "%s := %s(%s, %s);" % (hi, mx, hi, e),
+                "(%s(%s)) ? %s := %s + 1;" % (ev, e, ce, ce)]
+        self.r.shuffle(body)
+        s.head.append("(%s : %s) @ { %s }" % (e, L, " ".join(body)))
+        s.head.append(">> [%s, %s, %s];" % (lo, hi, ce))
+        if self.ch(0.5):
+            # helper called in a counted loop with a guarded index
+            i3 = self.nm("i")
+            acc = self.glob(s, "ac", "0")
+            s.head.append("(%s := 0; %s < %d; %s := %s + 1;) @ { (%s < |%s|) ? %s := %s + %s(%s[%s], %s); }"
+                          % (i3, i3, self.ri(3, 20), i3, i3, i3, L, acc, acc, mx, L, i3, i3))
+            s.head.append(">> %s;" % acc)
+        if self.ch(0.3):
+            # impure look-alike helper: prints / reads a changing global
+            gv = self.glob(s, "gv", "%d" % self.ri(0, 5))
+            pp = self.nm("p")
+            imp = self.fn(s, "im", [pp], ["=> %s + %s;" % (pp, gv)])
+            pp2 = self.nm("p")
+            prf = self.fn(s, "pr", [pp2], [">> %s;" % pp2, "=> %s * 2;" % pp2])
+            s.head.append(">> %s(1) + (%s := %s + 1) + %s(1);" % (imp, gv, gv, imp))
+            s.head.append(">> %s(%d) + %s(%d);" % (prf, self.ri(0, 9), prf, self.ri(0, 9)))
+        return s
+
+    # ================================================================== recur
+    def f_recur(self):
+        s = Snip("recur")
+        kinds = self.r.sample(["fib", "binom", "gcd", "acc", "swapt", "impure", "fail", "cnt", "fibl"],
+                              self.ri(2, 4))
+        for kd in kinds:
+            if kd == "fib":
+                n = self.nm("p")
+                f = self.nm("fib")
+                s.nglob += 1
+                s.head.append("%s := (%s) => { (%s < 2) ? => %s; => %s(%s - 1) + %s(%s - 2); };"
+                              % (f, n, n, n, f, n, f, n))
+                arg = self.size(s, -2, 14)
+                s.head.append(">> %s(%s); >> %s(%d) * 2 + %s(%d);" % (f, arg, f, self.ri(0, 12), f, self.ri(0, 12)))
+            elif kd == "fibl":
+                # fib in a loop over a list (pure-call CSE across iterations)
+                n = self.nm("p")
+                f = self.nm("fib")
+                s.nglob += 1
+                s.head.append("%s := (%s) => { (%s < 2) ? => 1; => %s(%s - 1) + %s(%s - 2) + 1; };"
+                              % (f, n, n, f, n, f, n))
+                i = self.nm("i")
+                ac = self.glob(s, "ac", "[]")
+                s.head.append("(%s := 0; %s < %d; %s := %s + 1;) @ %s :+ %s(%s) - %s(%s - 1);"
+                              % (i, i, self.ri(1, 12), i, i, ac, f, i, f, i))
+                s.head.append(">> %s;" % ac)
+            elif kd == "binom":
+                n, k = self.params(2)
+                f = self.nm("bin")
+                s.nglob += 1
+                s.head.append("%s := (%s, %s) => { (%s = 0 | %s = %s) ? => 1; => %s(%s - 1, %s - 1) + %s(%s - 1, %s); };"
+                              % (f, n, k, k, k, n, f, n, k, f, n, k))
+                nn = self.ri(0, 12)
+                s.head.append(">> %s(%d, %d);" % (f, nn, self.ri(0, nn)))
+            elif kd == "gcd":
+                a, b = self.params(2)
+                f = self.nm("gcd")
+                s.nglob += 1
+                s.head.append("%s := (%s, %s) => { (%s = 0) ? => %s; => %s(%s, %s - %s / %s * %s); };"
+                              % (f, a, b, b, a, f, b, a, a, b, b))
+                s.head.append(">> %s(%d, %d) + %s(%s, %d);" % (f, self.ri(0, 999), self.ri(0, 999), f,
+                                                              self.size(s, 0, 99), self.ri(1, 99)))
+            elif kd == "acc":
+                n, ac = self.params(2)
+                f = self.nm("sum")
+                s.nglob += 1
+                s.head.append("%s := (%s, %s) => { (%s < 1) ? => %s; => %s(%s - 1, %s + %s * %s); };"
+                              % (f, n, ac, n, ac, f, n, ac, n, n))
+                s.head.append(">> %s(%s, 0);" % (f, self.size(s, -3, 3000) if self.ch(0.3) else str(self.ri(0, 5000))))
+            elif kd == "swapt":
+                a, b, n = self.params(3)
+                f = self.nm("swt")
+                s.nglob += 1
+                s.head.append("%s := (%s, %s, %s) => { (%s < 1) ? => %s * 100 + %s; => %s(%s, %s %s %s, %s - 1); };"
+                              % (f, a, b, n, n, a, b, f, b, a, self.pick(["+", "-", "*"]), b, n)
+                              if self.ch(0.6) else
+                              "%s := (%s, %s, %s) => { (%s < 1) ? => %s * 100 + %s; => %s(%s, %s, %s - 1); };"
+                              % (f, a, b, n, n, a, b, f, b, a, n))
+                s.head.append(">> %s(%d, %d, %s);" % (f, self.ri(0, 9), self.ri(0, 9), self.size(s, -1, 30)))
+            elif kd == "impure":
+                gv = self.glob(s, "gv", "%d" % self.ri(0, 3))
+                n = self.nm("p")
+                f = self.nm("imp")
+                s.nglob += 1
+                s.head.append("%s := (%s) => { (%s < 2) ? => %s + %s; => %s(%s - 1) + %s(%s - 2); };"
+                              % (f, n, n, n, gv, f, n, f, n))
+                st, gf = self.params(2)
+                setg = self.fn(s, "sg", [st], ["%s := %s;" % (gv, st), "=> 0;"])
+                a = self.ri(0, 10)
+                s.head.append(">> %s(%d) + %s(%d) + %s(%d);" % (f, a, setg, self.ri(0, 9), f, a))
+                s.head.append(">> %s(%d) + (%s := %s + 1) + %s(%d);" % (f, a, gv, gv, f, a))
+                if self.ch(0.5):
+                    pr = self.nm("pr")
+                    q = self.nm("p")
+                    s.nglob += 1
+                    s.head.append("%s := (%s) => { (%s < 1) ? { >> %s; => 0; } => %s(%s - 1) + %s(%s - 1) + 1; };"
+                                  % (pr, q, q, q, pr, q, pr, q))
+                    s.head.append(">> %s(%d);" % (pr, self.ri(0, 4)))
+            elif kd == "fail":
+                n = self.nm("p")
+                f = self.nm("fl")
+                s.nglob += 1
+                off = self.ri(2, 4)
+                s.head.append("%s := (%s) => { (%s < 1) ? => %d / (%s + %d); => %s(%s - 1) + %s(%s - 2); };"
+                              % (f, n, n, self.ri(10, 99), n, off, f, n, f, n))
+                arg = self.size(s, -off - 1, 10) if self.ch(0.5) else str(self.ri(-off + 1, 10))
+                # arg = -off -> division by zero; base cases reach n-1 >= -1
+                s.head.append(">> %s(%s) + %s(%s);" % (f, arg, f, arg))
+            else:
+                # tail-recursive counting loop through two parameters, and a list accumulator
+                l, n = self.params(2)
+                f = self.nm("cnt")
+                s.nglob += 1
+                s.head.append("%s := (%s, %s) => { (%s < 1) ? => %s; %s :+ %s; => %s(%s, %s - 1); };"
+                              % (f, l, n, n, l, l, n, f, l, n))
+                s.head.append(">> %s([], %s);" % (f, self.size(s, -1, 20)))
+        if "fail" in kinds:
+            s.risky = True
+        return s
+
+    # ================================================================= append
+    def f_append(self):
+        s = Snip("append")
+        a = self.size(s, -2, 6)
+        b = self.size(s, 0, 25)
+        st = self.ri(1, 3)
+        L = self.glob(s, "L", self.pick(["[]", "[%d]" % self.ri(0, 9)]))
+        M = self.glob(s, "M", "[]")
+        i = self.nm("i")
+        cmp_ = self.pick(["<", "<=", "<"])
+        body = ["%s :+ %s;" % (L, self.iexp([i], 1))]
+        if self.ch(0.5):
+            body.append("%s :+ %s;" % (M, self.iexp([i], 1)))
+        if self.ch(0.3):
+            body.append("%s :+ -%s;" % (L, i))
+        if self.ch(0.2):
+            body.append("(%s = %s) ? %s :+ %d;" % (i, a, M, self.ri(0, 9)))
+        s.head.append("(%s := %s; %s %s %s; %s := %s + %d;) @ { %s }" % (i, a, i, cmp_, b, i, i, st, " ".join(body)))
+        s.head.append(">> %s; >> |%s|;" % (L, M))
+        # in a function, bounds from parameters
+        pn, pl, pi = self.nm("p"), self.nm("l"), self.nm("i")
+        f = self.fn(s, "ga", [pn], ["%s := [];" % pl, "(%s := 0; %s < %s; %s := %s + 1;) @ { %s :+ %s * %s; %s }"
+                                     % (pi, pi, pn, pi, pi, pl, pi, pi,
+                                        "(%s = %d) ? => %s;" % (pi, self.ri(0, 20), pl) if self.ch(0.3) else ""),
+                                     "=> %s;" % pl])
+        s.head.append(">> %s(%s); >> |%s(%d)|;" % (f, self.size(s, -3, 20), f, self.ri(0, 40)))
+        if self.ch(0.5):
+            # merge-shaped while loops
+            pa, pb, mi, mj, mo = self.params(5)
+            mg = self.fn(s, "mg", [pa, pb], [
+                "%s := 0; %s := 0; %s := [];" % (mi, mj, mo),
+                "(%s < |%s| & %s < |%s|) @ { (%s[%s] < %s[%s]) ? { %s :+ %s[%s]; %s := %s + 1; } : "
+                "{ %s :+ %s[%s]; %s := %s + 1; } }" % (mi, pa, mj, pb, pa, mi, pb, mj, mo, pa, mi, mi, mi,
+                                                      mo, pb, mj, mj, mj),
+                "(%s < |%s|) @ { %s :+ %s[%s]; %s := %s + 1; }" % (mi, pa, mo, pa, mi, mi, mi),
+                "(%s < |%s|) @ { %s :+ %s[%s]; %s := %s + 1; }" % (mj, pb, mo, pb, mj, mj, mj),
+                "=> %s;" % mo])
+            s.head.append(">> %s(%s, %s);" % (mg, "[1, 4, 9]" if self.ch(0.5) else L, self.pick(["[]", M, L, "[2, 3]"])))
+            s.head.append(">> %s(%s, %s);" % (mg, M, M))
+        if self.ch(0.4):
+            # for-each that appends to another list, several times per iteration
+            x = self.nm("x")
+            N = self.glob(s, "N", "[]")
+            s.head.append("(%s : %s) @ { %s :+ %s; %s :+ [%s]; }" % (x, L, N, x, N, x))
+            s.head.append(">> %s;" % N)
+        if self.ch(0.3):
+            # while-loop with counter used afterwards
+            j = self.glob(s, "j", "0")
+            s.head.append("(%s < %d) @ { %s :+ %s; %s := %s + 1; }" % (j, self.ri(0, 12), M, j, j, j))
+            s.head.append(">> %s; >> %s;" % (j, M))
+        return s
+
+    def f_copy(self):
+        """Copy loops L :+ M[i] with various ranges, aliasing and loop-variable use.
+        Lengths are tracked statically so that a bound re-evaluated from a list that the
+        loop appends to (L aliasing M) is never used: such loops use literal bounds."""
+        s = Snip("copy")
+        mlen = self.ri(0, 10)
+        M = self.glob(s, "M", "[%s]" % ", ".join(str(self.ri(0, 99)) for _ in range(mlen)))
+        alias = self.ch(0.3)
+        if alias:
+            L = self.glob(s, "L", M)
+            llen = None
+        else:
+            llen = self.ri(0, 1)
+            L = self.glob(s, "L", "[]" if llen == 0 else "[%d]" % self.ri(0, 9))
+        lens = {M: mlen}
+
+        def ln(x):
+            return lens[M] if (x == M or alias) else llen
+
+        for _ in range(self.ri(1, 3)):
+            mode = self.pick(["in", "in", "empty", "rev", "oob", "while", "after", "fn", "inp"])
+            src = self.pick([M, M, L])
+            n = ln(src)
+            same = alias or src == L
+            lo = self.ri(0, n)
+            hi = self.ri(lo, n)
+            los, his = str(lo), str(hi)
+            if not same and self.ch(0.4):
+                k = n - hi
+                his = "|%s|" % src if k == 0 else "|%s| - %d" % (src, k)
+            cnt = hi - lo
+            if mode == "empty":
+                los, his = str(self.ri(3, 9)), str(self.ri(-2, 3))
+                cnt = max(0, int(his) - int(los))
+            elif mode == "oob":
+                s.risky = True
+                if self.ch(0.5):
+                    los = self.size(s, -2, 2)
+                    cnt = 0
+                else:
+                    his = str(n + self.ri(1, 3))
+                    cnt = 0
+            elif mode == "inp":
+                his = self.size(s, 0, n)
+                if los != "0" and int(los) > 0:
+                    los = "0"
+                cnt = 0
+            if mode == "rev":
+                i = self.nm("i")
+                s.head.append("(%s := %d; %s >= %d; %s := %s - 1;) @ %s :+ %s[%s];" % (i, n - 1, i, lo, i, i, L, src, i))
+                cnt = max(0, n - lo)
+            elif mode == "while":
+                j = self.glob(s, "j", los)
+                s.head.append("(%s < %s) @ { %s :+ %s[%s]; %s := %s + 1; }" % (j, his, L, src, j, j, j))
+                s.head.append(">> %s;" % j)
+            elif mode == "after":
+                q = self.glob(s, "q", "0")
+                s.head.append("(%s := %s; %s < %s; %s := %s + 1;) @ { %s :+ %s[%s]; }" % (q, los, q, his, q, q, L, src, q))
+                s.head.append(">> %s;" % q)
+            elif mode == "fn":
+                pd, ps, pa, pb, pi = self.params(5)
+                f = self.fn(s, "cp", [pd, ps, pa, pb], ["(%s := %s; %s < %s; %s := %s + 1;) @ %s :+ %s[%s];"
+                                                        % (pi, pa, pi, pb, pi, pi, pd, ps, pi), "=> %s;" % pd])
+                d = self.pick(["[]", L])
+                s.head.append(">> %s(%s, %s, %s, %s);" % (f, d, src, los, his))
+                if d == "[]":
+                    cnt = 0
+            else:
+                i = self.nm("i")
+                s.head.append("(%s := %s; %s < %s; %s := %s + 1;) @ %s :+ %s[%s];" % (i, los, i, his, i, i, L, src, i))
+            # length bookkeeping (unknown counts make later bounds use the smaller known value)
+            if alias:
+                lens[M] += cnt
+            else:
+                llen += cnt
+            s.head.append(">> %s;" % L)
+        s.head.append(">> %s; >> |%s| + |%s|;" % (M, L, M))
+        return s
+
+    # =========================================================== indexed loops
+    def f_idxloop(self):
+        s = Snip("idxloop")
+        n = self.ri(1, 12)
+        L = self.glob(s, "L", "[%s]" % ", ".join(str(self.ri(0, 30)) for _ in range(n)))
+        A = self.glob(s, "A", L)
+        sm = self.glob(s, "sm", "0")
+        pl = self.nm("p")
+        grow = self.fn(s, "gr", [pl], ["(|%s| < %d) ? %s :+ %d;" % (pl, self.ri(n, n + 10), pl, self.ri(0, 9)),
+                                      "=> 0;"])
+        pl2 = self.nm("p")
+        shr = self.fn(s, "sh", [pl2], ["(|%s| > %d) ? => -%s;" % (pl2, self.ri(0, 3), pl2), "=> 0;"])
+        i = self.nm("i")
+        muts = [
+            "(%s = %d) ? %s :+ %d;" % (i, self.ri(0, 5), A, self.ri(0, 9)),
+            "(%s = %d) ? %s(%s);" % (i, self.ri(0, 5), grow, A),
+            "(%s = %d) ? %s := %s + %s(%s);" % (i, self.ri(0, 5), sm, sm, shr, A),
+            "(%s = %d & |%s| > 1) ? -%s;" % (i, self.ri(0, 5), A, A),
+            "(%s = %d) ? %s := [%d, %d, %d];" % (i, self.ri(0, 5), L, self.ri(0, 9), self.ri(0, 9), self.ri(0, 9)),
+            "%s(%s);" % (grow, L),
+            "(%s + 1 < |%s| & %s < |%s|) ? %s[%s + 1] := %s[%s] + 1;" % (i, A, i, L, A, i, L, i),
+        ]
+        body = self.r.sample(muts, self.ri(0, 2))
+        self.r.shuffle(body)
+        body.insert(0, "%s := %s + %s[%s];" % (sm, sm, L, i))
+        bound = self.pick(["|%s|" % L, "|%s|" % A])
+        s.head.append("(%s := 0; %s < %s & %s < 40; %s := %s + 1;) @ { (%s < |%s|) ? { %s } }"
+                      % (i, i, bound, i, i, i, i, L, " ".join(body)))
+        s.head.append(">> %s; >> %s; >> %s;" % (sm, L, A))
+        # a second indexed loop with cached header candidates (reads only + stores in place)
+        j = self.nm("i")
+        s.head.append("(%s := 0; %s < |%s|; %s := %s + 1;) @ { %s[%s] := %s[%s] * 2 - %s; }"
+                      % (j, j, A, j, j, A, j, A, j, j))
+        s.head.append(">> %s;" % A)
+        if self.ch(0.35):
+            # error-order: index / stored value with side effects
+            s.risky = True
+            cnt = self.glob(s, "cn", "0")
+            inc = self.fn(s, "inc", [], ["%s := %s + 1;" % (cnt, cnt), "=> %s;" % cnt])
+            pp = self.nm("p")
+            pop = self.fn(s, "pp", [pp], ["=> -%s;" % pp])
+            k = self.nm("i")
+            form = self.pick([
+                "%s := %s + %s[%s()];" % (sm, sm, A, inc),
+                "%s[%s] := %s(%s);" % (A, k, pop, A),
+                "%s[%s()] := %s[%s];" % (A, inc, A, k),
+                "%s := %s + %s[%s] / (%s - %s);" % (sm, sm, A, k, k, self.ri(0, 4)),
+            ])
+            s.head.append("(%s := 0; %s < %d; %s := %s + 1;) @ { %s }" % (k, k, self.ri(1, 14), k, k, form))
+            s.head.append(">> %s; >> %s;" % (A, sm))
+        return s
+
+    # ================================================================= ifconv
+    def f_ifconv(self):
+        s = Snip("ifconv")
+        n = self.ri(0, 14)
+        L = self.glob(s, "L", "[%s]" % ", ".join(str(self.ri(-20, 40)) for _ in range(n)))
+        mn = self.glob(s, "mn", "%d" % self.ri(0, 50))
+        mx = self.glob(s, "mx", "-1")
+        mi = self.glob(s, "mi", "-1")
+        c = self.glob(s, "c", "0")
+        q = self.glob(s, "q", "0")
+        i = self.nm("i")
+        e = "%s[%s]" % (L, i)
+        opts = [
+            "(%s < %s) ? %s := %s;" % (e, mn, mn, e),
+            "(%s > %s) ? { %s := %s; %s := %s; }" % (e, mx, mx, e, mi, i),
+            "(%s - %s / 2 * 2 = 0) ? %s := %s + 1;" % (e, e, c, c),
+            "(%s != 0) ? %s := %s + 100 / %s;" % (e, q, q, e),
+            "(%s + 1 < |%s|) ? %s := %s + %s[%s + 1];" % (i, L, q, q, L, i),
+            "(%s > %s) ? %s := %s - 1; : %s := %s + 2;" % (e, self.ri(0, 20), c, c, c, c),
+            "(%s & %s > 3) ? %s := %s * 2;" % (i, e, q, q),
+            "(%s | %s = 7) ? %s := %s + %s;" % (e, i, c, c, i),
+            "(%s < %s - 1 & %s[%s + 1] < %s) ? %s := %s + 1;" % (i, "|%s|" % L, L, i, e, c, c),
+        ]
+        body = self.r.sample(opts, self.ri(2, 5))
+        s.head.append("(%s := 0; %s < |%s|; %s := %s + 1;) @ { %s }" % (i, i, L, i, i, " ".join(body)))
+        s.head.append(">> [%s, %s, %s, %s, %s];" % (mn, mx, mi, c, q))
+        # heap child selection with guarded index inside a function
+        h, k, ch, go, t = self.params(5)
+        sift = self.fn(s, "sd", [h, k], [
+            "%s := 1;" % go,
+            "(%s) @ { %s := 2 * %s + 1; (%s + 1 < |%s| & %s[%s + 1] %s %s[%s]) ? %s := %s + 1; "
+            "(%s < |%s| & %s[%s] %s %s[%s]) ? { %s := %s[%s]; %s[%s] := %s[%s]; %s[%s] := %s; %s := %s; } : %s := 0; }"
+            % (go, ch, k, ch, h, h, ch, "<", h, ch, ch, ch, ch, h, h, ch, "<", h, k, t, h, ch, h, ch, h, k,
+               h, k, t, k, ch, go),
+            "=> %s;" % h])
+        H = self.glob(s, "H", "[%s]" % ", ".join(str(self.ri(0, 30)) for _ in range(self.ri(0, 9))))
+        j = self.nm("i")
+        s.head.append("(%s := |%s| / 2; %s >= 0; %s := %s - 1;) @ %s(%s, %s);" % (j, H, j, j, j, sift, H, j))
+        s.head.append(">> %s;" % H)
+        if self.ch(0.5):
+            # select in a function returning min/abs-like values
+            a, b, r = self.params(3)
+            f = self.fn(s, "sel", [a, b], ["%s := %s;" % (r, a), "(%s < %s) ? %s := %s;" % (b, a, r, b),
+                                          "(%s < 0) ? %s := -%s;" % (r, r, r), "=> %s;" % r])
+            k2 = self.nm("i")
+            ac = self.glob(s, "ac", "0")
+            s.head.append("(%s := 0; %s < %d; %s := %s + 1;) @ %s := %s + %s(%s - %d, %d - %s);"
+                          % (k2, k2, self.ri(1, 15), k2, k2, ac, ac, f, k2, self.ri(0, 9), self.ri(0, 9), k2))
+            s.head.append(">> %s;" % ac)
+        return s
+
+    # ================================================================= litcmp
+    def f_litcmp(self):
+        s = Snip("litcmp")
+        kv = self.read(s, 0, 6, "kv")
+        idf = self.nm("id")
+        pp = self.nm("p")
+        s.nglob += 1
+        s.head.append("%s := (%s) => { => %s; };" % (idf, pp, pp))
+        vals = [
+            ("int", "%d" % self.ri(0, 3)),
+            ("list", "[]"),
+            ("list", "[%d]" % self.ri(0, 2)),
+            ("list", "[%d, %d]" % (self.ri(0, 2), self.ri(0, 2))),
+            ("nlist", "[[], %d]" % self.ri(0, 2)),
+            ("nlist", "[[%d]]" % self.ri(0, 2)),
+        ]
+        names = []
+        for kind, init in self.r.sample(vals, self.ri(2, 5)):
+            v = self.glob(s, "v", init)
+            names.append((v, kind))
+        # a dynamic value: int or list depending on the input
+        dv = self.glob(s, "dv", "[%d]" % self.ri(0, 2))
+        s.head.append("(%s > %d) ? %s := %d;" % (kv, self.ri(0, 5), dv, self.ri(0, 2)))
+        s.head.append("(%s = %d) ? %s := [];" % (kv, self.ri(0, 6), dv))
+        names.append((dv, "dyn"))
+        fv = self.glob(s, "fv", idf)
+        names.append((fv, "fn"))
+        lits_eq = ["[]", "[0]", "[1]", "[0, 1]", "[1, 0]", "0", "1", "[[]]", "[[], 1]"]
+        lits_lt = ["[]", "[0]", "[1]", "[0, 1]", "[2]"]
+        out = []
+        for v, kind in names:
+            for _ in range(self.ri(1, 3)):
+                op = self.pick(["=", "!=", "=", "!="])
+                l = self.pick(lits_eq)
+                out.append("%s %s %s" % (v, op, l) if self.ch(0.6) else "%s %s %s" % (l, op, v))
+            if kind in ("list", "nlist") and self.ch(0.7):
+                l = self.pick(lits_lt) if kind == "list" else "[]"
+                out.append(self.pick(["%s < %s" % (v, l), "%s < %s" % (l, v), "%s >= %s" % (v, l), "%s > %s" % (l, v)]))
+        self.r.shuffle(out)
+        s.head.append(">> [%s];" % ", ".join(out[:12]))
+        # in a loop over a heterogeneous list and through a function parameter
+        hl = self.glob(s, "hl", "[%s]" % ", ".join(n for n, k in names if k != "fn"))
+        x = self.nm("x")
+        c = self.glob(s, "c", "0")
+        s.head.append("(%s : %s) @ { (%s = []) ? %s := %s + 1; (%s != [%d]) ? %s := %s + 10; }"
+                      % (x, hl, x, c, c, x, self.ri(0, 2), c, c))
+        s.head.append(">> %s;" % c)
+        pq = self.nm("p")
+        isn = self.fn(s, "isn", [pq], ["=> %s = [];" % pq])
+        s.head.append(">> [%s];" % ", ".join("%s(%s)" % (isn, n) for n, k in names))
+        if self.ch(0.3):
+            s.risky = True
+            v, k = self.pick(names)
+            s.head.append(">> %s < [%d];" % (v, self.ri(0, 2)))
+        return s
+
+    # ================================================================ reclaim
+    def f_reclaim(self):
+        s = Snip("reclaim")
+        keep = self.glob(s, "kp", "[]")
+        idf = self.nm("id")
+        pp = self.nm("p")
+        s.nglob += 1
+        s.head.append("%s := (%s) => { => %s; };" % (idf, pp, pp))
+        pa, pb, pc = self.params(3)
+        pick = self.fn(s, "pk", [pa, pb, pc], ["(%s) ? => %s;" % (pc, pa), "=> %s;" % pb])
+        fns = []
+        for _ in range(self.ri(2, 4)):
+            n, t, u, i, w, dp, w2 = self.params(7)
+            f = self.nm("rf")
+            body = ["%s := [%s, %s + 1, %s * 2];" % (t, n, n, n), "%s := [];" % u,
+                    "(%s := 0; %s < %d; %s := %s + 1;) @ %s :+ %s[%s] * 2;" % (i, i, 3, i, i, u, t, i)]
+            if self.ch(0.7):
+                # make the function big enough not to be inlined (> 40 TIR nodes)
+                v, j, sm = self.params(3)
+                body += ["%s := [];" % v, "%s := 0;" % sm,
+                         "(%s := 0; %s < %s + %d; %s := %s + 1;) @ { %s :+ [%s, %s * %s]; %s := %s + %s[%s - %s / 3 * 3]; }"
+                         % (j, j, "|%s|" % u, self.ri(0, 4), j, j, v, j, j, j, sm, sm, t, j, j),
+                         "(%s > %d) ? %s[0] := %s + %s[|%s| - 1][1];" % (sm, self.ri(0, 30), t, sm, v, v)
+                         if self.ch(0.5) else "%s := %s + |%s|;" % (sm, sm, v)]
+            ret = self.pick(["int", "int", "t", "u", "alias", "store", "storeel", "idret", "pick", "nested"])
+            # self-recursion through a depth parameter: never inlined, so reclaim sees it
+            if ret in ("int", "store", "storeel"):
+                body.append("(%s > 0) ? %s[0] := %s[0] + %s(%s + 1, %s - 1);" % (dp, u, u, f, n, dp))
+            else:
+                body.append("(%s > 0) ? { %s := %s(%s + 1, %s - 1); %s := %s + |%s|; }" % (dp, w2, f, n, dp, n, n, w2))
+            if ret == "int":
+                body.append("=> %s[0] + %s[2] + |%s|;" % (u, u, t))
+            elif ret == "t":
+                body.append("=> %s;" % t)
+            elif ret == "u":
+                body.append("=> %s;" % u)
+            elif ret == "alias":
+                body += ["%s := %s;" % (w, t), "=> %s;" % w]
+            elif ret == "store":
+                body += ["%s :+ %s;" % (keep, u), "=> |%s|;" % u]
+            elif ret == "storeel":
+                body += ["%s := [%s, 1];" % (w, t), "%s :+ %s;" % (keep, w), "=> 0;"]
+            elif ret == "idret":
+                body.append("=> %s(%s);" % (idf, self.pick([t, u])))
+            elif ret == "pick":
+                body.append("=> %s(%s, %s, %s - %s / 2 * 2);" % (pick, t, u, n, n))
+            else:
+                body += ["%s := [%s, [%s]];" % (w, t, n), "=> %s[%d];" % (w, self.ri(0, 1))]
+            s.nglob += 1
+            s.head.append("%s := (%s, %s) => { %s };" % (f, n, dp, " ".join(body)))
+            fns.append((f, ret))
+        # a driver function calling the helpers (frees happen in non-main functions)
+        dn, di, ds, dt = self.params(4)
+        dbody = ["%s := 0;" % ds, "%s := [%s, %s];" % (dt, dn, dn)]
+        lp = []
+        for f, ret in fns:
+            if ret in ("int", "store", "storeel"):
+                lp.append("%s := %s + %s(%s, %d);" % (ds, ds, f, di, self.ri(0, 2)))
+            else:
+                lp.append("%s := %s + |%s(%s, %d)|;" % (ds, ds, f, di, self.ri(0, 2)))
+        dbody.append("(%s := 0; %s < %s; %s := %s + 1;) @ { %s }" % (di, di, dn, di, di, " ".join(lp)))
+        dbody.append("(%s > 0) ? %s := %s + DRV(%s - 1);" % (dn, ds, ds, dn))
+        dbody.append("=> %s + %s[1];" % (ds, dt))
+        drv = self.fn(s, "drv", [dn], dbody)
+        s.head[-1] = s.head[-1].replace("DRV", drv)
+        s.head.append(">> %s(%d); >> %s(%s);" % (drv, self.ri(0, 5), drv, self.size(s, 0, 6)))
+        res = []
+        for f, ret in fns:
+            r = self.glob(s, "rr", "%s(%d, %d)" % (f, self.ri(0, 9), self.ri(0, 3)))
+            junk = self.glob(s, "jk", "[%d, %d]" % (self.ri(0, 99), self.ri(0, 99)))
+            res.append(r)
+            i = self.nm("i")
+            acc = self.glob(s, "ac", "0")
+            s.head.append("(%s := 0; %s < %d; %s := %s + 1;) @ { %s := %s + |[%s]|; %s := [%s, %s]; }"
+                          % (i, i, self.ri(1, 8), i, i, acc, acc, i, junk, i, i) if ret == "int" else
+                          "(%s := 0; %s < %d; %s := %s + 1;) @ %s := [%s(%s, %d)];" % (i, i, self.ri(1, 6), i, i, junk, f, i,
+                                                                                self.ri(0, 2)))
+            s.head.append(">> %s; >> %s;" % (r, junk))
+        s.head.append(">> [%s]; >> %s;" % (", ".join(res), keep))
+        if self.ch(0.5):
+            # a list that is returned through two levels and then mutated
+            g = self.fn(s, "rg", [], ["=> %s(%d, %d);" % (fns[0][0], self.ri(0, 9), self.ri(0, 3))])
+            r2 = self.glob(s, "rr", "%s()" % g)
+            self.glob(s, "z", "[9, 9, 9]")
+            s.head.append(">> %s;" % r2)
+            s.tail.append(">> %s; >> %s;" % (r2, keep))
+        return s
+
+    # ================================================================ program
+    def snippet(self, fam=None):
+        fam = fam or self.pick(FAMILIES)
+        return getattr(self, "f_" + fam)()
+
+
+def program(rng, n_lo=4, n_hi=7, risky_p=0.25):
+    """A whole `opt` program: (list of snippets in order).  At most one risky snippet, last."""
+    g = OptGen(rng)
+    snips = []
+    risky = None
+    fams = list(FAMILIES)
+    rng.shuffle(fams)
+    want = rng.randint(n_lo, n_hi)
+    allow_risky = rng.random() < risky_p
+    tries = 0
+    while len(snips) < want and tries < 40:
+        s = g.snippet(fams[tries % len(fams)] if rng.random() < 0.7 else None)
+        tries += 1
+        if s.risky:
+            if allow_risky and risky is None:
+                risky = s
+            continue
+        snips.append(s)
+    return snips, risky, g
+
+
+def assemble(snips, risky, rng):
+    """Head of every snippet in order, then the tails (shuffled), then the risky snippet."""
+    lines = []
+    for s in snips:
+        lines += s.head
+    tails = [t for s in snips for t in s.tail]
+    rng.shuffle(tails)
+    lines += tails
+    if risky is not None:
+        lines += risky.head + risky.tail
+    return "\n".join(lines) + "\n"

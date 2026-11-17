@@ -683,7 +683,7 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--count", type=int, default=1000)
-    ap.add_argument("--profile", default="any", choices=["clean", "mixed", "nasty", "any"])
+    ap.add_argument("--profile", default="any", choices=["clean", "mixed", "nasty", "opt", "any"])
     ap.add_argument("--engine", action="append", default=[], metavar="NAME=CMD")
     ap.add_argument("--pyref", action="store_true", help="also compare pyref (in-process) against the baseline")
     ap.add_argument("--jobs", "-j", type=int, default=epqlib.jobs_default())
