@@ -16,6 +16,7 @@
 
 #include "backend.hpp"
 #include "frontend.hpp"
+#include "tir.hpp"
 
 using namespace epq;
 
@@ -31,6 +32,10 @@ void usage(FILE* f, const char* argv0) {
                  "  --dump-types       print inferred types of globals / instances and exit\n"
                  "  --no-pass=NAME     disable a TIR pass or build step (fold, definite-assignment,\n"
                  "                     demote-globals, constants)\n"
+                 "  --only-pass=A,B    run only these optimisation passes (see --list-passes)\n"
+                 "  --verify-tir       check the TIR after construction and every pass (env EPQ_VERIFY_TIR=1)\n"
+                 "  --dump-tir-after=P print the TIR after pass P and exit\n"
+                 "  --list-passes      list the TIR passes in pipeline order\n"
                  "  --mono             one instance per function (no call-site specialisation)\n"
                  "  --no-dedup         keep identical instances separate\n"
                  "  --verbose          compile / cache diagnostics on stderr\n"
@@ -139,6 +144,18 @@ int main(int argc, char** argv) {
             opts.verbose = true;
         } else if (!std::strncmp(a, "--no-pass=", 10)) {
             opts.no_pass.push_back(a + 10);
+        } else if (!std::strncmp(a, "--only-pass=", 12)) {
+            opts.only_pass.push_back(a + 12);
+        } else if (!std::strcmp(a, "--verify-tir")) {
+            opts.verify_tir = true;
+        } else if (!std::strncmp(a, "--dump-tir-after=", 17)) {
+            opts.dump_tir_after = a + 17;
+        } else if (!std::strcmp(a, "--list-passes")) {
+            for (const auto& p : epq::tir::passes())
+                std::printf("%-20s %s%s\n", p.name, p.what, epq::tir::pass_is_optimisation(p.name) ? "" : "  [infrastructure]");
+            return 0;
+        } else if (!std::strncmp(a, "--tir-selftest=", 15)) {
+            return epq::tir_selftest(a + 15, opts);
         } else if (!std::strcmp(a, "--engine=jit") || !std::strcmp(a, "--jit")) {
             opts.engine = Engine::Jit;
         } else if (!std::strcmp(a, "--engine=aot") || !std::strcmp(a, "--aot")) {

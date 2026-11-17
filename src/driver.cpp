@@ -113,6 +113,8 @@ std::string compile_cached(const std::string& csrc, bool verbose) {
     key += flags;
     key += '\0';
     key += kEmitterVersion;
+    key += '\0';
+    if (const char* np = std::getenv("EPQ_NO_PASS")) key += np;  // (already reflected in csrc; explicit)
     std::string h = hash_hex(key);
     std::string path = dir + "/" + h + ".dylib";
     if (::access(path.c_str(), R_OK) == 0) {
@@ -237,9 +239,34 @@ bool disabled(const Options& o, const char* name) {
     return false;
 }
 
+void split_into(std::vector<std::string>& out, const std::string& s) {
+    std::string cur;
+    for (char c : s + ",") {
+        if (c == ',' || c == ' ') {
+            if (!cur.empty()) out.push_back(cur);
+            cur.clear();
+        } else {
+            cur += c;
+        }
+    }
+}
+
+// Splits comma lists and folds in EPQ_NO_PASS / EPQ_VERIFY_TIR.
+Options normalise(const Options& in) {
+    Options o = in;
+    o.no_pass.clear();
+    o.only_pass.clear();
+    for (auto& s : in.no_pass) split_into(o.no_pass, s);
+    for (auto& s : in.only_pass) split_into(o.only_pass, s);
+    if (const char* e = std::getenv("EPQ_NO_PASS")) split_into(o.no_pass, e);
+    if (const char* e = std::getenv("EPQ_VERIFY_TIR"); e && e[0] == '1') o.verify_tir = true;
+    return o;
+}
+
 }  // namespace
 
-int run_backend(const Program& prog, const Options& opts) {
+int run_backend(const Program& prog, const Options& opts_in) {
+    Options opts = normalise(opts_in);
     uint64_t T0 = now_us();
     infer::Config cfg;
     cfg.poly = !opts.mono;
@@ -260,7 +287,22 @@ int run_backend(const Program& prog, const Options& opts) {
     tir::Module M;
     build_tir(prog, R, bo, M);
     uint64_t Tb = now_us();
-    tir::run_passes(M, opts.no_pass, opts.verbose);
+    if (opts.verbose)
+        std::fprintf(stderr, "epq: infer %llu us, build %llu us\n", (unsigned long long)(Ti - T0), (unsigned long long)(Tb - Ti));
+    return run_module(M, opts);
+}
+
+int run_module(tir::Module& M, const Options& opts_in) {
+    Options opts = normalise(opts_in);
+    uint64_t Tb = now_us();
+    if (opts.verify_tir) tir::verify(M, "build");
+    tir::PassOptions po;
+    po.disabled = opts.no_pass;
+    po.only = opts.only_pass;
+    po.verbose = opts.verbose;
+    po.verify = opts.verify_tir;
+    po.dump_after = opts.dump_tir_after;
+    if (tir::run_passes(M, po)) return 0;
     if (opts.dump_tir) {
         std::string s;
         tir::dump(s, M);
@@ -290,8 +332,7 @@ int run_backend(const Program& prog, const Options& opts) {
     }
     uint64_t t0 = now_us();
     if (opts.verbose)
-        std::fprintf(stderr, "epq: infer %llu us, build %llu us, passes %llu us, emit-c %llu us, cache+dlopen %llu us\n",
-                     (unsigned long long)(Ti - T0), (unsigned long long)(Tb - Ti), (unsigned long long)(T1 - Tb),
+        std::fprintf(stderr, "epq: passes %llu us, emit-c %llu us, cache+dlopen %llu us\n", (unsigned long long)(T1 - Tb),
                      (unsigned long long)(T2 - T1), (unsigned long long)(t0 - T2));
     uint64_t exec_us = 0;
     int rc = run_on_big_stack(entry, &exec_us);

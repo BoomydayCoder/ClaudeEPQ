@@ -59,6 +59,52 @@
 //   list local; the loop is `idx := 0; L := e; [x := 0;] while (idx < |L|)
 //   { x := L[idx]; body; idx := idx + 1 }`.
 //
+// ---------------------------------------------------------------------------
+// Extension for the optimisation passes (DESIGN.md §5; Low TIR)
+// ---------------------------------------------------------------------------
+// Types:
+//   Pair(r)  an immutable two-integer list unboxed into one int64:
+//              (int64)first << 32 | ((uint32)second ^ 0x80000000)
+//            so signed 64-bit comparison is lexicographic comparison of the
+//            two signed ints and equality is bit equality. r is the region the
+//            pair belongs to; a Pair-typed value ALWAYS belongs to a region
+//            with Region::pair == true (whose elem is Int). A region whose
+//            element type is Pair stores packed pairs in 8-byte slots.
+//            Wherever an op accepts kids "of any static type" (DynArith,
+//            Eq/Ne/Cmp with descriptors, Print, conditions) a Pair behaves
+//            exactly like the two-element integer list it stands for
+//            (descriptor kind PAIR; DynArith: always OperandsInt; truthy).
+//            Pairs never flow into Any (no Box of a Pair).
+//   Ptr(r)   raw pointer to the element buffer of a list of region r: int32
+//            elements if elem(r) is Int/Bot, else 8-byte slots. Only ever
+//            held in compiler-created locals (LocalKind::Cache). It becomes
+//            stale when the list's header changes (Append may move the buffer
+//            and frees the old one; Free).
+// Ops (all evaluate all kids in kid order, then act, unless stated):
+//   Select [c: Int, x: T, y: T] -> T      all kids pure and cannot fail (is_pure);
+//                                         x if c != 0 else y
+//   InlineBlock [body], a = label        statement (type Bot); body is any statement
+//   Break, a = label                     statement; jumps to the end of the innermost
+//                                         enclosing InlineBlock with label a.
+//     An inlined call is Comma[InlineBlock{...; SetLocal(res, v); Break; ...}, Local(res)].
+//     Labels are allocated per function with new_label(Func&) (Func::next_label).
+//   PairMake [a: Int, b: Int] -> Pair(r)  (r = node type's region)
+//   PairFirst [p: Pair] -> Int, PairSecond [p: Pair] -> Int
+//   PairIndex [p: Pair, i: Int] -> Int    IndexOOB unless i is 0 or 1
+//   PairEq/PairNe/PairLt/PairLe/PairGt/PairGe [p: Pair, q: Pair] -> Int (0/1)
+//   ListData [l: List(r)] -> Ptr(r)       loads the header's data pointer
+//   ElemLoad [d: Ptr(r), i: Int] -> elem(r)            unchecked
+//   ElemStore [d: Ptr(r), i: Int, v: elem(r)] -> elem(r)  unchecked; value v
+//   CheckIndex [i: Int, len: Int] -> Int  value i; IndexOOB unless 0 <= i < len
+//   Free [l: List(r)]                     statement; returns header + buffer to the
+//                                         allocator's free lists (only the list itself)
+//   SameList [a: List, b: List] -> Int    pointer identity (any two list regions)
+//   Nop                                   statement, does nothing
+// is_pure() is true for Select, PairMake/First/Second, PairEq..PairGe,
+// SameList, ListData, ElemLoad, Nop (when their kids are pure). It is NOT
+// true for PairIndex / CheckIndex (may fail) or ElemStore / Free.
+// tir::verify() checks all of the above (src/tir_verify.cpp).
+//
 // Locals: each Func has a typed local table: parameters first-class (Func::
 // params lists their local ids in order), user locals (resolver slots keep
 // their slot numbers), hidden for-each locals, compiler temporaries (kind
@@ -75,7 +121,7 @@
 
 namespace epq::tir {
 
-enum class TK : uint8_t { Bot, Int, List, Fn, Any };
+enum class TK : uint8_t { Bot, Int, List, Fn, Any, Pair, Ptr };
 
 struct Type {
     TK k = TK::Bot;
@@ -85,7 +131,10 @@ struct Type {
     static Type any() { return {TK::Any, 0}; }
     static Type list(uint32_t r) { return {TK::List, r}; }
     static Type fn(uint32_t d) { return {TK::Fn, d}; }
-    bool operator==(const Type& o) const { return k == o.k && (k != TK::List && k != TK::Fn ? true : a == o.a); }
+    static Type pair(uint32_t r) { return {TK::Pair, r}; }  // a: the pair's region (Region::pair)
+    static Type ptr(uint32_t r) { return {TK::Ptr, r}; }    // a: region of the list
+    bool has_arg() const { return k == TK::List || k == TK::Fn || k == TK::Pair || k == TK::Ptr; }
+    bool operator==(const Type& o) const { return k == o.k && (!has_arg() ? true : a == o.a); }
     bool operator!=(const Type& o) const { return !(*this == o); }
     bool is_int_like() const { return k == TK::Int || k == TK::Bot; }
 };
@@ -165,6 +214,22 @@ enum class Op : uint8_t {
     CallDirect, // a = callee Func id; kids = [args (param types)..., callee expr]   ret type
                 // the callee expression (type Fn) is evaluated after the arguments
     CallDyn,    // kids = [args: Any..., callee: Any] -> Any; not fn -> OperandFn; arity -> Arity
+    // ---- extension (see "Extension for the optimisation passes" above) ----------
+    Select,     // [c: Int, x: T, y: T] -> T; kids pure
+    InlineBlock,// [body], a = label                       statement
+    Break,      // a = label                               statement
+    PairMake,   // [a: Int, b: Int] -> Pair(r)
+    PairFirst,  // [p: Pair] -> Int
+    PairSecond, // [p: Pair] -> Int
+    PairIndex,  // [p: Pair, i: Int] -> Int; IndexOOB unless i in {0, 1}
+    PairEq, PairNe, PairLt, PairLe, PairGt, PairGe,  // [p: Pair, q: Pair] -> Int
+    ListData,   // [l: List(r)] -> Ptr(r)
+    ElemLoad,   // [d: Ptr(r), i: Int] -> elem(r)          unchecked
+    ElemStore,  // [d: Ptr(r), i: Int, v: elem(r)] -> elem(r)  unchecked; value v
+    CheckIndex, // [i: Int, len: Int] -> Int (i); IndexOOB unless 0 <= i < len
+    Free,       // [l: List(r)]                            statement
+    SameList,   // [a: List, b: List] -> Int               pointer identity
+    Nop,        // statement
 };
 const char* op_name(Op o);
 
@@ -187,7 +252,7 @@ struct Node {
     Node* kid(uint32_t i) const { return kids[i]; }
 };
 
-enum class LocalKind : uint8_t { Param, User, Hidden, Temp, Demoted };
+enum class LocalKind : uint8_t { Param, User, Hidden, Temp, Demoted, Cache };  // Cache: header-cache locals (passes)
 
 struct Local {
     Type type;
@@ -212,7 +277,9 @@ struct Func {
     // mutate, transitively; mutates_any: also every region with Any elements.
     std::vector<uint32_t> mutates;
     bool mutates_any = false;
+    uint32_t next_label = 0;    // InlineBlock / Break labels: new_label(f)
 };
+inline uint32_t new_label(Func& f) { return f.next_label++; }
 
 struct Global {
     Type type;
@@ -236,11 +303,14 @@ struct Region {
     bool flows_to_any = false;   // elem == Any
     bool header_mutated = false; // region-info: some Append / Pop on the region
     bool elem_stored = false;    // region-info: some SetIndex on the region
+    // Pair region (§5.4, set by the pairs pass): values of this region are
+    // Pair(r), elem must be Int. Every Pair-typed value belongs to such a region.
+    bool pair = false;
 };
 
 // Static type descriptors (runtime EDesc). Index 0 INT, 1 ANY, 2 LIST(ANY), 3 FN.
 struct Desc {
-    uint32_t kind;  // 0 INT, 1 ANY, 2 FN, 3 LIST (runtime EPQ_K_*)
+    uint32_t kind;  // 0 INT, 1 ANY, 2 FN, 3 LIST, 4 PAIR (runtime EPQ_K_*)
     uint32_t elem;  // LIST: element descriptor
 };
 
@@ -272,6 +342,9 @@ struct Module {
 // No side effects and cannot fail (constants, locals, unchecked globals, pure
 // integer arithmetic of such, Box/Len of such).
 bool is_pure(const Node* n);
+bool is_stmt_op(Op o);  // Seq If While Return Print InlineBlock Break Free Nop
+// Element type of a List(r) / Ptr(r) type.
+inline Type elem_of(const Module& m, Type t) { return m.regions[t.a].elem; }
 std::string type_str(const Module& m, Type t);
 void dump(std::string& out, const Module& m);
 
@@ -287,8 +360,25 @@ void pass_constants(Module& m);
 void pass_demote_globals(Module& m);
 // Region analyses (src/analysis.cpp): Func::mutates, Local::unique, Region flags.
 void pass_region_info(Module& m);
-// Runs the registered passes in order, skipping those named in `disabled`.
+// Constant folding (src/tir.cpp).
+void pass_fold(Module& m);
+// Structural / type checker (src/tir_verify.cpp). On failure prints a precise
+// message (function, op, expectation) to stderr and aborts.
+void verify(Module& m, const char* after_pass);
+// Pass manager (src/passes/registry.cpp). The registry lists every pass in
+// pipeline order; `optimisation` passes are those --only-pass selects among.
+struct PassOptions {
+    std::vector<std::string> disabled;  // --no-pass / EPQ_NO_PASS
+    std::vector<std::string> only;      // --only-pass: if non-empty, only these optimisation passes run
+    bool verbose = false;
+    bool verify = false;                // --verify-tir / EPQ_VERIFY_TIR=1: verify after every pass
+    std::string dump_after;             // --dump-tir-after=NAME
+};
+// Returns true if --dump-tir-after fired (the dump went to stdout; caller stops).
+bool run_passes(Module& m, const PassOptions& o);
+// Compatibility form: skipping those named in `disabled`.
 void run_passes(Module& m, const std::vector<std::string>& disabled, bool verbose);
 const std::vector<Pass>& passes();
+bool pass_is_optimisation(const char* name);
 
 }  // namespace epq::tir
