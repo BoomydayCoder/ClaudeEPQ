@@ -1194,6 +1194,10 @@ public:
                 for (int r = 9; r <= 15 && pick < 0; ++r)
                     if (fits(r, l.lo, l.hi)) pick = r;
             }
+            // a constant is rematerialised (mov) rather than kept in a callee-saved
+            // register across calls (that register costs a save/restore and is
+            // better used for a variable)
+            if (l.is_const && pick < 0) continue;
             // prefer callee-saved registers already in use
             for (int r = 19; r <= 28 && pick < 0; ++r)
                 if ((callee_used & bit(r)) && fits(r, l.lo, l.hi)) pick = r;
