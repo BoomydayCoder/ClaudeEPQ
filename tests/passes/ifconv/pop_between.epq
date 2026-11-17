@@ -1,0 +1,19 @@
+// Pop / call between the establishing access and the If must kill the fact
+l := [1, 2, 3, 4, 5, 6];
+s := 0;
+f := (q) => { -q; => 0; };
+(i := 0; i < 3; i := i + 1;) @ {
+  x := l[|l| - 1];
+  -l;
+  (x > 0) ? s := s + l[|l| - 1];
+  y := l[0];
+  f(l);
+  (y > 0) ? s := s + y;
+}
+>> s;
+>> l;
+(i := 0; i < 5; i := i + 1;) @ {
+  z := l[i - i];
+  -l;
+  (i < 9) ? s := s + 1;
+}

@@ -1,0 +1,6 @@
+// checked global in the body: must not be speculated (Undefined global)
+g := 0;
+h := () => { (i := 0; i < 3; i := i + 1;) @ { >> i; (i = 2) ? g := zz + 1; } };
+>> g;
+h();
+zz := 5;
