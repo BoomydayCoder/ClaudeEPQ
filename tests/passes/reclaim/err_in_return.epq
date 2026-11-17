@@ -1,0 +1,7 @@
+// the return value is evaluated before any Free; an error inside it fires normally
+g := (l) => { => l[0]; };
+f := (n) => { a := [1, 2]; b := [n]; => g(a) + a[n]; };
+>> f(1);
+>> f(0);
+>> f(5);
+>> 99;

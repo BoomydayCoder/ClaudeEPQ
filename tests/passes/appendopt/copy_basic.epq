@@ -1,0 +1,15 @@
+// bulk copy fires: for-loop and while-loop forms; loop variable's final value is observable
+m := [5, 6, 7, 8, 9, 10];
+l := [1];
+(i := 1; i < 5; i := i + 1;) @ { l :+ m[i]; }
+>> l;
+j := 2;
+k := [];
+(j < |m|) @ { k :+ m[j]; j := j + 1; }
+>> k;
+>> j;
+q := 0;
+r := [];
+(q := 3; q < 6; q := q + 1;) @ { r :+ m[q]; }
+>> q;
+>> r;

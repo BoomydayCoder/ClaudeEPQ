@@ -31,7 +31,8 @@
  *   Elements are accessed through the one-member structs EI32 / EW64 so that
  *   type-based alias analysis knows element stores never touch a header.
  *   A list literal of n elements is allocated with its buffer directly behind
- *   the header; growth doubles the capacity into a fresh arena buffer.
+ *   the header; growth doubles the capacity, in place when the buffer is the
+ *   most recent arena allocation (epq_list_grow_to), else into a fresh buffer.
  *
  * Descriptors (EDesc table, set in epq_rt_desc by the program's entry): static
  * type descriptions for deep equality / ordering / printing.
@@ -46,10 +47,11 @@
  * Errors: epq_fail(code) flushes stdout, writes the original's message and a
  * newline to stderr, and exits with status 1.
  *
- * I/O: output is buffered (64 KB), flushed at exit, before an error, and before
- * any read that would block while output is pending. Input is read in blocks
- * and parsed by hand like C++ `cin >> int`; a failed read yields 0 and all
- * later reads yield 0 (LANGUAGE.md 9.2).
+ * I/O: output is buffered (64 KB to a pipe/tty, 1 MB to a file), flushed at
+ * exit, before an error, and before any read that would block while output is
+ * pending (never for file stdin). Input is read in 256 KB blocks and parsed by
+ * hand like C++ `cin >> int`; a failed read yields 0 and all later reads
+ * yield 0 (LANGUAGE.md 9.2).
  */
 #ifndef EPQ_RT_H
 #define EPQ_RT_H
@@ -62,6 +64,7 @@
 #include <errno.h>
 #include <sys/mman.h>
 #include <stdlib.h>
+#include <sys/stat.h>
 
 #ifndef EPQ_RT_API
 #define EPQ_RT_API static __attribute__((unused))
@@ -136,13 +139,29 @@ static const EDesc* epq_rt_desc __attribute__((unused));
 static const EFnInfo* epq_rt_fns __attribute__((unused));
 
 /* ---- output ---------------------------------------------------------------- */
-#define EPQ_OBUF 65536
-static char epq_obuf[EPQ_OBUF];
+/* Output is flushed whenever epq_olim bytes are pending. The limit starts at
+ * EPQ_OBUF_SMALL and is decided at the first flush from the kind of stdout:
+ * pipes, sockets and ttys keep 64 KB (the pipe's own capacity: each write
+ * completes in one copy while the reader drains in parallel; measured fastest),
+ * regular files and /dev/null get the whole EPQ_OBUF (fewer write calls). */
+#ifndef EPQ_OBUF
+#define EPQ_OBUF (1024 * 1024)
+#endif
+#if EPQ_OBUF < 65536
+#define EPQ_OBUF_SMALL EPQ_OBUF
+#else
+#define EPQ_OBUF_SMALL 65536
+#endif
+#define EPQ_OSLACK 64
+static char epq_obuf[EPQ_OBUF + EPQ_OSLACK];
 static uint32_t epq_olen;
+static uint32_t epq_olim = EPQ_OBUF_SMALL;
+static int epq_odecided;
 
 EPQ_RT_API void epq_write_all(int fd, const char* p, size_t n) {
     while (n > 0) {
         ssize_t w = write(fd, p, n);
+        if (w < 0 && errno == EINTR) continue;
         if (w <= 0) return;
         p += w;
         n -= (size_t)w;
@@ -153,6 +172,13 @@ EPQ_RT_API void epq_flush(void) {
     if (epq_olen) {
         epq_write_all(1, epq_obuf, epq_olen);
         epq_olen = 0;
+        if (EPQ_UNLIKELY(!epq_odecided)) {
+            struct stat st;
+            epq_odecided = 1;
+            if (fstat(1, &st) == 0 &&
+                (S_ISREG(st.st_mode) || (S_ISCHR(st.st_mode) && !isatty(1))))
+                epq_olim = EPQ_OBUF;
+        }
     }
 }
 
@@ -167,59 +193,125 @@ EPQ_RT_API EPQ_COLD void epq_fail(int code) {
     _exit(1);
 }
 
+/* Output protocol for formatters: o = epq_oreserve(n) gives a write pointer
+ * with at least n (<= EPQ_OSLACK) bytes of room; write, then epq_ocommit(o).
+ * Values are emitted between a reserve and a commit without touching epq_olen. */
+EPQ_INLINE char* epq_oreserve(uint32_t n) {
+    if (EPQ_UNLIKELY(epq_olen > epq_olim - n)) epq_flush();
+    return epq_obuf + epq_olen;
+}
+EPQ_INLINE void epq_ocommit(char* o) { epq_olen = (uint32_t)(o - epq_obuf); }
+/* Within a loop that keeps the write pointer local: room for n more bytes. */
+EPQ_INLINE char* epq_oroom(char* o, uint32_t n) {
+    if (EPQ_UNLIKELY(o > epq_obuf + epq_olim - n)) {
+        epq_ocommit(o);
+        epq_flush();
+        return epq_obuf;
+    }
+    return o;
+}
+
 EPQ_INLINE void epq_out(const char* s, uint32_t n) {
-    if (EPQ_UNLIKELY(epq_olen + n > EPQ_OBUF)) epq_flush();
+    if (EPQ_UNLIKELY(epq_olen > epq_olim - n)) {
+        epq_flush();
+        if (n > epq_olim) { /* never happens for the runtime's own strings */
+            epq_write_all(1, s, n);
+            return;
+        }
+    }
     memcpy(epq_obuf + epq_olen, s, n);
     epq_olen += n;
 }
 
-static const char epq_digits2[201] __attribute__((unused)) =
+static const char epq_digits2[201] __attribute__((unused, aligned(2))) =
     "00010203040506070809101112131415161718192021222324252627282930313233343536373839"
     "40414243444546474849505152535455565758596061626364656667686970717273747576777879"
     "8081828384858687888990919293949596979899";
+static const uint32_t epq_pow10[10] __attribute__((unused)) = {
+    1u, 10u, 100u, 1000u, 10000u, 100000u, 1000000u, 10000000u, 100000000u, 1000000000u};
 
-EPQ_INLINE void epq_out_int(int32_t v) {
-    if (EPQ_UNLIKELY(epq_olen + 16 > EPQ_OBUF)) epq_flush();
-    char* o = epq_obuf + epq_olen;
+/* Decimal digits of u (1..10). */
+EPQ_INLINE uint32_t epq_ndigits(uint32_t u) {
+    uint32_t t = ((32u - (uint32_t)__builtin_clz(u | 1)) * 1233u) >> 12;
+    return t + 1 - ((u | 1) < epq_pow10[t]); /* u|1: 0 has one digit */
+}
+/* Writes u in decimal at o (at most 10 bytes), returns the end. Digits are
+ * produced two at a time, right to left, straight into the destination.
+ * (Measured against an all-digits-at-once SWAR formatter: this is as fast for
+ * 7-digit values and faster for small and 10-digit ones; tests/rtio/rtbench.c.
+ * Checked exhaustively over all int32 by tests/rtio/fmtcheck.c.) */
+EPQ_INLINE char* epq_fmt_u32(char* o, uint32_t u) {
+    if (u < 10) {
+        *o = (char)('0' + u);
+        return o + 1;
+    }
+    if (u < 100) {
+        memcpy(o, epq_digits2 + 2 * u, 2);
+        return o + 2;
+    }
+    char* e = o + epq_ndigits(u);
+    char* p = e;
+    do {
+        uint32_t q = u / 100, r = u - q * 100;
+        p -= 2;
+        memcpy(p, epq_digits2 + 2 * r, 2);
+        u = q;
+    } while (u >= 100);
+    if (u >= 10) memcpy(p - 2, epq_digits2 + 2 * u, 2);
+    else p[-1] = (char)('0' + u);
+    return e;
+}
+/* Writes v in decimal at o (at most 11 bytes), returns the end. */
+EPQ_INLINE char* epq_fmt_i32(char* o, int32_t v) {
     uint32_t u = (uint32_t)v;
     if (v < 0) {
         *o++ = '-';
         u = 0u - u;
     }
-    char tmp[12];
-    int p = 12;
-    while (u >= 100) {
-        uint32_t q = u / 100, r = u - q * 100;
-        tmp[--p] = epq_digits2[2 * r + 1];
-        tmp[--p] = epq_digits2[2 * r];
-        u = q;
-    }
-    if (u >= 10) {
-        tmp[--p] = epq_digits2[2 * u + 1];
-        tmp[--p] = epq_digits2[2 * u];
-    } else {
-        tmp[--p] = (char)('0' + u);
-    }
-    memcpy(o, tmp + p, (size_t)(12 - p));
-    o += 12 - p;
-    epq_olen = (uint32_t)(o - epq_obuf);
+    return epq_fmt_u32(o, u);
 }
 
-/* ---- input ----------------------------------------------------------------- */
-#define EPQ_IBUF 65536
-static char epq_ibuf[EPQ_IBUF];
-static uint32_t epq_ipos, epq_ilen;
-static int epq_ieof, epq_ifail;
+EPQ_INLINE void epq_out_int(int32_t v) { epq_ocommit(epq_fmt_i32(epq_oreserve(11), v)); }
 
+/* ---- input ----------------------------------------------------------------- */
+/* The unread input is [epq_ip, epq_iend); *epq_iend is always a NUL sentinel
+ * (neither whitespace, sign nor digit), so scanning loops test only the
+ * character and look at the position only when they stop. The buffer has 16
+ * spare bytes so an 8-byte word load at any position below epq_iend is in
+ * bounds. */
+#ifndef EPQ_IBUF
+#define EPQ_IBUF (256 * 1024)
+#endif
+static char epq_ibuf[EPQ_IBUF + 16];
+static const char* epq_ip = epq_ibuf;
+static const char* epq_iend = epq_ibuf;
+static int epq_ieof, epq_ifail;
+/* Whether pending output must be flushed before reading stdin: decided once,
+ * at the first refill. 1 = never (regular file, /dev/null or another non-tty
+ * character device: data never waits for our output), 2 = when the read
+ * would block (tty, pipe, socket: poll). */
+static int epq_imode;
+
+/* Refills the input buffer (all buffered input must have been consumed).
+ * Returns 0 at end of input or on a read error (and stays at end). */
 EPQ_RT_API int epq_fill(void) {
     if (epq_ieof) return 0;
     if (epq_olen) {
-        /* Flush pending output before a read that would block (interactive use). */
-        struct pollfd p;
-        p.fd = 0;
-        p.events = POLLIN;
-        p.revents = 0;
-        if (poll(&p, 1, 0) <= 0) epq_flush();
+        if (EPQ_UNLIKELY(epq_imode == 0)) {
+            struct stat st;
+            epq_imode = 2;
+            if (fstat(0, &st) == 0 &&
+                (S_ISREG(st.st_mode) || (S_ISCHR(st.st_mode) && !isatty(0))))
+                epq_imode = 1;
+        }
+        if (epq_imode == 2) {
+            /* Flush pending output before a read that would block (interactive use). */
+            struct pollfd p;
+            p.fd = 0;
+            p.events = POLLIN;
+            p.revents = 0;
+            if (poll(&p, 1, 0) <= 0) epq_flush();
+        }
     }
     ssize_t n;
     do {
@@ -227,66 +319,125 @@ EPQ_RT_API int epq_fill(void) {
     } while (n < 0 && errno == EINTR);
     if (n <= 0) {
         epq_ieof = 1;
+        epq_ip = epq_iend = epq_ibuf;
+        epq_ibuf[0] = 0;
         return 0;
     }
-    epq_ipos = 0;
-    epq_ilen = (uint32_t)n;
+    epq_ip = epq_ibuf;
+    epq_iend = epq_ibuf + n;
+    epq_ibuf[n] = 0;
     return 1;
 }
 
-EPQ_INLINE int epq_peekc(void) {
-    if (epq_ipos == epq_ilen && !epq_fill()) return -1;
-    return (unsigned char)epq_ibuf[epq_ipos];
-}
+EPQ_INLINE int epq_isdigit(unsigned c) { return c - '0' < 10u; }
+EPQ_INLINE int epq_isspace(unsigned c) { return c == ' ' || c - 9u < 5u; } /* \t \n \v \f \r */
 
-EPQ_RT_API int32_t epq_read_int(void) {
-    epq_out("<< ", 3);
-    if (epq_ifail) return 0;
-    int c;
+/* The general digit loop: numbers crossing a buffer boundary, long runs of
+ * (leading-zero) digits, overflow. p points at the first digit (or at the
+ * end of the buffer right after a sign). */
+static __attribute__((noinline, unused)) int32_t epq_read_digits_slow(const char* p, int neg) {
+    int64_t v = 0;
+    int over = 0, any = 0;
     for (;;) {
-        c = epq_peekc();
-        if (c == ' ' || c == '\t' || c == '\n' || c == '\v' || c == '\f' || c == '\r') {
-            epq_ipos++;
+        unsigned c = (unsigned char)*p;
+        if (epq_isdigit(c)) {
+            if (v < ((int64_t)1 << 40)) v = v * 10 + (c - '0');
+            else over = 1;
+            any = 1;
+            p++;
+            continue;
+        }
+        if (p == epq_iend) {
+            if (!epq_fill()) {
+                p = epq_ip;
+                break;
+            }
+            p = epq_ip;
             continue;
         }
         break;
     }
-    int neg = 0;
-    if (c == '+' || c == '-') {
-        neg = (c == '-');
-        epq_ipos++;
-        c = epq_peekc();
-    }
-    if (c < '0' || c > '9') {
-        epq_ifail = 1;
-        return 0;
-    }
-    int64_t v = 0;
-    int over = 0;
-    while (c >= '0' && c <= '9') {
-        if (v < ((int64_t)1 << 40)) v = v * 10 + (c - '0');
-        else over = 1;
-        epq_ipos++;
-        c = epq_peekc();
-    }
+    epq_ip = p;
     if (neg) v = -v;
-    if (over || v > 2147483647LL || v < -2147483648LL) {
+    if (!any || over || v > 2147483647LL || v < -2147483648LL) {
         epq_ifail = 1;
         return 0;
     }
     return (int32_t)v;
 }
 
+/* Like C++ `cin >> int` (LANGUAGE.md 7): skip whitespace, optional sign,
+ * decimal digits; any failure yields 0 now and for every later read. */
+EPQ_INLINE int32_t epq_read_int_i(void) {
+    epq_out("<< ", 3);
+    if (EPQ_UNLIKELY(epq_ifail)) return 0;
+    const char* p = epq_ip;
+    unsigned c;
+    for (;;) {
+        c = (unsigned char)*p;
+        if (epq_isspace(c)) {
+            p++;
+            continue;
+        }
+        if (EPQ_UNLIKELY(p == epq_iend)) {
+            if (!epq_fill()) {
+                epq_ifail = 1;
+                return 0;
+            }
+            p = epq_ip;
+            continue;
+        }
+        break;
+    }
+    /* Branch-free sign: input signs are often random. */
+    int neg = c == '-';
+    p += neg | (c == '+');
+    if (EPQ_UNLIKELY(p == epq_iend)) return epq_read_digits_slow(p, neg);
+    /* Up to 7 digits, terminated inside the buffer: one 8-byte load. Bytes
+     * past the sentinel may be stale but the first non-digit is found at or
+     * before it. */
+    uint64_t x;
+    memcpy(&x, p, 8);
+    uint64_t nd = ((x + 0x4646464646464646ull) | (x - 0x3030303030303030ull)) & 0x8080808080808080ull;
+    uint32_t len = nd ? (uint32_t)__builtin_ctzll(nd) >> 3 : 8;
+    if (EPQ_LIKELY(len - 1 < 7u) && EPQ_LIKELY(p + len < epq_iend)) {
+        uint64_t t = (x - 0x3030303030303030ull) << (8 * (8 - len));
+        t = (t * 10 + (t >> 8)) & 0x00FF00FF00FF00FFull;
+        t = (t * 100 + (t >> 16)) & 0x0000FFFF0000FFFFull;
+        t = (t * 10000 + (t >> 32)) & 0xFFFFFFFFull;
+        epq_ip = p + len;
+        int32_t v = (int32_t)t;
+        return neg ? -v : v;
+    }
+    if (len == 0) {
+        if (p == epq_iend) return epq_read_digits_slow(p, neg);
+        epq_ip = p;
+        epq_ifail = 1;
+        return 0;
+    }
+    return epq_read_digits_slow(p, neg);
+}
+EPQ_RT_API int32_t epq_read_int(void) { return epq_read_int_i(); }
+
 /* ---- memory ------------------------------------------------------------------ */
 static char* epq_bump;
 static char* epq_bump_end;
 
+/* The bump arena is a sequence of large lazily-committed virtual reservations
+ * (anonymous mmap: pages cost nothing until touched). A request that does not
+ * fit opens a new reservation of max(1 GB, 2 x request) and bumps from it, so
+ * even a huge list stays the most recent allocation and keeps growing in place
+ * (epq_list_grow_to). The tail of the abandoned reservation is never touched. */
+#define EPQ_ARENA_CHUNK ((size_t)1 << 30)
 EPQ_RT_API void* epq_alloc_slow(size_t n) {
-    size_t chunk = (size_t)64 << 20;
-    if (n > chunk / 4) chunk = (n + 4095) & ~(size_t)4095;
+    size_t chunk = EPQ_ARENA_CHUNK;
+    if (n > chunk / 2) chunk = ((n + 4095) & ~(size_t)4095) * 2;
     void* p = mmap(0, chunk, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
-    if (p == MAP_FAILED) epq_fail(EPQ_E_MEMORY);
-    if (n > ((size_t)64 << 20) / 4) return p; /* big block: keep the current chunk */
+    if (p == MAP_FAILED) {
+        chunk = (n + 4095) & ~(size_t)4095; /* retry without the headroom */
+        p = mmap(0, chunk, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+        if (p == MAP_FAILED) epq_fail(EPQ_E_MEMORY);
+    }
     epq_bump = (char*)p + n;
     epq_bump_end = (char*)p + chunk;
     return p;
@@ -301,6 +452,9 @@ EPQ_RT_API void* epq_alloc_slow(size_t n) {
  * EPQ_POISON_FREED=1: freed memory is filled with a garbage pattern (headers
  * get len 0x7fffffff and an unmapped data pointer) and never reused. */
 #define EPQ_FL_SMALL_MAX 512
+#ifndef EPQ_GROW_FACTOR
+#define EPQ_GROW_FACTOR 2 /* list capacity growth factor (epq_list_grow) */
+#endif
 static void* epq_fl_small[EPQ_FL_SMALL_MAX / 16 + 1];
 static void* epq_fl_big[64];
 static int epq_poison_mode = -1; /* -1: not yet read from the environment */
@@ -370,9 +524,30 @@ EPQ_INLINE EList* epq_list_new(int32_t n, uint32_t esz) {
     return l;
 }
 
-EPQ_RT_API void epq_list_grow(EList* l, uint32_t esz) {
-    int64_t ncap = l->cap < 4 ? 8 : (int64_t)l->cap * 2;
+/* Grows l's capacity to at least ncap elements (clamped to INT32_MAX).
+ * Invariant used for in-place growth: a list buffer carved from the bump arena
+ * occupies exactly r16(cap * esz) bytes from data (epq_alloc rounds to 16;
+ * epq_list_new and this function keep cap * esz a multiple of 16 unless clamped).
+ * So if data + r16(cap * esz) == epq_bump, the buffer (or the header block with
+ * its inline buffer) is the most recent allocation and is extended by bumping.
+ * A buffer taken from a free list may be larger than r16(cap * esz); then
+ * data + r16(cap * esz) lies strictly inside that block, below epq_bump, and the
+ * test fails safely. In-place growth frees nothing, so it is also correct with
+ * EPQ_POISON_FREED=1 and for header blocks with inline buffers (epq_list_free
+ * then returns sizeof(EList) + cap * esz, the extended block). */
+EPQ_RT_API void epq_list_grow_to(EList* l, uint32_t esz, int64_t ncap) {
     if (ncap > 0x7fffffff) ncap = 0x7fffffff;
+    if (ncap <= l->cap) return;
+    size_t old = ((size_t)l->cap * esz + 15) & ~(size_t)15;
+    size_t nb = ((size_t)ncap * esz + 15) & ~(size_t)15;
+#ifndef EPQ_NO_GROW_IN_PLACE /* (measurement switch: EPQ_CFLAGS=-DEPQ_NO_GROW_IN_PLACE) */
+    if ((char*)l->data + old == epq_bump && (size_t)(epq_bump_end - epq_bump) >= nb - old) {
+        epq_bump += nb - old;
+        int64_t c = (int64_t)(nb / esz);
+        l->cap = (int32_t)(c > 0x7fffffff ? 0x7fffffff : c);
+        return;
+    }
+#endif
     void* nd = epq_alloc((size_t)ncap * esz);
     memcpy(nd, l->data, (size_t)l->len * esz);
     /* An outgrown out-of-line buffer is only reachable through this header:
@@ -380,6 +555,42 @@ EPQ_RT_API void epq_list_grow(EList* l, uint32_t esz) {
     if (l->data != (void*)((char*)l + sizeof(EList))) epq_free_block(l->data, (size_t)l->cap * esz);
     l->data = nd;
     l->cap = (int32_t)ncap;
+}
+
+EPQ_RT_API void epq_list_grow(EList* l, uint32_t esz) {
+    epq_list_grow_to(l, esz, l->cap < 4 ? 8 : (int64_t)l->cap * EPQ_GROW_FACTOR);
+}
+
+/* ---- capacity hints and bulk copy (appendopt, src/tir.hpp Reserve / AppendRange) ---- */
+#define EPQ_RESERVE_MAX ((int32_t)1 << 26)
+/* cap(l) >= len(l) + min(max(n, 0), 2^26); never changes len or contents. */
+EPQ_RT_API void epq_list_reserve(EList* l, int32_t n, uint32_t esz) {
+    if (!l || n <= 0) return;
+    if (n > EPQ_RESERVE_MAX) n = EPQ_RESERVE_MAX;
+    int64_t need = (int64_t)l->len + n;
+    if (need > l->cap) {
+        /* A hint repeated inside an outer loop must not defeat amortised growth
+         * (exact-fit growth would copy the whole list every outer iteration). */
+        if (l->len > 0 && (int64_t)l->cap * EPQ_GROW_FACTOR > need) need = (int64_t)l->cap * EPQ_GROW_FACTOR;
+        epq_list_grow_to(l, esz, need);
+    }
+}
+/* Appends m[lo..hi) to l if that is certainly what the element-by-element loop
+ * would do without failing (value 1); otherwise does nothing (value 0). */
+EPQ_RT_API int32_t epq_append_range(EList* l, EList* m, int32_t lo, int32_t hi, uint32_t esz) {
+    if (hi <= lo) return 1;
+    if (!l || !m || l == m || lo < 0 || hi > m->len) return 0;
+    int64_t n = (int64_t)hi - lo;
+    int64_t need = (int64_t)l->len + n;
+    if (need > 0x7fffffff) return 0;
+    if (need > l->cap) {
+        int64_t c = need;
+        if (l->len > 0 && (int64_t)l->cap * 2 > c) c = (int64_t)l->cap * 2; /* keep appends amortised */
+        epq_list_grow_to(l, esz, c);
+    }
+    memcpy((char*)l->data + (size_t)l->len * esz, (const char*)m->data + (size_t)lo * esz, (size_t)n * esz);
+    l->len = (int32_t)need;
+    return 1;
 }
 
 /* Frees list l (element size esz): its header and its buffer, never what the
@@ -750,6 +961,58 @@ EPQ_INLINE int32_t epq_is_empty_list(EAny x) {
     return (x & 3) == 0 && ((EList*)(uintptr_t)x)->len == 0;
 }
 
+/* ---- printing (LANGUAGE.md 5: `>> v` writes ">> ", the value, "\n") -------- */
+/* Each element costs one capacity check (", " + up to 11 characters). */
+#define EPQ_ELEM_MAX 13
+
+/* [a, b, c] for an Int-element list. */
+static __attribute__((noinline, unused)) void epq_print_ilist_val(const EList* l) {
+    const EI32* p = (const EI32*)l->data;
+    int32_t n = l->len;
+    char* o = epq_oreserve(1 + 11 + 1);
+    *o++ = '[';
+    if (n > 0) {
+        o = epq_fmt_i32(o, p[0].v);
+        for (int32_t i = 1; i < n; i++) {
+            o = epq_oroom(o, EPQ_ELEM_MAX);
+            memcpy(o, ", ", 2);
+            o = epq_fmt_i32(o + 2, p[i].v);
+        }
+        o = epq_oroom(o, 1);
+    }
+    *o++ = ']';
+    epq_ocommit(o);
+}
+
+/* [ ... ] for an Any-element list (the elements are tagged words). */
+static __attribute__((noinline, unused)) void epq_print_alist_val(const EList* l) {
+    const EW64* p = (const EW64*)l->data;
+    int32_t n = l->len;
+    char* o = epq_oreserve(EPQ_ELEM_MAX);
+    *o++ = '[';
+    for (int32_t i = 0; i < n; i++) {
+        EAny w = p[i].v;
+        o = epq_oroom(o, EPQ_ELEM_MAX);
+        if (i) {
+            memcpy(o, ", ", 2);
+            o += 2;
+        }
+        if (EPQ_LIKELY(w & 1)) {
+            o = epq_fmt_i32(o, (int32_t)(w >> 32));
+        } else if ((w & 3) == 2) {
+            memcpy(o, "<function>", 10);
+            o += 10;
+        } else {
+            epq_ocommit(o);
+            epq_print_alist_val((const EList*)(uintptr_t)w);
+            o = epq_obuf + epq_olen;
+        }
+    }
+    o = epq_oroom(o, 1);
+    *o++ = ']';
+    epq_ocommit(o);
+}
+
 EPQ_RT_API void epq_print_val(uint32_t d, EAny w) {
     epq_norm(&d, &w);
     uint32_t k = epq_rt_desc[d].kind;
@@ -764,22 +1027,23 @@ EPQ_RT_API void epq_print_val(uint32_t d, EAny w) {
         epq_out_int(epq_pair_second((EPair)w));
         epq_out("]", 1);
     } else {
-        EList* l = (EList*)(uintptr_t)w;
+        const EList* l = (const EList*)(uintptr_t)w;
         uint32_t e = epq_rt_desc[d].elem;
-        epq_out("[", 1);
-        if (epq_rt_desc[e].kind == EPQ_K_INT) {
-            const EI32* p = (const EI32*)l->data;
-            for (int32_t i = 0; i < l->len; i++) {
-                if (i) epq_out(", ", 2);
-                epq_out_int(p[i].v);
-            }
+        uint32_t ek = epq_rt_desc[e].kind;
+        if (ek == EPQ_K_INT) {
+            epq_print_ilist_val(l);
+        } else if (ek == EPQ_K_ANY) {
+            epq_print_alist_val(l);
         } else {
+            /* List or Fn elements: static element descriptor, word slots. */
+            const EW64* p = (const EW64*)l->data;
+            epq_out("[", 1);
             for (int32_t i = 0; i < l->len; i++) {
                 if (i) epq_out(", ", 2);
-                epq_print_val(e, epq_elem_word(e, l, i));
+                epq_print_val(e, p[i].v);
             }
+            epq_out("]", 1);
         }
-        epq_out("]", 1);
     }
 }
 EPQ_RT_API void epq_print(uint32_t d, EAny w) {
@@ -787,9 +1051,24 @@ EPQ_RT_API void epq_print(uint32_t d, EAny w) {
     epq_print_val(d, w);
     epq_out("\n", 1);
 }
+/* `>> v` for an Int: one capacity check for ">> ", the digits and "\n". */
 EPQ_INLINE void epq_print_int(int32_t v) {
+    char* o = epq_oreserve(3 + 11 + 1);
+    memcpy(o, ">> ", 3);
+    o = epq_fmt_i32(o + 3, v);
+    *o++ = '\n';
+    epq_ocommit(o);
+}
+/* Out-of-line entry points for JIT code (specialised forms of epq_print). */
+EPQ_RT_API void epq_print_i32(int32_t v) { epq_print_int(v); }
+EPQ_RT_API void epq_print_list_i32(const EList* l) {
     epq_out(">> ", 3);
-    epq_out_int(v);
+    epq_print_ilist_val(l);
+    epq_out("\n", 1);
+}
+EPQ_RT_API void epq_print_list_any(const EList* l) {
+    epq_out(">> ", 3);
+    epq_print_alist_val(l);
     epq_out("\n", 1);
 }
 

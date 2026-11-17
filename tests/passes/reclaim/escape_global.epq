@@ -1,0 +1,20 @@
+// fresh lists reaching globals (directly, via a callee, via an alias) must survive
+G := [];
+H := [[0]];
+f := () => { a := [1, 2]; G := a; => 0; };
+keep := (l) => { H :+ l; => 0; };
+g := () => { a := [4, 5]; b := a; keep(b); => 1; };
+mkg := () => { a := [6]; G := a; => a; };
+h := () => { b := mkg(); c := [7, 7]; => |b| + |c|; };
+f();
+t1 := [9, 9, 9, 9];
+>> G;
+g();
+t2 := [8, 8, 8, 8];
+>> H;
+>> h();
+t3 := [3, 3, 3, 3];
+>> G;
+G :+ 5;
+>> G;
+>> [t1, t2, t3];

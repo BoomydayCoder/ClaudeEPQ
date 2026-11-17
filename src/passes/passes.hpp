@@ -17,5 +17,6 @@ void pass_ifconv(Module& m);     // §5.5 if-conversion to Select
 void pass_listopt(Module& m);    // §5.2/§5.3 header caching + check elision (Low TIR)
 void pass_reclaim(Module& m);    // §5.7 static reclamation (Free)
 void pass_litcmp(Module& m);     // comparisons against list literals (litcmp.cpp)
+void pass_appendopt(Module& m);  // append loops: Reserve hints + AppendRange bulk copies
 
 }  // namespace epq::tir
