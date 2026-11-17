@@ -230,6 +230,14 @@ enum class Op : uint8_t {
     Free,       // [l: List(r)]                            statement
     SameList,   // [a: List, b: List] -> Int               pointer identity
     Nop,        // statement
+    // ---- litcmp extension (src/passes/litcmp.cpp) ---------------------------------
+    // DynIsEmptyList [x: Any] -> Int: evaluates x, then 1 if x is a list (tag
+    //   (x & 3) == 0) whose length is 0, else 0. Never fails; pure if x is pure.
+    //   It is `x = []` for a dynamic x without allocating the literal.
+    //   C: epq_is_empty_list(x) (runtime/epq_rt.h). JIT: tst x,#3; b.ne -> 0;
+    //   ldr w, [x, #8] (EList::len); cmp w, #0; cset.
+    DynIsEmptyList,
+    // ---- end litcmp extension ------------------------------------------------------
 };
 const char* op_name(Op o);
 

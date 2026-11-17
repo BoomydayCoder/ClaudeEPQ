@@ -579,6 +579,73 @@ EPQ_INLINE EAny epq_view_word(const EView* v, int32_t k) {
 }
 EPQ_RT_API int epq_eq(uint32_t da, EAny a, uint32_t db, EAny b);
 EPQ_RT_API int epq_lt(uint32_t da, EAny a, uint32_t db, EAny b);
+/* ---- litcmp: three-way deep comparison -------------------------------------------
+ * epq_cmp3(a, b) < 0 / == 0 / > 0  <=>  a < b / neither / b < a, with the original's
+ * `<` (std::lexicographical_compare: per element pair k, `x<y` then `y<x`).
+ * It raises EPQ_E_INVALID_CMP in exactly the same situations: element pair k is
+ * examined only if all earlier pairs compared equal; whether a pairing is valid is
+ * symmetric in its two sides; and once `x<y` returned without raising, `y<x`
+ * revisits only pairs `x<y` already visited (it stops at the first differing
+ * pair, which `x<y` also stopped at). So the first invalid pairing reached is the
+ * same, and each pair is examined once instead of twice per nesting level. */
+EPQ_RT_API int epq_cmp3(uint32_t da, EAny a, uint32_t db, EAny b);
+EPQ_INLINE int epq_cmp3_i32(int32_t x, int32_t y) { return (x > y) - (x < y); }
+EPQ_INLINE int epq_cmp3_li(EList* a, EList* b) {
+    const EI32* pa = (const EI32*)a->data;
+    const EI32* pb = (const EI32*)b->data;
+    int32_t na = a->len, nb = b->len, n = na < nb ? na : nb;
+    for (int32_t k = 0; k < n; k++)
+        if (pa[k].v != pb[k].v) return pa[k].v < pb[k].v ? -1 : 1;
+    return (na > nb) - (na < nb);
+}
+/* PAIR on at least one side (both already normalised). */
+EPQ_RT_API int epq_cmp3_pair(uint32_t da, EAny a, uint32_t db, EAny b) {
+    uint32_t ka = epq_rt_desc[da].kind, kb = epq_rt_desc[db].kind;
+    if (ka == EPQ_K_PAIR && kb == EPQ_K_PAIR) return ((EPair)a > (EPair)b) - ((EPair)a < (EPair)b);
+    if ((ka != EPQ_K_PAIR && ka != EPQ_K_LIST) || (kb != EPQ_K_PAIR && kb != EPQ_K_LIST)) epq_fail(EPQ_E_INVALID_CMP);
+    EView va, vb;
+    epq_view(da, a, &va);
+    epq_view(db, b, &vb);
+    int32_t n = va.n < vb.n ? va.n : vb.n;
+    for (int32_t k = 0; k < n; k++) {
+        int c = epq_cmp3(va.ed, epq_view_word(&va, k), vb.ed, epq_view_word(&vb, k));
+        if (c) return c;
+    }
+    return (va.n > vb.n) - (va.n < vb.n);
+}
+EPQ_RT_API int epq_cmp3(uint32_t da, EAny a, uint32_t db, EAny b) {
+    epq_norm(&da, &a);
+    epq_norm(&db, &b);
+    uint32_t ka = epq_rt_desc[da].kind, kb = epq_rt_desc[db].kind;
+    if (ka == EPQ_K_INT && kb == EPQ_K_INT) return epq_cmp3_i32((int32_t)a, (int32_t)b);
+    if (EPQ_UNLIKELY(ka == EPQ_K_PAIR || kb == EPQ_K_PAIR)) return epq_cmp3_pair(da, a, db, b);
+    if (ka != EPQ_K_LIST || kb != EPQ_K_LIST) epq_fail(EPQ_E_INVALID_CMP);
+    EList* la = (EList*)(uintptr_t)a;
+    EList* lb = (EList*)(uintptr_t)b;
+    uint32_t ea = epq_rt_desc[da].elem, eb = epq_rt_desc[db].elem;
+    uint32_t kea = epq_rt_desc[ea].kind, keb = epq_rt_desc[eb].kind;
+    if (kea == EPQ_K_INT && keb == EPQ_K_INT) return epq_cmp3_li(la, lb);
+    int32_t na = la->len, nb = lb->len, n = na < nb ? na : nb;
+    if (kea == EPQ_K_ANY && keb == EPQ_K_ANY) {
+        /* Common dynamic case: inline the both-integer element test. */
+        const EW64* pa = (const EW64*)la->data;
+        const EW64* pb = (const EW64*)lb->data;
+        for (int32_t k = 0; k < n; k++) {
+            EAny x = pa[k].v, y = pb[k].v;
+            int c;
+            if (EPQ_LIKELY(x & y & 1)) c = ((int64_t)x > (int64_t)y) - ((int64_t)x < (int64_t)y);
+            else c = epq_cmp3(EPQ_D_ANY, x, EPQ_D_ANY, y);
+            if (c) return c;
+        }
+        return (na > nb) - (na < nb);
+    }
+    for (int32_t k = 0; k < n; k++) {
+        int c = epq_cmp3(ea, epq_elem_word(ea, la, k), eb, epq_elem_word(eb, lb, k));
+        if (c) return c;
+    }
+    return (na > nb) - (na < nb);
+}
+/* ---- end litcmp three-way comparison ------------------------------------------ */
 /* PAIR on at least one side (both already normalised). */
 EPQ_RT_API int epq_eq_pair(uint32_t da, EAny a, uint32_t db, EAny b) {
     uint32_t ka = epq_rt_desc[da].kind, kb = epq_rt_desc[db].kind;
@@ -593,19 +660,7 @@ EPQ_RT_API int epq_eq_pair(uint32_t da, EAny a, uint32_t db, EAny b) {
     return 1;
 }
 EPQ_RT_API int epq_lt_pair(uint32_t da, EAny a, uint32_t db, EAny b) {
-    uint32_t ka = epq_rt_desc[da].kind, kb = epq_rt_desc[db].kind;
-    if (ka == EPQ_K_PAIR && kb == EPQ_K_PAIR) return (EPair)a < (EPair)b;
-    if ((ka != EPQ_K_PAIR && ka != EPQ_K_LIST) || (kb != EPQ_K_PAIR && kb != EPQ_K_LIST)) epq_fail(EPQ_E_INVALID_CMP);
-    EView va, vb;
-    epq_view(da, a, &va);
-    epq_view(db, b, &vb);
-    for (int32_t k = 0; k < vb.n; k++) {
-        if (k == va.n) return 1;
-        EAny x = epq_view_word(&va, k), y = epq_view_word(&vb, k);
-        if (epq_lt(va.ed, x, vb.ed, y)) return 1;
-        if (epq_lt(vb.ed, y, va.ed, x)) return 0;
-    }
-    return 0;
+    return epq_cmp3_pair(da, a, db, b) < 0; /* litcmp: three-way */
 }
 
 EPQ_RT_API int epq_eq(uint32_t da, EAny a, uint32_t db, EAny b) {
@@ -620,8 +675,21 @@ EPQ_RT_API int epq_eq(uint32_t da, EAny a, uint32_t db, EAny b) {
     EList* lb = (EList*)(uintptr_t)b;
     if (la->len != lb->len) return 0;
     uint32_t ea = epq_rt_desc[da].elem, eb = epq_rt_desc[db].elem;
-    if (epq_rt_desc[ea].kind == EPQ_K_INT && epq_rt_desc[eb].kind == EPQ_K_INT)
+    uint32_t kea = epq_rt_desc[ea].kind, keb = epq_rt_desc[eb].kind;
+    if (kea == EPQ_K_INT && keb == EPQ_K_INT)
         return memcmp(la->data, lb->data, (size_t)la->len * 4) == 0;
+    if (kea == EPQ_K_ANY && keb == EPQ_K_ANY) {
+        /* litcmp: words equal => values equal (same int, same list, same fn); two
+         * ints that differ are unequal; only otherwise recurse. */
+        const EW64* pa = (const EW64*)la->data;
+        const EW64* pb = (const EW64*)lb->data;
+        for (int32_t k = 0; k < la->len; k++) {
+            EAny x = pa[k].v, y = pb[k].v;
+            if (x == y) continue;
+            if ((x & y & 1) || !epq_eq(EPQ_D_ANY, x, EPQ_D_ANY, y)) return 0;
+        }
+        return 1;
+    }
     for (int32_t k = 0; k < la->len; k++)
         if (!epq_eq(ea, epq_elem_word(ea, la, k), eb, epq_elem_word(eb, lb, k))) return 0;
     return 1;
@@ -629,32 +697,7 @@ EPQ_RT_API int epq_eq(uint32_t da, EAny a, uint32_t db, EAny b) {
 
 /* a < b  (LANGUAGE.md 6: ints by value, lists lexicographically, else error) */
 EPQ_RT_API int epq_lt(uint32_t da, EAny a, uint32_t db, EAny b) {
-    epq_norm(&da, &a);
-    epq_norm(&db, &b);
-    uint32_t ka = epq_rt_desc[da].kind, kb = epq_rt_desc[db].kind;
-    if (ka == EPQ_K_INT && kb == EPQ_K_INT) return (int32_t)a < (int32_t)b;
-    if (EPQ_UNLIKELY(ka == EPQ_K_PAIR || kb == EPQ_K_PAIR)) return epq_lt_pair(da, a, db, b);
-    if (ka != EPQ_K_LIST || kb != EPQ_K_LIST) epq_fail(EPQ_E_INVALID_CMP);
-    EList* la = (EList*)(uintptr_t)a;
-    EList* lb = (EList*)(uintptr_t)b;
-    uint32_t ea = epq_rt_desc[da].elem, eb = epq_rt_desc[db].elem;
-    int32_t na = la->len, nb = lb->len;
-    if (epq_rt_desc[ea].kind == EPQ_K_INT && epq_rt_desc[eb].kind == EPQ_K_INT) {
-        const EI32* pa = (const EI32*)la->data;
-        const EI32* pb = (const EI32*)lb->data;
-        for (int32_t k = 0; k < nb; k++) {
-            if (k == na) return 1;
-            if (pa[k].v != pb[k].v) return pa[k].v < pb[k].v;
-        }
-        return 0;
-    }
-    for (int32_t k = 0; k < nb; k++) {
-        if (k == na) return 1;
-        EAny x = epq_elem_word(ea, la, k), y = epq_elem_word(eb, lb, k);
-        if (epq_lt(ea, x, eb, y)) return 1;
-        if (epq_lt(eb, y, ea, x)) return 0;
-    }
-    return 0;
+    return epq_cmp3(da, a, db, b) < 0; /* litcmp: three-way, same results and errors */
 }
 
 /* Fast paths for two lists whose elements are statically Int. */
@@ -675,6 +718,36 @@ static inline __attribute__((unused)) int epq_eq_li(EList* a, EList* b) {
     for (int32_t k = 0; k < a->len; k++)
         if (pa[k].v != pb[k].v) return 0;
     return 1;
+}
+/* litcmp: two lists with statically Any elements (LIST(ANY) on both sides):
+ * inline loop, both-integer element pairs inline, the rest via epq_cmp3 / epq_eq. */
+EPQ_INLINE int epq_cmp3_la(EList* la, EList* lb) {
+    const EW64* pa = (const EW64*)la->data;
+    const EW64* pb = (const EW64*)lb->data;
+    int32_t na = la->len, nb = lb->len, n = na < nb ? na : nb;
+    for (int32_t k = 0; k < n; k++) {
+        EAny x = pa[k].v, y = pb[k].v;
+        int c;
+        if (EPQ_LIKELY(x & y & 1)) c = ((int64_t)x > (int64_t)y) - ((int64_t)x < (int64_t)y);
+        else c = epq_cmp3(EPQ_D_ANY, x, EPQ_D_ANY, y);
+        if (c) return c;
+    }
+    return (na > nb) - (na < nb);
+}
+EPQ_INLINE int epq_eq_la(EList* la, EList* lb) {
+    if (la->len != lb->len) return 0;
+    const EW64* pa = (const EW64*)la->data;
+    const EW64* pb = (const EW64*)lb->data;
+    for (int32_t k = 0; k < la->len; k++) {
+        EAny x = pa[k].v, y = pb[k].v;
+        if (x == y) continue;
+        if ((x & y & 1) || !epq_eq(EPQ_D_ANY, x, EPQ_D_ANY, y)) return 0;
+    }
+    return 1;
+}
+/* litcmp: TIR DynIsEmptyList — x is a list of length 0. */
+EPQ_INLINE int32_t epq_is_empty_list(EAny x) {
+    return (x & 3) == 0 && ((EList*)(uintptr_t)x)->len == 0;
 }
 
 EPQ_RT_API void epq_print_val(uint32_t d, EAny w) {

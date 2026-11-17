@@ -284,6 +284,9 @@ struct CGen {
             }
             return se(pre, "epq_call_dyn(" + k.v[na] + ", " + std::to_string(na) + ", " + arr + ")");
         }
+        // ---- litcmp extension ----
+        case Op::DynIsEmptyList: return "epq_is_empty_list(" + E(n->kids[0]) + ")";
+        // ---- end litcmp extension ----
         default:
             if (std::string r; low_E(n, r)) return r;
             std::fprintf(stderr, "epq: cgen: unexpected op %s in expression\n", op_name(n->op));
@@ -325,6 +328,19 @@ struct CGen {
             default: return "(!epq_lt_li(" + a + ", " + b + "))";
             }
         }
+        // ---- litcmp extension: both lists with Any elements -> inline loop ----
+        if (ta.k == TK::List && tb.k == TK::List && M.regions[ta.a].elem.k == TK::Any && M.regions[tb.a].elem.k == TK::Any) {
+            std::string a = k.v[0], b = k.v[1];
+            switch (c) {
+            case Op::EqI32: return "epq_eq_la(" + a + ", " + b + ")";
+            case Op::NeI32: return "(!epq_eq_la(" + a + ", " + b + "))";
+            case Op::LtI32: return "(epq_cmp3_la(" + a + ", " + b + ") < 0)";
+            case Op::GtI32: return "(epq_cmp3_la(" + a + ", " + b + ") > 0)";
+            case Op::LeI32: return "(epq_cmp3_la(" + a + ", " + b + ") <= 0)";
+            default: return "(epq_cmp3_la(" + a + ", " + b + ") >= 0)";
+            }
+        }
+        // ---- end litcmp extension ----
         return "";
     }
 

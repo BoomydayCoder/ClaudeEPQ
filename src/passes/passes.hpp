@@ -15,5 +15,6 @@ void pass_pairs(Module& m);      // §5.4 pair unboxing
 void pass_ifconv(Module& m);     // §5.5 if-conversion to Select
 void pass_listopt(Module& m);    // §5.2/§5.3 header caching + check elision (Low TIR)
 void pass_reclaim(Module& m);    // §5.7 static reclamation (Free)
+void pass_litcmp(Module& m);     // comparisons against list literals (litcmp.cpp)
 
 }  // namespace epq::tir

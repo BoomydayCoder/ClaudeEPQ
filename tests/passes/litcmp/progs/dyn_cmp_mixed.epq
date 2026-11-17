@@ -1,0 +1,16 @@
+// Dynamic (Any) element lists: mixed ints/lists in equality and order.
+d := [1, [2, 3], [], [[4]], 5];
+e := [1, [2, 3], [], [[4]], 5];
+>> [d = e, d != e, d < e, d <= e];
+e[3][0] :+ 1;
+>> [d = e, d < e, e < d, d >= e];
+x := [];
+(i := 0; i < 50; i := i + 1;) @ x :+ [i, [i]];
+y := [];
+(i := 0; i < 50; i := i + 1;) @ y :+ [i, [i]];
+>> [x = y, x < y];
+y[49][1][0] := 50;
+>> [x = y, x < y, y < x];
+y[49] := 0;
+>> x = y;
+>> x < y;
