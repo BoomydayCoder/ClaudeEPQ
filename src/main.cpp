@@ -20,6 +20,7 @@
 #include "backend.hpp"
 #include "frontend.hpp"
 #include "infer.hpp"
+#include "tierup.hpp"  // tier-up hook
 #include "tir.hpp"
 #include "tirbuild.hpp"
 
@@ -51,6 +52,7 @@ void usage(FILE* f, const char* argv0) {
                  "  --frontend-time    print front-end phase timings to stderr\n"
                  "  --frontend-bench=N run parse..TIR passes N times in process, report per-phase timing\n"
                  "                     (with --parse-only: lex+parse+resolve only)\n"
+                 "  --tier-status FILE / --tier-clear   background-compiled cache (src/tierup.hpp)\n"
                  "  -h, --help         this help\n",
                  argv0);
 }
@@ -284,6 +286,7 @@ int main(int argc, char** argv) {
             opts.engine = Engine::Jit;
         } else if (!std::strcmp(a, "--engine=aot") || !std::strcmp(a, "--aot")) {
             opts.engine = Engine::Aot;
+        } else if (tierup::is_flag(a)) {  // tier-up hook: --tier-compile/--tier-status/--tier-clear
         } else if (a[0] == '-' && a[1] != 0) {
             std::fprintf(stderr, "%s: unknown option %s\n", argv[0], a);
             usage(stderr, argv[0]);
@@ -296,6 +299,7 @@ int main(int argc, char** argv) {
             return 2;
         }
     }
+    if (int rc; tierup::command(argc, argv, &rc)) return rc;  // tier-up hook: --tier-clear
     if (!have_file) {
         std::fputs("No file passed\n", stderr);
         usage(stderr, argv[0]);
@@ -307,6 +311,7 @@ int main(int argc, char** argv) {
     if (!load_source(cu, opts.file)) return 1;
     double t_read = us_since(t0);
     if (bench_iters > 0) return frontend_bench(cu, bench_iters, opts);
+    if (int rc; tierup::start(cu, opts, argc, argv, &rc)) return rc;  // tier-up hook: cache probe / helper
 
     // Small sources cannot nest deeply enough to threaten the main thread's
     // stack. Larger ones run the whole pipeline on a thread whose (lazily

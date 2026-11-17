@@ -265,6 +265,22 @@ Options normalise(const Options& in) {
 
 }  // namespace
 
+// ---- tier-up hook (src/tierup.cpp): run an already dlopen'ed dylib ----------
+int run_dylib_entry(void* h, const Options& opts) {
+    auto entry = (int (*)(void))dlsym(h, "epq_entry");
+    if (!entry) return -1;
+    g_flush = (void (*)(void))dlsym(h, "epq_entry_flush");
+    uint64_t exec_us = 0;
+    int rc = run_on_big_stack(entry, &exec_us);
+    if (opts.time) {
+        char buf[80];
+        int n = std::snprintf(buf, sizeof buf, "Execution time: %llu microseconds\n", (unsigned long long)exec_us);
+        (void)!::write(2, buf, (size_t)n);
+    }
+    return rc;
+}
+// ---- end tier-up hook --------------------------------------------------------
+
 int run_backend(const Program& prog, const Options& opts_in) {
     Options opts = normalise(opts_in);
     uint64_t T0 = now_us();
