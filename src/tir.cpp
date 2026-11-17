@@ -186,7 +186,10 @@ void dump(std::string& o, const Module& m) {
     }
     o += "regions:\n";
     for (size_t r = 0; r < m.regions.size(); ++r) {
-        o += "  L" + std::to_string(r) + " elem " + type_str(m, m.regions[r].elem) + " sites:";
+        o += "  L" + std::to_string(r) + " elem " + type_str(m, m.regions[r].elem);
+        if (m.regions[r].header_mutated) o += " header-mutated";
+        if (m.regions[r].elem_stored) o += " elem-stored";
+        o += " sites:";
         for (auto& s : m.regions[r].sites)
             o += " f" + std::to_string(s.func) + "/line" + std::to_string(s.line) + "/len" + std::to_string(s.len);
         o += "\n";
@@ -208,10 +211,14 @@ void dump(std::string& o, const Module& m) {
             if (i) o += ", ";
             o += D.lname(f.params[i]) + ": " + type_str(m, f.locals[f.params[i]].type);
         }
-        o += ") -> " + type_str(m, f.ret) + "\n  locals:";
+        o += ") -> " + type_str(m, f.ret) + "\n  mutates:";
+        for (uint32_t r : f.mutates) o += " L" + std::to_string(r);
+        if (f.mutates_any) o += " any";
+        o += "\n  locals:";
         for (size_t i = 0; i < f.locals.size(); ++i) {
             static const char* kn[] = {"param", "user", "hidden", "temp", "demoted"};
-            o += " " + D.lname((uint32_t)i) + ":" + type_str(m, f.locals[i].type) + "(" + kn[(int)f.locals[i].kind] + ")";
+            o += " " + D.lname((uint32_t)i) + ":" + type_str(m, f.locals[i].type) + "(" + kn[(int)f.locals[i].kind] +
+                 (f.locals[i].unique ? ",unique" : "") + ")";
         }
         o += "\n";
         D.node(f.body, 1);
@@ -249,6 +256,7 @@ const Pass kPassList[] = {
     {"constants", "single-literal globals become constants (§2.6)", pass_constants},
     {"demote-globals", "globals used only by main become locals of main (§2.6)", pass_demote_globals},
     {"fold", "constant folding of integer arithmetic", pass_fold},
+    {"region-info", "analysis: header-mutation summaries, unique lists (§5.2)", pass_region_info},
 };
 }  // namespace
 

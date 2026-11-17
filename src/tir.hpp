@@ -194,6 +194,7 @@ struct Local {
     LocalKind kind = LocalKind::User;
     Sym name = kNoSym;     // source name (kNoSym for hidden / temps)
     int32_t global = -1;   // Demoted: the global it replaces
+    bool unique = false;   // region-info: sole name of a literal-allocated list (§5.2)
 };
 
 struct Func {
@@ -207,6 +208,10 @@ struct Func {
     Type ret;
     Node* body = nullptr;       // a Seq
     std::string name;           // e.g. "f3_swap"
+    // region-info analysis (§5.2): regions whose list headers this function may
+    // mutate, transitively; mutates_any: also every region with Any elements.
+    std::vector<uint32_t> mutates;
+    bool mutates_any = false;
 };
 
 struct Global {
@@ -229,6 +234,8 @@ struct Region {
     std::vector<AllocSiteInfo> sites;  // literal allocation sites (from inference)
     // Filled by analyses (§5.2/§5.4 inputs):
     bool flows_to_any = false;   // elem == Any
+    bool header_mutated = false; // region-info: some Append / Pop on the region
+    bool elem_stored = false;    // region-info: some SetIndex on the region
 };
 
 // Static type descriptors (runtime EDesc). Index 0 INT, 1 ANY, 2 LIST(ANY), 3 FN.
@@ -278,6 +285,8 @@ struct Pass {
 void pass_definite_assignment(Module& m);
 void pass_constants(Module& m);
 void pass_demote_globals(Module& m);
+// Region analyses (src/analysis.cpp): Func::mutates, Local::unique, Region flags.
+void pass_region_info(Module& m);
 // Runs the registered passes in order, skipping those named in `disabled`.
 void run_passes(Module& m, const std::vector<std::string>& disabled, bool verbose);
 const std::vector<Pass>& passes();
