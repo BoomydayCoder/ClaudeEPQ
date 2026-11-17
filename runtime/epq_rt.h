@@ -427,7 +427,12 @@ EPQ_RT_API void epq_list_reserve(EList* l, int32_t n, uint32_t esz) {
     if (!l || n <= 0) return;
     if (n > EPQ_RESERVE_MAX) n = EPQ_RESERVE_MAX;
     int64_t need = (int64_t)l->len + n;
-    if (need > l->cap) epq_list_grow_to(l, esz, need);
+    if (need > l->cap) {
+        /* A hint repeated inside an outer loop must not defeat amortised growth
+         * (exact-fit growth would copy the whole list every outer iteration). */
+        if (l->len > 0 && (int64_t)l->cap * EPQ_GROW_FACTOR > need) need = (int64_t)l->cap * EPQ_GROW_FACTOR;
+        epq_list_grow_to(l, esz, need);
+    }
 }
 /* Appends m[lo..hi) to l if that is certainly what the element-by-element loop
  * would do without failing (value 1); otherwise does nothing (value 0). */

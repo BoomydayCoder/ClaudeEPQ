@@ -29,6 +29,7 @@ FIRES = {
     'copy_after_use': (2, None),
     'copy_dynamic': (1, None),
     'hint_counted': (0, 8),  # all counted loops but the one assigning i in its body
+    'hint_nested': (1, 2),  # inner counted loop + outer loop's own append; the inner copy loop
     'hint_foreach_merge': (6, 3),  # 4 merge instances; not the for-each over the appended list
 }
 
