@@ -1,0 +1,30 @@
+// a degenerate tree of 100000 levels: insert (iterative), recursive size/height
+ins := (t, v) => {
+    (t = []) ? => [v, [], []];
+    root := t;
+    (1) @ {
+        (v < t[0]) ? {
+            (t[1] = []) ? { t[1] := [v, [], []]; => root; }
+            t := t[1];
+        } : {
+            (t[2] = []) ? { t[2] := [v, [], []]; => root; }
+            t := t[2];
+        }
+    }
+    => root;
+};
+size := (t) => { (t = []) ? => 0; => 1 + size(t[1]) + size(t[2]); };
+height := (t) => { (t = []) ? => 0; a := height(t[1]); b := height(t[2]); (a > b) ? => a + 1; => b + 1; };
+tree := [];
+last := [];
+(i := 0; i < 100000; i := i + 1;) @ {
+    (last = []) ? { tree := [i, [], []]; last := tree; } : { last[2] := [i, [], []]; last := last[2]; }
+}
+>> size(tree);
+>> height(tree);
+tree := ins(tree, -5);
+>> size(tree);
+>> tree[1];
+c := tree; d := 0;
+(c != []) @ { d := d + 1; c := c[2]; }
+>> d;

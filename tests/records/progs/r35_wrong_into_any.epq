@@ -1,0 +1,16 @@
+// a tree that started from [] flows into Any (mixed with an int), via a return
+ins := (t, v) => {
+    (t = []) ? => [v, [], []];
+    (v < t[0]) ? t[1] := ins(t[1], v); : (v > t[0]) ? t[2] := ins(t[2], v);
+    => t;
+};
+tree := [];
+tree := ins(tree, 4); tree := ins(tree, 1);
+mix := (f) => { (f) ? => tree; => 7; };
+a := mix(1);
+b := mix(0);
+>> a;
+>> b;
+>> a[1];
+z := [tree, 3];
+>> z[0][0] + z[1];

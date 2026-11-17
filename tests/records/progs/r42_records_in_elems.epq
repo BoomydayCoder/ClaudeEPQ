@@ -1,0 +1,15 @@
+// trees stored as elements of other lists, returned and passed around
+ins := (t, v) => {
+    (t = []) ? => [v, [], []];
+    (v < t[0]) ? t[1] := ins(t[1], v); : (v > t[0]) ? t[2] := ins(t[2], v);
+    => t;
+};
+forest := [[], [], []];
+(i := 0; i < 9; i := i + 1;) @ forest[i - i / 3 * 3] := ins(forest[i - i / 3 * 3], i);
+>> forest;
+first := (f) => { => f[0]; };
+>> first(forest)[0];
+pairs := [];
+(i := 0; i < 3; i := i + 1;) @ pairs :+ [i, forest[i]];
+>> pairs[2][1][2];
+(p : pairs) @ { >> p[1][0]; }

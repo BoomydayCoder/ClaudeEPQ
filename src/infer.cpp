@@ -209,6 +209,7 @@ struct Solver {
             return;
         }
         if (!lit) R.evars[r].flags |= EV_PLAIN;
+        else R.evars[r].flags |= EV_ABS;  // literal-index content in a non-record region (see fail_run)
         flow_elem(l.a, v);
     }
     // A list-only use of l : List(e) (append, pop, for-each; condition 3).
@@ -866,60 +867,92 @@ struct Solver {
     void demote_region(uint32_t r) {
         for (const AllocSite& s : R.evars[r].sites) lit_state[gid(s)] = 2;
     }
-    // After a failed run: the empty literals that should be pre-shaped next time.
-    // A record region that failed after absorbing an undetermined region with
-    // content (EV_ABS; e.g. a global `tree := []` indexed and stored into before
-    // it met its first `[v, l, r]`) may have failed only because that content
-    // went into every field. Its empty sites that are still state 0 and whose
-    // every copy (one per instance) lies in a record region of the same length
-    // k, or in an unused undetermined region, are pre-shaped as k-records, and
-    // the region is not demoted this time. Everything else is demoted as before.
-    // Each call moves at least one site 0 -> 1 or 1 -> 2 (termination).
+    // After a failed run: demote, or pre-shape empty literals and try again.
+    //
+    // An undetermined region (only `[]` sites so far) that is indexed and stored
+    // into by literal index before it meets its first `[v, l, r]` (a global
+    // `tree := []` grown by `tree := insert(tree, v)`) collects all those values
+    // in its one element type. That content later either goes into every field
+    // when a record absorbs the region (field 0 becomes Int + List = Any), or
+    // already turns a record stored into it into Any. Either way the run fails
+    // only because the empty site had no shape yet. EV_ABS marks both situations
+    // (literal-index content in a non-record region, or a record that absorbed
+    // content), and the flag survives unions.
+    //
+    // Plan (decide everything first, then act; demotion wins over pre-shaping):
+    //  * a bad record region is *eligible* if all its non-empty sites are
+    //    candidate literals of its length (no ordinary literal, no other length);
+    //    every other bad region is demoted as before;
+    //  * empty sites still in state 0 whose every copy (one per instance) lies in
+    //    a record region of one length k, an unused undetermined region, or an
+    //    undetermined region with content, are pre-shaped as k-records (state 1,
+    //    empty_k = k) if (a) they are in an eligible bad region with EV_ABS, or
+    //    (b) they are in an undetermined region with content and all eligible bad
+    //    regions have one length k;
+    //  * if nothing is pre-shaped, the eligible regions are demoted too.
+    // A wrong guess is caught like any record violation (the pre-shaped region is
+    // a record from the start) and demotes the region with its empty sites.
+    // Each call moves at least one site 0 -> 1 or 0/1 -> 2 (termination).
     void fail_run(bool dbg, uint32_t runs) {
         constexpr uint8_t CONFLICT = 0xff;
+        auto content_only = [&](const EVar& v) {
+            if (v.nf || !(v.flags & EV_ABS)) return false;
+            for (const AllocSite& s : v.sites)
+                if (s.len) return false;
+            return true;
+        };
         std::vector<uint8_t> want(lit_state.size(), 0);
         for (size_t e = 0; e < R.evars.size(); ++e) {
             const EVar& v = R.evars[e];
             if (v.parent != e || (v.flags & EV_FIELD)) continue;
-            bool unused = !v.nf && !(v.flags & EV_PLAIN) && v.t.k == TyK::Bot;
+            bool neutral = (!v.nf && !(v.flags & EV_PLAIN) && v.t.k == TyK::Bot) || content_only(v);
             for (const AllocSite& s : v.sites) {
                 if (s.len) continue;
                 uint32_t g = gid(s);
-                if (lit_state[g] != 0 || unused) continue;
+                if (lit_state[g] != 0 || neutral) continue;
                 uint8_t k = v.nf ? v.nf : CONFLICT;
                 want[g] = (want[g] == 0 || want[g] == k) ? k : CONFLICT;
             }
         }
+        std::vector<uint32_t> keep, demote;
+        uint8_t kbad = 0;
         for (size_t e = 0; e < R.evars.size(); ++e) {
-            if (!(R.evars[e].flags & EV_BAD)) continue;
-            uint32_t r = find((uint32_t)e);
-            if (r != e) continue;  // flags are or-ed into the root on union
-            const EVar& v = R.evars[r];
+            const EVar& v = R.evars[e];
+            if (v.parent != e || !(v.flags & EV_BAD)) continue;  // flags are or-ed into the root
             if (dbg) {
-                std::fprintf(stderr, "records: run %u: bad region r%u flags %x sites:", runs, r, v.flags);
+                std::fprintf(stderr, "records: run %u: bad region r%zu flags %x sites:", runs, e, v.flags);
                 for (const AllocSite& s : v.sites) std::fprintf(stderr, " %d:%d/len%u", s.node->line, s.node->col, s.len);
                 std::fprintf(stderr, "\n");
             }
-            // (EV_PLAIN is no evidence against: dynamising a bad record's fields spreads it.)
-            bool retry = v.nf && (v.flags & EV_ABS);
+            bool ok = v.nf != 0;
             for (const AllocSite& s : v.sites)
-                if (s.len && s.len != v.nf) retry = false;  // records of different lengths met
-            size_t shaped = 0;
-            if (retry)
-                for (const AllocSite& s : v.sites) {
-                    uint32_t g = gid(s);
-                    if (s.len == 0 && lit_state[g] == 0 && want[g] == v.nf) {
-                        lit_state[g] = 1;
-                        empty_k[g] = v.nf;
-                        ++shaped;
-                    }
-                }
-            if (shaped) {
-                if (dbg) std::fprintf(stderr, "records: run %u: pre-shaping %zu empty site(s) of r%u as %u-records\n", runs, shaped, r, v.nf);
+                if (s.len && (s.len != v.nf || lit_state[gid(s)] != 1)) ok = false;
+            if (!ok) {
+                demote.push_back((uint32_t)e);
                 continue;
             }
-            demote_region(r);
+            keep.push_back((uint32_t)e);
+            kbad = (kbad == 0 || kbad == v.nf) ? v.nf : CONFLICT;
         }
+        size_t shaped = 0;
+        auto shape = [&](const EVar& v, uint8_t k) {
+            for (const AllocSite& s : v.sites) {
+                uint32_t g = gid(s);
+                if (s.len || lit_state[g] != 0 || (want[g] != 0 && want[g] != k)) continue;
+                lit_state[g] = 1;
+                empty_k[g] = k;
+                ++shaped;
+                if (dbg) std::fprintf(stderr, "records: run %u: pre-shaping [] at %d:%d as a %u-record\n", runs, s.node->line, s.node->col, k);
+            }
+        };
+        for (uint32_t r : keep)
+            if (R.evars[r].flags & EV_ABS) shape(R.evars[r], R.evars[r].nf);  // (a)
+        if (kbad != 0 && kbad != CONFLICT)
+            for (size_t e = 0; e < R.evars.size(); ++e)  // (b)
+                if (R.evars[e].parent == e && !(R.evars[e].flags & EV_FIELD) && content_only(R.evars[e]))
+                    shape(R.evars[e], kbad);
+        if (!shaped) demote.insert(demote.end(), keep.begin(), keep.end());
+        for (uint32_t r : demote) demote_region(r);
     }
     size_t active() {
         size_t n = 0;

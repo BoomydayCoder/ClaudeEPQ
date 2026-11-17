@@ -1,0 +1,13 @@
+// a for-each over a node of a tree that started as a global []
+ins := (t, v) => {
+    (t = []) ? => [v, [], []];
+    (v < t[0]) ? t[1] := ins(t[1], v); : (v > t[0]) ? t[2] := ins(t[2], v);
+    => t;
+};
+tree := [];
+tree := ins(tree, 5); tree := ins(tree, 2); tree := ins(tree, 8);
+s := 0;
+(x : tree[1]) @ { >> x; }
+(x : tree) @ { s := s + 1; }
+>> s;
+>> tree;

@@ -1,0 +1,17 @@
+// association list of [key, value, next]
+al := [];
+put := (k, v) => {
+    c := al;
+    (c != []) @ { (c[0] = k) ? { c[1] := v; => 0; } c := c[2]; }
+    al := [k, v, al];
+    => 1;
+};
+get := (k) => { c := al; (|c| != 0) @ { (c[0] = k) ? => c[1]; c := c[2]; } => -1; };
+(i := 0; i < 30; i := i + 1;) @ put(i - i / 7 * 7, i);
+>> al;
+>> [get(0), get(3), get(6), get(9)];
+put(3, 333);
+>> get(3);
+cnt := 0; c := al;
+(c != []) @ { cnt := cnt + 1; c := c[2]; }
+>> cnt;

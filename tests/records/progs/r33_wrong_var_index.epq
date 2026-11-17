@@ -1,0 +1,14 @@
+// the global empty tree is indexed with a variable in distant code
+ins := (t, v) => {
+    (t = []) ? => [v, [], []];
+    (v < t[0]) ? t[1] := ins(t[1], v); : (v > t[0]) ? t[2] := ins(t[2], v);
+    => t;
+};
+tree := [];
+(i := 0; i < 5; i := i + 1;) @ tree := ins(tree, i * 3 - i * i);
+>> tree;
+pick := (t, k) => { => t[k]; };
+>> pick(tree, 0);
+>> pick(pick(tree, 2), 0);
+j := 1;
+>> tree[j];

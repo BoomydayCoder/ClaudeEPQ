@@ -1,0 +1,17 @@
+// make() returns [] used for a tree, a cons list and a plain growing list
+make := () => { => []; };
+ins := (t, v) => {
+    (|t| = 0) ? => [v, make(), make()];
+    (v < t[0]) ? t[1] := ins(t[1], v); : t[2] := ins(t[2], v);
+    => t;
+};
+tr := make();
+(i := 0; i < 7; i := i + 1;) @ tr := ins(tr, (i * 4) - (i * 4) / 9 * 9);
+p := make();
+(i := 0; i < 5; i := i + 1;) @ p :+ i;
+cl := make();
+cl := [1, cl]; cl := [2, cl];
+>> tr;
+>> p;
+>> cl;
+>> make() = tr[1][1];

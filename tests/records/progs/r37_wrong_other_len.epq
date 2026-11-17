@@ -1,0 +1,18 @@
+// one empty site competes for records of two lengths (tree [v,l,r] and cons [h,t])
+mk := () => { => []; };
+ins := (t, v) => {
+    (t = []) ? => [v, mk(), mk()];
+    (v < t[0]) ? t[1] := ins(t[1], v); : t[2] := ins(t[2], v);
+    => t;
+};
+cons := (h, t) => { => [h, t]; };
+tr := mk();
+(i := 0; i < 5; i := i + 1;) @ tr := ins(tr, i * 7 - i * i);
+cl := mk();
+(i := 0; i < 5; i := i + 1;) @ cl := cons(i, cl);
+>> tr;
+>> cl;
+x := mk();
+x := [1, x];
+x := [1, 2, 3];
+>> x;
