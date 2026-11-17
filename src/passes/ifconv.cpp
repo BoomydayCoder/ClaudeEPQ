@@ -32,6 +32,12 @@
 //                           (when t == 0 every store writes back the value just read).
 // EPQ is single-threaded, so introducing the stores is legal. Loads and stores executed
 // with t == 0 are in bounds by the established facts and have no visible effect.
+//
+// Default: scalar SetLocal bodies only. Element stores need EPQ_IFCONV_STORES=1 (they
+// made bubblesort 4.7x slower). On the C engine at default flags, clang already emits the
+// same machine code for the scalar shapes on 8 of the 10 benchmarks where the pass fires
+// (heapsort, dijkstra, quicksort, ...), so the gain there is nil but nothing is lost; the
+// pass exists mainly for the JIT backend, which does not if-convert by itself.
 #include <cstdlib>
 #include <cstring>
 #include <vector>
