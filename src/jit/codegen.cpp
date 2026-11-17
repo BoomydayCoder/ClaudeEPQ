@@ -192,6 +192,7 @@ struct LocalInfo {
     int slot = -1;  // else frame slot
     bool is_const = false;  // pseudo-local holding a large constant used in loops
     int64_t cval = 0;
+    int alias = -1;  // coalesced into this local (result temporaries, see coalesce())
     std::vector<Ref> refs;
 };
 
@@ -607,6 +608,8 @@ public:
         }
         case Op::SetLocal: {
             kid(0, depth);
+            if (n->kids[0]->op == Op::Comma && n->kids[0]->kids[n->kids[0]->nkids - 1]->op == Op::Local)
+                copies_.push_back(n);
             LocalInfo& l = L[(size_t)n->a];
             if (!l.fn) {
                 l.refs.push_back(Ref{pos_, ctx_, true});
@@ -812,9 +815,83 @@ public:
             if (c.first == v) return L[c.second].reg;
         return -1;
     }
+    // Result temporaries of inlined bodies: x := Comma[k.., Local t] where every
+    // ref of t lies inside the Comma S (and t is written before it is read on
+    // every path through S), x is not written in S, every ref of x in S precedes
+    // the first ref of t, no loop in S holds refs of both, and no Break leaves S:
+    // then t can live in x's location (x is dead from t's first ref until the
+    // copy, t is dead after it), so the copy disappears.
+    std::vector<const Node*> copies_;
+    bool getenv_no_coalesce_ = false;
+    bool break_escapes(const Node* n, std::vector<int32_t>& inner) {
+        if (n->op == Op::Break) {
+            for (int32_t l : inner)
+                if (l == n->a) return false;
+            return true;
+        }
+        if (n->op == Op::InlineBlock) inner.push_back(n->a);
+        bool r = false;
+        for (uint32_t i = 0; i < n->nkids && !r; ++i) r = break_escapes(n->kids[i], inner);
+        if (n->op == Op::InlineBlock) inner.pop_back();
+        return r;
+    }
+    void coalesce() {
+        std::vector<int32_t> inner;
+        for (size_t ci = copies_.size(); ci-- > 0;) {  // outermost (later in post-order) first
+            const Node* C = copies_[ci];
+            const Node* S = C->kids[0];
+            uint32_t x = (uint32_t)C->a, t = (uint32_t)S->kids[S->nkids - 1]->a;
+            while (L[x].alias >= 0) x = (uint32_t)L[x].alias;
+            if (x == t || L[t].alias >= 0) continue;
+            LocalInfo &lx = L[x], &lt = L[t];
+            if (lx.fn || lt.fn || lt.param || lt.needs_init || lt.is_const || lx.is_const) continue;
+            if (lx.x64 != lt.x64 || lx.any != lt.any || lt.refs.empty()) continue;
+            uint32_t en = I(S).en, lv = I(S).lv;
+            uint32_t tfirst = UINT32_MAX;
+            bool ok = true;
+            for (auto& r : lt.refs) {
+                if (r.pos < en || r.pos > lv) ok = false;
+                tfirst = std::min(tfirst, r.pos);
+            }
+            if (!ok) continue;
+            for (auto& r : lx.refs)
+                if (r.pos >= en && r.pos <= lv && (r.write || r.pos >= tfirst)) ok = false;
+            if (!ok) continue;
+            for (auto& lp : loops) {
+                if (lp.en < en || lp.lv > lv) continue;
+                bool hx = false, ht = false;
+                for (auto& r : lx.refs) hx |= r.pos >= lp.en && r.pos <= lp.lv;
+                for (auto& r : lt.refs) ht |= r.pos >= lp.en && r.pos <= lp.lv;
+                if (hx && ht) ok = false;
+            }
+            if (!ok) continue;
+            inner.clear();
+            if (break_escapes(S, inner)) continue;
+            // t definitely assigned before every read inside S
+            Bits b;
+            set_all(b);
+            b[t >> 6] &= ~(1ull << (t & 63));
+            da(S, b);
+            if (lt.needs_init) {
+                lt.needs_init = false;
+                continue;
+            }
+            lt.alias = (int)x;
+            lx.weight += lt.weight;
+            lx.refs.insert(lx.refs.end(), lt.refs.begin(), lt.refs.end());
+            std::sort(lx.refs.begin(), lx.refs.end(), [](const Ref& a, const Ref& b) { return a.pos < b.pos; });
+            lt.refs.clear();
+            lt.weight = 0;
+        }
+    }
+    uint32_t canon(uint32_t id) {
+        while (L[id].alias >= 0) id = (uint32_t)L[id].alias;
+        return id;
+    }
     void analyze() {
         info.reset(count_nodes(F->body));
         const_ids.clear();
+        copies_.clear();
         loops.clear();
         call_pos.clear();
         pos_ = 0;
@@ -846,6 +923,7 @@ public:
         } else {
             for (size_t i = 0; i < F->locals.size(); ++i) L[i].needs_init = true;
         }
+        if (F->locals.size() <= 64 * kDaWords && !getenv_no_coalesce_) coalesce();
         // intervals
         for (auto& l : L) {
             if (l.fn || (l.refs.empty() && !l.param)) continue;
@@ -937,6 +1015,7 @@ public:
 
     // ------------------------------------------------------------------ locals
     V read_local(uint32_t id) {
+        id = canon(id);
         LocalInfo& l = L[id];
         if (l.fn) return V::none();
         if (early_) return V::reg(l.param_idx, false);
@@ -1369,7 +1448,7 @@ public:
     }
 
     V set_local(const Node* n) {
-        uint32_t id = (uint32_t)n->a;
+        uint32_t id = canon((uint32_t)n->a);
         LocalInfo& l = L[id];
         if (l.fn) {
             discard_value(n->kids[0]);
@@ -2210,10 +2289,56 @@ public:
         release(v);
         return NE;
     }
+    // `t := <compare>; x := Select(t, a, b)` with t read nowhere else: the
+    // comparison sets the flags for the csel directly (no 0/1 in between).
+    // The comparison is evaluated after a and b, which is safe because a and b
+    // are pure (Select kids) and the comparison writes no local and calls nothing.
+    const Node* select_cond_ = nullptr;
+    static bool flag_cond_op(Op o) {
+        switch (o) {
+        case Op::EqI32: case Op::NeI32: case Op::LtI32: case Op::LeI32: case Op::GtI32: case Op::GeI32:
+        case Op::PairEq: case Op::PairNe: case Op::PairLt: case Op::PairLe: case Op::PairGt: case Op::PairGe:
+        case Op::SameList: case Op::NotI32: return true;
+        default: return false;
+        }
+    }
+    static bool calm(const Node* n) {  // no local / global writes, no calls, no allocation
+        switch (n->op) {
+        case Op::ConstInt: case Op::Local: case Op::AddI32: case Op::SubI32: case Op::MulI32: case Op::NegI32:
+        case Op::DivI32: case Op::AbsI32: case Op::NotI32:
+        case Op::EqI32: case Op::NeI32: case Op::LtI32: case Op::LeI32: case Op::GtI32: case Op::GeI32:
+        case Op::PairEq: case Op::PairNe: case Op::PairLt: case Op::PairLe: case Op::PairGt: case Op::PairGe:
+        case Op::PairFirst: case Op::PairSecond: case Op::PairIndex: case Op::SameList:
+        case Op::ElemLoad: case Op::CheckIndex: case Op::Index: case Op::Len: case Op::ListData: case Op::RecGet:
+            for (uint32_t i = 0; i < n->nkids; ++i)
+                if (!calm(n->kids[i])) return false;
+            return true;
+        default: return false;
+        }
+    }
+    bool fuse_cond_select(const Node* a, const Node* b) {
+        if (a->op != Op::SetLocal || b->op != Op::SetLocal) return false;
+        const Node* sel = b->kids[0];
+        if (sel->op != Op::Select || sel->kids[0]->op != Op::Local || sel->kids[0]->a != a->a || sel->type.k == TK::Fn) return false;
+        const Node* c = a->kids[0];
+        if (!flag_cond_op(c->op) || !calm(c)) return false;
+        uint32_t t = (uint32_t)a->a;
+        const LocalInfo& l = L[t];
+        if (l.alias >= 0 || l.param || l.needs_init || l.refs.size() != 2 || l.fn) return false;
+        if (canon((uint32_t)b->a) == t) return false;
+        select_cond_ = c;
+        stmt(b);
+        select_cond_ = nullptr;
+        return true;
+    }
     V select(const Node* n, int want) {
         Type t = n->type;
         bool x64 = is64(t);
         const Node* c = n->kids[0];
+        if (select_cond_) {
+            c = select_cond_;
+            select_cond_ = nullptr;
+        }
         if (c->op == Op::ConstInt) return expr(c->a ? n->kids[1] : n->kids[2], want);
         if (t.k == TK::Fn) return V::none();
         V k[2];
@@ -2782,11 +2907,28 @@ public:
     void stmt(const Node* n) {
         switch (n->op) {
         case Op::Seq:
-            for (uint32_t i = 0; i < n->nkids; ++i) stmt(n->kids[i]);
+            for (uint32_t i = 0; i < n->nkids; ++i) {
+                if (i + 1 < n->nkids && fuse_cond_select(n->kids[i], n->kids[i + 1])) {
+                    ++i;
+                    continue;
+                }
+                stmt(n->kids[i]);
+            }
             return;
         case Op::If: {
             const Node* e = n->kids[2];
             bool has_else = !(e->op == Op::Seq && e->nkids == 0);
+            if (!has_else) {  // `if (c) break`: one conditional branch to the block's end
+                const Node* t = n->kids[1];
+                while (t->op == Op::Seq && t->nkids == 1) t = t->kids[0];
+                if (t->op == Op::Break) {
+                    for (size_t i = blocks.size(); i-- > 0;)
+                        if (blocks[i].first == t->a) {
+                            branch(n->kids[0], true, blocks[i].second);
+                            return;
+                        }
+                }
+            }
             Label lelse = A->new_label();
             branch(n->kids[0], false, lelse);
             stmt(n->kids[1]);
@@ -3311,6 +3453,7 @@ public:
         }
         func_off.assign(M.funcs.size(), 0);
         getenv_always_dry_ = getenv("EPQ_JIT_ALWAYS_DRY") != nullptr;
+        getenv_no_coalesce_ = getenv("EPQ_JIT_NO_COALESCE") != nullptr;
         for (auto& f : M.funcs) compile_func(*f);
         F = nullptr;
         emit_wrappers();
