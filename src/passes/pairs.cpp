@@ -196,6 +196,10 @@ struct PairsPass {
             Region& g = M.regions[r];
             if (cand[r]) g.pair = true;
             g.elem = rt(g.elem);
+            // integration (records): a record field of type List(r) follows r. (A value
+            // reaching a field passes through a RecLit kid / RecSet value, which already
+            // disqualifies r, so this only keeps never-constructed fields consistent.)
+            for (auto& ft : g.fields) ft = rt(ft);
         }
         // The pair region's own LIST descriptor (if any) becomes a PAIR descriptor:
         // outer list descriptors referring to it now describe lists of pairs.

@@ -1,0 +1,14 @@
+// appendopt x records x listopt x reclaim: lists whose elements are records
+recs := [];
+(i := 0; i < 5; i := i + 1;) @ recs :+ [i, [i * 2, i * 3], i - 1];
+cp := [];
+(k := 0; k < |recs|; k := k + 1;) @ cp :+ recs[k];
+>> cp;
+cp[2][1] := [0, 0];
+>> recs[2];
+(r : cp) @ { >> r[0] + r[1][1]; }
+best := cp[0];
+(j := 1; j < |cp|; j := j + 1;) @ { (best < cp[j]) ? best := cp[j]; }
+>> best;
+mkl := (n, d) => { (d > 0) ? { zz := mkl(n, d - 1); } o := []; (q := 0; q < n; q := q + 1;) @ o :+ [q, [q], 0]; c2 := []; (y : o) @ c2 :+ y; => c2; };
+>> mkl(3, 2);
