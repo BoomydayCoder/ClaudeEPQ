@@ -82,11 +82,20 @@ bool stable_pure(const Module& m, const Node* n) {
     bool ok = true;
     walk(n, [&](Node* x, Node*, uint32_t) {
         switch (x->op) {
-        case Op::Len: case Op::ElemLoad: case Op::ListData: ok = false; break;
         case Op::GetGlobal:
             if (x->type.k != TK::Fn && !m.globals[(size_t)x->a].constant) ok = false;
             break;
-        default: break;
+        // integration: a whitelist of value-only ops. Anything else (Len, ElemLoad,
+        // ListData, records' RecGet / RecLen — pure but reading mutable memory — and
+        // any op added later) is not stable.
+        case Op::ConstInt: case Op::ConstFn: case Op::Local: case Op::Box:
+        case Op::AddI32: case Op::SubI32: case Op::MulI32: case Op::NegI32: case Op::AbsI32: case Op::NotI32:
+        case Op::EqI32: case Op::NeI32: case Op::LtI32: case Op::LeI32: case Op::GtI32: case Op::GeI32:
+        case Op::Select: case Op::PairMake: case Op::PairFirst: case Op::PairSecond:
+        case Op::PairEq: case Op::PairNe: case Op::PairLt: case Op::PairLe: case Op::PairGt: case Op::PairGe:
+        case Op::SameList: case Op::RecNull:
+            break;
+        default: ok = false; break;
         }
         return ok;
     });
