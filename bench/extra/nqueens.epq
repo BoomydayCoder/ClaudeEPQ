@@ -1,0 +1,16 @@
+N := 12;
+// count n-queens solutions: recursion + flag lists
+solve := (row, n, cols, d1, d2) => {
+    (row = n) ? => 1;
+    cnt := 0;
+    (c := 0; c < n; c := c + 1;) @ {
+        (cols[c] = 0 & d1[row + c] = 0 & d2[row - c + n - 1] = 0) ? {
+            cols[c] := 1; d1[row + c] := 1; d2[row - c + n - 1] := 1;
+            cnt := cnt + solve(row + 1, n, cols, d1, d2);
+            cols[c] := 0; d1[row + c] := 0; d2[row - c + n - 1] := 0;
+        }
+    }
+    => cnt;
+};
+zeros := (k) => { z := []; (i := 0; i < k; i := i + 1;) @ z :+ 0; => z; };
+(m := 4; m <= N; m := m + 1;) @ >> [m, solve(0, m, zeros(m), zeros(2 * m), zeros(2 * m))];

@@ -1,0 +1,9 @@
+N := 1500000;
+// the one deliberately large-output benchmark: builds and prints long lists
+l := [];
+(i := 0; i < N; i := i + 1;) @ l :+ i * 7 - (i / 3) * 5;
+>> l;
+ll := [];
+(i := 0; i < N / 100; i := i + 1;) @ ll :+ [i, [i, -i], []];
+>> ll;
+(i := 0; i < N / 20; i := i + 1;) @ >> i;

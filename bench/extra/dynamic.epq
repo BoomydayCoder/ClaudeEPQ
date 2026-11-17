@@ -1,0 +1,29 @@
+N := 120000;
+// dynamic-typing-heavy workload: heterogeneous nested lists, functions stored in lists,
+// polymorphic functions called with ints, lists and functions, values that change type
+isint := (v) => { => (|v| = v) | (-|v| = v); };
+deepsum := (v) => {
+    (isint(v)) ? => v;
+    s := 0;
+    (x : v) @ s := s + deepsum(x);
+    => s;
+};
+size := (v) => { => |v|; };
+ops := [(a, b) => { => a + b; }, (a, b) => { => a * b - 1; }, (a, b) => { => a - 2 * b; },
+        (a, b) => { => (a > b) * a + (a <= b) * b; }];
+apply := (f, a, b) => { => f(a, b); };
+twice := (f, x) => { => f(f(x, 3), 5); };
+acc := 0;
+thing := 0;
+(i := 0; i < N; i := i + 1;) @ {
+    h := [i, [i + 1, [i + 2, i]], [], [[[i]]], -i];
+    acc := acc + deepsum(h) + size(h) + size(i - 7);
+    f := ops[i - i / 4 * 4];
+    acc := apply(f, acc, i) + twice(ops[(i + 1) - (i + 1) / 4 * 4], i);
+    (i - i / 3 * 3 = 0) ? thing := [thing, i]; : thing := (isint(thing)) * 1 + size(thing);
+    (f = ops[0]) ? acc := acc + 1;
+    acc := acc - acc / 1000003 * 1000003;
+}
+>> acc;
+>> thing;
+>> deepsum(thing);

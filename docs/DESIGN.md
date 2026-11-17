@@ -242,6 +242,34 @@ Constant folding and propagation, strength reduction (`* 2^k`, `/ 2^k`, other co
 multiply-high), reuse of an element value already loaded in the same statement sequence when no store to
 that region intervenes, dead-store and dead-local removal.
 
+### 5.7 Static reclamation — the part of garbage collection that makes code faster
+A tracing collector would not speed up anything the original can run: it never frees, so every program
+it can finish fits in memory, and ours needs a quarter of the space. What *does* cost time is that a
+leak-everything bump allocator streams through fresh memory: every new 16 KB page is a page fault and
+every new list is a cache miss, while the memory of lists that died microseconds ago sits unused.
+Mergesort allocates O(n log n) elements to sort n.
+
+So lists are freed at compile-time-known death points and their memory is reused at once, while it is
+still in cache — no collector, no reference counts, no run-time cost beyond the free itself:
+
+- **Ownership.** Within an instance, a list value has an origin: *fresh* (a literal here), *param*
+  (borrowed from the caller), *call result*, or *unknown* (loaded from a list or a global).
+- **Summaries.** Per instance and parameter: does it escape (stored into a list, a global or `Any`), and
+  can it be returned? Per instance: is the result always fresh or one of the arguments?
+- A fresh list — or a call result whose summary says "fresh or argument *i*", with argument *i* owned —
+  that is never stored anywhere and is not returned on this path is dead when its variable's scope
+  closes. It is freed there. Where two dead variables may alias (`sorted_left` may *be* `left`), the
+  generated code compares the pointers and frees once.
+- Freed headers and buffers go to size-class free lists that the allocator checks before bumping.
+- Only the list itself is freed, never what its elements point to.
+
+Guarded by a debug mode that poisons freed memory and never reuses it, so the fuzzer turns any unsound
+free into an immediate wrong answer instead of silent corruption.
+
+A conservative mark-sweep collector triggered only when the heap passes a large threshold remains an
+optional backstop for programs the original could never run (unbounded allocation in a long loop). It
+is deliberately last: it adds risk and no speed.
+
 ## 6. ARM64 JIT (default engine)
 
 One pass over Low TIR per instance, emitting into a `MAP_JIT` region (`pthread_jit_write_protect_np`,

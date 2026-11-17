@@ -1,0 +1,7 @@
+N := 33;
+// naive recursive fibonacci: call-heavy
+fib := (k) => {
+    (k < 2) ? => k;
+    => fib(k - 1) + fib(k - 2);
+};
+>> fib(N);

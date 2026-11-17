@@ -1,0 +1,41 @@
+N := 150000;
+// heap sort through explicit heappush / heappop (as in the original example), larger n
+mod := (a, b) => { => a - b * (a / b); };
+swap := (list, i, j) => { temp := list[i]; list[i] := list[j]; list[j] := temp; };
+heappush := (heap, value) => {
+    heap :+ value;
+    idx := |heap| - 1;
+    (idx > 0) @ {
+        parent := (idx - 1) / 2;
+        (heap[idx] >= heap[parent]) ? => 0;
+        swap(heap, idx, parent);
+        idx := parent;
+    }
+};
+heappop := (heap) => {
+    (|heap| = 1) ? => -heap;
+    minValue := heap[0];
+    heap[0] := -heap;
+    idx := 0;
+    size := |heap|;
+    (1) @ {
+        lc := 2 * idx + 1;
+        rc := 2 * idx + 2;
+        sm := idx;
+        (lc < size & heap[lc] < heap[sm]) ? sm := lc;
+        (rc < size & heap[rc] < heap[sm]) ? sm := rc;
+        (sm = idx) ? => minValue;
+        swap(heap, idx, sm);
+        idx := sm;
+    }
+};
+hp := [];
+s := 75;
+(i := 0; i < N; i := i + 1;) @ { s := mod(s * 75 + 74, 1000003); heappush(hp, s); }
+out := [];
+(|hp| > 0) @ out :+ heappop(hp);
+chk := 0;
+ok := 1;
+(i := 1; i < |out|; i := i + 1;) @ { (out[i - 1] > out[i]) ? ok := 0; chk := chk * 31 + out[i]; }
+>> ok;
+>> chk;

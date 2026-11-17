@@ -1,0 +1,31 @@
+N := 120000;
+// unbalanced binary search tree built from nested lists [value, left, right]; [] is empty
+insert := (t, v) => {
+    (|t| = 0) ? => [v, [], []];
+    (v < t[0]) ? t[1] := insert(t[1], v); : (v > t[0]) ? t[2] := insert(t[2], v);
+    => t;
+};
+count := (t) => { (|t| = 0) ? => 0; => 1 + count(t[1]) + count(t[2]); };
+height := (t) => {
+    (|t| = 0) ? => 0;
+    a := height(t[1]); b := height(t[2]);
+    (a > b) ? => a + 1;
+    => b + 1;
+};
+contains := (t, v) => {
+    (t != []) @ {
+        (v = t[0]) ? => 1;
+        (v < t[0]) ? t := t[1]; : t := t[2];
+    }
+    => 0;
+};
+tree := [];
+s := 12345;
+(i := 0; i < N; i := i + 1;) @ {
+    s := s * 1103515245 + 12345;
+    v := s / 65536;
+    tree := insert(tree, v - v / 1000000 * 1000000);
+}
+hits := 0;
+(i := 0; i < N; i := i + 1;) @ hits := hits + contains(tree, i * 37);
+>> [count(tree), height(tree), hits];

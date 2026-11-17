@@ -1,0 +1,16 @@
+N := 100000;
+// longest Collatz chain below N (peak values stay below 2^31 for N < 113383; 113383 overflows int32)
+best := 0;
+bestn := 0;
+total := 0;
+(i := 1; i < N; i := i + 1;) @ {
+    x := i;
+    len := 1;
+    (x != 1) @ {
+        (x - x / 2 * 2 = 0) ? x := x / 2; : x := 3 * x + 1;
+        len := len + 1;
+    }
+    total := total + len;
+    (len > best) ? { best := len; bestn := i; }
+}
+>> [bestn, best, total];

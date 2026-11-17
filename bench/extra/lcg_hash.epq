@@ -1,0 +1,18 @@
+N := 4000000;
+// LCG + multiplicative hash mixing with 32-bit wraparound, bucket histogram
+B := 1024;
+buckets := [];
+(i := 0; i < B; i := i + 1;) @ buckets :+ 0;
+h := 2166136261;
+s := 1;
+(i := 0; i < N; i := i + 1;) @ {
+    s := s * 1664525 + 1013904223;
+    h := (h + s) * 16777619;
+    h := h - h / 65536 * 3 + (h / 4096);
+    b := h - h / B * B;
+    (b < 0) ? b := b + B;
+    buckets[b] := buckets[b] + 1;
+}
+mx := 0; mn := N;
+(c : buckets) @ { (c > mx) ? mx := c; (c < mn) ? mn := c; }
+>> [h, s, mn, mx];

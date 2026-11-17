@@ -513,6 +513,9 @@ def rule_prec(r):
     return TOKPREC.get(last) if last is not None else None
 
 
+DUMMY_LA = "\x00dummy"      # must not collide with any terminal (e.g. '#')
+
+
 def build_lalr():
     nt = set(NONTERMS)
     prods_of = {}
@@ -616,14 +619,14 @@ def build_lalr():
     prop = {}
     for s, ks in enumerate(states):
         for kit in ks:
-            cl = closure1({kit: {"#"}})
+            cl = closure1({kit: {DUMMY_LA}})
             for (p, d), las in cl.items():
                 rhs = RULES[p][1]
                 if d < len(rhs):
                     t = gotos[(s, rhs[d])]
                     tgt = (t, (p, d + 1))
                     for a in las:
-                        if a == "#":
+                        if a == DUMMY_LA:
                             prop.setdefault((s, kit), []).append(tgt)
                         else:
                             la[tgt].add(a)

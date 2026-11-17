@@ -221,7 +221,7 @@ ERROR_KINDS = ["Operands must be integers", "Division by zero", "List is empty",
 COMPILE_ERRORS = ["Undefined variable", "Invalid argument list", "Argument shadows global variable",
                   "Duplicate argument name"]
 
-APPEND_BUDGET = 60
+APPEND_BUDGET = 40
 CONST_CAP = 165
 COST_MAIN = 6000
 COST_FN = 400
@@ -835,10 +835,27 @@ class Gen:
     def cost_limit(self, ctx):
         return COST_FN if ctx.fn is not None else COST_MAIN
 
+    def pok(self, ctx, k):
+        """May a value of kind k be printed here?  Never a function; deeply nested
+        (heavily shared) lists only in straight-line top-level code, to bound output."""
+        if has_func(k):
+            return False
+        lv = level(k)
+        if lv <= 1:
+            return True
+        if ctx.fn is None and ctx.loop == 0:
+            return True
+        return lv == 2 and ctx.mult <= 4 and self.chance(0.3)
+
     def gen_printable(self, ctx, d):
-        k = self.choose_kind(ctx.rank, allow_func=False)
+        for _ in range(8):
+            k = self.choose_kind(ctx.rank, allow_func=False)
+            if level(k) <= 1 or self.pok(ctx, k):
+                break
+        else:
+            k = I
         if self.chance(0.35):
-            vs = self.readable(ctx, lambda kk: not has_func(kk))
+            vs = self.readable(ctx, lambda kk: self.pok(ctx, kk))
             if vs:
                 v = self.rng.choice(vs)
                 return ID(v.name)
@@ -906,7 +923,7 @@ class Gen:
             e, ek = self.gen(ctx, v.kind, d)
             self.note_assign(v, ek, True)
             st = [EXP(SET(v.name, e))]
-            if self.chance(0.4) and not has_func(v.kind):
+            if self.chance(0.4) and self.pok(ctx, v.kind):
                 st.append(PRINT(ID(v.name)))
             return self.wrap_guard(ctx, st)
         if c == "store":
@@ -919,7 +936,7 @@ class Gen:
             e, _ = self.gen(ctx, lk[1], d - 1)
             self.feat("store")
             st = [EXP(N("SET", N("IND", ID(lv.name), idx), e))]
-            if not has_func(lk) and self.chance(0.4):
+            if self.pok(ctx, lk) and self.chance(0.4):
                 st.append(PRINT(ID(lv.name)))
             return self.wrap_guard(ctx, st)
         if c == "append":
@@ -936,7 +953,7 @@ class Gen:
             if n > 1:
                 self.feat("append_chain")
             st = [EXP(a)]
-            if not has_func(lk) and self.chance(0.5):
+            if self.pok(ctx, lk) and self.chance(0.5):
                 st.append(PRINT(ID(lv.name)))
             return self.wrap_guard(ctx, st)
         if c == "pop":
@@ -946,7 +963,7 @@ class Gen:
             lv = self.rng.choice(lvs)
             self.feat("pop")
             pe = N("NEG", ID(lv.name))
-            body = PRINT(pe) if not has_func(lv.known) else EXP(pe)
+            body = PRINT(pe) if self.pok(ctx, lv.known) else EXP(pe)
             if not self.loose or self.chance(0.8):
                 return IF(N("GT", N("ABS", ID(lv.name)), INT(1)), body)
             return body
@@ -976,7 +993,7 @@ class Gen:
             if r is None:
                 return None
             e, k = r
-            if not has_func(k) and self.chance(0.6):
+            if self.pok(ctx, k) and self.chance(0.6):
                 return self.wrap_guard(ctx, [PRINT(e)])
             return self.wrap_guard(ctx, [EXP(e)])
         if c == "ret":
@@ -1014,7 +1031,7 @@ class Gen:
             st = [EXP(SET(v.name, lit))]
             args = [self.gen(ctx, pk, 1)[0] for pk in f.sig[0]]
             call = CALL(ID(v.name), args)
-            st.append(PRINT(call) if not has_func(f.sig[1]) else EXP(call))
+            st.append(PRINT(call) if self.pok(ctx, f.sig[1]) else EXP(call))
             ctx.cost += COST_FN * ctx.mult
             return st
         if c == "dyncall":
@@ -1053,7 +1070,7 @@ class Gen:
             v = self.define_local(ctx, k)
         v.known = ek if not v.glob else v.kind
         st = [EXP(SET(v.name, e))]
-        if not has_func(k) and self.chance(0.5):
+        if self.pok(ctx, k) and self.chance(0.5):
             st.append(PRINT(ID(v.name)))
         if k[0] == "D":
             self.feat("dyn_var")
@@ -1169,7 +1186,10 @@ class Gen:
         self.push(ctx)          # while scope
         cond = N("LT", ID(wv.name), INT(n))
         if self.chance(0.3):
+            m0 = ctx.mult
+            ctx.mult *= n + 1       # the condition runs n+1 times (matters for `<<` accounting)
             cond = N("AND", cond, self.gen_int(ctx, 1)[0])
+            ctx.mult = m0
             self.feat("while_and")
         old = self.body_ctx(ctx, max(n, 1))
         ctx.reach = False
@@ -1214,7 +1234,7 @@ class Gen:
             else:
                 body.append(IF(N("GT", N("ABS", ID(target.name)), INT(2)), EXP(N("NEG", ID(target.name)))))
                 self.feat("foreach_shrink")
-        if not has_func(ek) and self.chance(0.6):
+        if self.pok(ctx, ek) and self.chance(0.6):
             body.insert(0, PRINT(ID(ev.name)))
         self.pop(ctx)
         self.leave(ctx, old)
@@ -1227,7 +1247,7 @@ class Gen:
 
     def gen_alias(self, ctx, d):
         """alias a list, mutate through one name, observe through the other."""
-        lvs = self.list_vars(ctx, lambda k: k[0] == "L" and not has_func(k))
+        lvs = self.list_vars(ctx, lambda k: k[0] == "L" and self.pok(ctx, k))
         if not lvs or ctx.reach:
             return None
         lv = self.rng.choice(lvs)
@@ -1283,7 +1303,7 @@ class Gen:
             sub.rec_calls = 1
             args = [N("SUB", ID("dp"), INT(1))] + [self.gen(sub, pk, 1)[0] for pk in fi.params]
             e = CALL(ID(fi.name), args)
-            stmts.append(PRINT(e) if not has_func(fi.ret) else EXP(e))
+            stmts.append(PRINT(e) if self.pok(sub, fi.ret) else EXP(e))
             self.feat("recursion")
         if fi.ret == I and self.chance(0.2):
             pass                # fall off the end: returns 0
@@ -1471,7 +1491,7 @@ class Gen:
         return SEQ(stmts)
 
     def inputs(self):
-        n = self.nreads + 4
+        n = 2 * self.nreads + 8
         g = self.rng
         vals = []
         for _ in range(n):

@@ -1,0 +1,21 @@
+N := 3500;
+// bubble sort with an early-exit flag
+mod := (a, b) => { => a - b * (a / b); };
+l := [];
+s := 7;
+(i := 0; i < N; i := i + 1;) @ { s := mod(s * 75 + 74, 65537); l :+ s; }
+n := |l|;
+sorted := 0;
+pass := 0;
+(sorted = 0) @ {
+    sorted := 1;
+    (j := 0; j < n - pass - 1; j := j + 1;) @ (l[j] > l[j + 1]) ? {
+        t := l[j]; l[j] := l[j + 1]; l[j + 1] := t;
+        sorted := 0;
+    }
+    pass := pass + 1;
+}
+chk := 0;
+(x : l) @ chk := chk * 17 + x;
+>> pass;
+>> chk;

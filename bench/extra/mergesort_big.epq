@@ -1,0 +1,30 @@
+N := 200000;
+// top-down merge sort building new lists (allocation heavy)
+mod := (a, b) => { => a - b * (a / b); };
+merge := (a, b) => {
+    i := 0; j := 0;
+    out := [];
+    (i < |a| & j < |b|) @ {
+        (a[i] < b[j]) ? { out :+ a[i]; i := i + 1; } : { out :+ b[j]; j := j + 1; }
+    }
+    (i < |a|) @ { out :+ a[i]; i := i + 1; }
+    (j < |b|) @ { out :+ b[j]; j := j + 1; }
+    => out;
+};
+sort := (l) => {
+    (|l| <= 1) ? => l;
+    mid := |l| / 2;
+    left := []; right := [];
+    (i := 0; i < mid; i := i + 1;) @ left :+ l[i];
+    (i := mid; i < |l|; i := i + 1;) @ right :+ l[i];
+    => merge(sort(left), sort(right));
+};
+data := [];
+s := 75;
+(i := 0; i < N; i := i + 1;) @ { s := mod(s * 75 + 74, 65537); data :+ s; }
+r := sort(data);
+chk := 0;
+(x : r) @ chk := chk * 31 + x;
+>> |r|;
+>> chk;
+>> [r[0], r[|r| - 1]];

@@ -1,0 +1,38 @@
+N := 200;
+// dense matrix multiplication on lists of lists
+mk := (n, seed) => {
+    m := [];
+    s := seed;
+    (i := 0; i < n; i := i + 1;) @ {
+        row := [];
+        (j := 0; j < n; j := j + 1;) @ {
+            s := s * 1103515245 + 12345;
+            v := s / 65536;
+            row :+ v - v / 100 * 100;
+        }
+        m :+ row;
+    }
+    => m;
+};
+mul := (a, b, n) => {
+    c := [];
+    (i := 0; i < n; i := i + 1;) @ {
+        ai := a[i];
+        row := [];
+        (j := 0; j < n; j := j + 1;) @ {
+            acc := 0;
+            (k := 0; k < n; k := k + 1;) @ acc := acc + ai[k] * b[k][j];
+            row :+ acc;
+        }
+        c :+ row;
+    }
+    => c;
+};
+ma := mk(N, 1);
+mb := mk(N, 2);
+mc := mul(ma, mb, N);
+chk := 0;
+(row : mc) @ (x : row) @ chk := chk * 7 + x;
+>> chk;
+>> mc[0][0];
+>> mc[N - 1][N - 1];

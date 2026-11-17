@@ -1,0 +1,59 @@
+N := 40000;
+// Dijkstra with a binary heap of [dist, vertex] pairs on a self-generated sparse graph
+// (N vertices, ~5N edges, spanning chain for connectivity, LCG weights)
+mod := (a, b) => { => a - b * (a / b); };
+swap := (list, i, j) => { t := list[i]; list[i] := list[j]; list[j] := t; };
+heappush := (heap, value) => {
+    heap :+ value;
+    idx := |heap| - 1;
+    (idx > 0) @ {
+        parent := (idx - 1) / 2;
+        (heap[idx] >= heap[parent]) ? => 0;
+        swap(heap, idx, parent);
+        idx := parent;
+    }
+};
+heappop := (heap) => {
+    (|heap| = 1) ? => -heap;
+    top := heap[0];
+    heap[0] := -heap;
+    idx := 0;
+    size := |heap|;
+    (1) @ {
+        lc := 2 * idx + 1; rc := lc + 1; sm := idx;
+        (lc < size & heap[lc] < heap[sm]) ? sm := lc;
+        (rc < size & heap[rc] < heap[sm]) ? sm := rc;
+        (sm = idx) ? => top;
+        swap(heap, idx, sm);
+        idx := sm;
+    }
+};
+seed := 99;
+rnd := (m) => { seed := seed * 1103515245 + 12345; v := seed / 65536; (v < 0) ? v := -v; => mod(v, m); };
+adj := [];
+(i := 0; i < N; i := i + 1;) @ adj :+ [];
+(i := 1; i < N; i := i + 1;) @ {
+    u := rnd(i); w := 1 + rnd(1000);
+    adj[u] :+ [w, i]; adj[i] :+ [w, u];
+}
+(e := 0; e < 4 * N; e := e + 1;) @ {
+    u := rnd(N); v := rnd(N); w := 1 + rnd(1000);
+    adj[u] :+ [w, v]; adj[v] :+ [w, u];
+}
+INF := 1000000000;
+dist := [];
+(i := 0; i < N; i := i + 1;) @ dist :+ INF;
+dist[0] := 0;
+hp := [[0, 0]];
+(|hp| > 0) @ {
+    cur := heappop(hp);
+    d := cur[0]; u := cur[1];
+    (d <= dist[u]) ? (pr : adj[u]) @ {
+        nd := d + pr[0];
+        v := pr[1];
+        (nd < dist[v]) ? { dist[v] := nd; heappush(hp, [nd, v]); }
+    }
+}
+chk := 0; mx := 0;
+(x : dist) @ { chk := chk * 31 + x; (x > mx) ? mx := x; }
+>> [chk, mx, dist[N - 1]];
