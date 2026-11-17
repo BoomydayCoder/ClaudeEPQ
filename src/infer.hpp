@@ -53,13 +53,28 @@ struct AllocSite {
     uint32_t len;      // number of elements of the literal
 };
 
-struct EVar {
-    uint32_t parent;               // union-find parent (== own index for roots)
-    Ty t;                          // element type (meaningful on roots)
-    std::vector<AllocSite> sites;  // merged into the root on union
+constexpr uint32_t kNone = 0xffffffffu;
+
+// EVar flags (records, DESIGN.md §5.11).
+enum : uint8_t {
+    EV_PLAIN = 1 << 0,  // region is definitely an ordinary list (non-record site or a list-only use)
+    EV_BAD = 1 << 1,    // record region violated a record condition (this run is discarded)
+    EV_FIELD = 1 << 2,  // a position variable of a record, not a region
+    EV_NULL = 1 << 3,   // (final result, roots) record region with an empty-literal site
 };
 
-constexpr uint32_t kNone = 0xffffffffu;
+struct EVar {
+    uint32_t parent;               // union-find parent (== own index for roots)
+    Ty t;                          // element type (meaningful on roots; unused for records)
+    std::vector<AllocSite> sites;  // merged into the root on union
+    // Records (§5.11): a root with nf > 0 is a *record region*; position j has
+    // its own type variable, the field EVar find(fbase + j) (its t is the type).
+    // A root with nf == 0 is an ordinary list region (or, with neither
+    // EV_PLAIN nor any non-empty site, still undetermined: only `[]` sites).
+    uint32_t fbase = kNone;
+    uint8_t nf = 0;
+    uint8_t flags = 0;
+};
 
 // Open-addressing map AST node -> ordinal (built once by infer(), read-only
 // afterwards). Replaces std::unordered_map: one allocation, no per-entry nodes.
@@ -115,6 +130,8 @@ struct Config {
     uint32_t max_per_def = 8;    // §2.4 caps
     uint32_t max_total = 256;
     bool dedup = true;
+    bool records = true;         // §5.11 record typing (--no-records / EPQ_NO_RECORDS=1: off)
+    uint32_t max_record_runs = 10;  // speculative runs after run 0 (hard limit)
 };
 
 struct Result {
@@ -128,6 +145,8 @@ struct Result {
     NodeMap ord;                      // node -> ordinal within its function (preorder)
     std::vector<uint32_t> nnodes;     // DefId -> number of ordinals
     uint32_t passes = 0;
+    uint32_t record_runs = 0;   // inference runs after run 0 (0: no record candidates)
+    bool has_records = false;   // some region of the final result is a record region
 
     uint32_t find(uint32_t e) const {
         while (evars[e].parent != e) e = evars[e].parent;
@@ -135,6 +154,11 @@ struct Result {
     }
     // Element type of the region of e (the root's type).
     Ty elem(uint32_t e) const { return evars[find(e)].t; }
+    // Records (§5.11). e: any EVar of a list region.
+    bool is_rec(uint32_t e) const { return evars[find(e)].nf > 0; }
+    uint32_t rec_len(uint32_t e) const { return evars[find(e)].nf; }
+    bool rec_nullable(uint32_t e) const { return (evars[find(e)].flags & EV_NULL) != 0; }
+    Ty field(uint32_t e, uint32_t j) const { return evars[find(evars[find(e)].fbase + j)].t; }
     uint32_t ordinal(const Node* n) const { return ord.at(n); }
     const Ty& type_of(uint32_t inst, const Node* n) const { return insts[inst]->nty[ordinal(n)]; }
     uint32_t aux_of(uint32_t inst, const Node* n) const { return insts[inst]->naux[ordinal(n)]; }

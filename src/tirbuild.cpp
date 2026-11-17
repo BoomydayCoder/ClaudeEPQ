@@ -43,6 +43,18 @@ struct Builder {
         uint32_t id = (uint32_t)M.regions.size();
         M.regions.emplace_back();
         region_of_root[root] = (int32_t)id;
+        if (R.evars[root].nf) {  // record region (§5.11)
+            uint32_t k = R.evars[root].nf;
+            M.regions[id].record = true;
+            M.regions[id].nullable = R.rec_nullable(root);
+            M.regions[id].rec_len = k;
+            M.regions[id].fields.assign(k, Type::bot());
+            for (uint32_t j = 0; j < k; ++j) {
+                Type ft = conv(R.field(root, j));
+                M.regions[id].fields[j] = ft;
+            }
+            return id;
+        }
         Type el = conv(R.evars[root].t);
         M.regions[id].elem = el;
         M.regions[id].flows_to_any = el.k == TK::Any;
@@ -54,10 +66,32 @@ struct Builder {
         case TyK::Int: return Type::i32();
         case TyK::Any: return Type::any();
         case TyK::Fn: return Type::fn(t.a);
-        case TyK::List: return Type::list(region(t.a));
+        case TyK::List: {
+            uint32_t r = region(t.a);
+            return M.regions[r].record ? Type::rec(r) : Type::list(r);
+        }
         }
         return Type::bot();
     }
+    // ---- records (§5.11) ----------------------------------------------------------
+    const Region& rreg(Type t) { return M.regions[t.a]; }
+    // Literal index of an AST index node, or -1 (records only ever see literals).
+    static int64_t lit_index(const epq::Node* i) { return i->kind == NK::Int ? (int64_t)i->ival : -1; }
+    TNode* rec_get(TNode* r, const epq::Node* idx_ast, TNode* idx) {
+        int64_t j = lit_index(idx_ast);
+        if (idx_ast->kind != NK::Int) internal("record indexed by a non-literal", line);
+        if (j < 0 || j >= rreg(r->type).rec_len) return fail(Err::IndexOOB, {r, idx});
+        TNode* g = mk(Op::RecGet, rreg(r->type).fields[(size_t)j], {r});
+        g->a = (int32_t)j;
+        g->b = rreg(r->type).nullable ? 1 : 0;
+        return g;
+    }
+    TNode* rec_len(TNode* r) {
+        if (rreg(r->type).nullable) return mk(Op::RecLen, Type::i32(), {r});
+        return mk(Op::Comma, Type::i32(), {r, cint((int32_t)rreg(r->type).rec_len)});
+    }
+    static bool is_empty_lit(const TNode* x) { return (x->op == Op::ListLit && x->nkids == 0) || x->op == Op::RecNull; }
+    static bool list_like(Type t) { return t.k == TK::List || t.k == TK::Rec; }
     Type elem(Type l) { return M.regions[l.a].elem; }
 
     uint32_t func_for(uint32_t i) {
@@ -166,7 +200,7 @@ struct Builder {
         return mkv_top(Op::Comma, n->type, base);
     }
     static bool is_list(Type t) { return t.k == TK::List; }
-    static bool is_nonint_static(Type t) { return t.k == TK::List || t.k == TK::Fn; }
+    static bool is_nonint_static(Type t) { return t.k == TK::List || t.k == TK::Fn || t.k == TK::Rec; }
 
     // ---- variables -------------------------------------------------------------
     TNode* read_var(const epq::Node* id) {
@@ -220,6 +254,7 @@ struct Builder {
             Type l = k[0]->type;
             if (l.k == TK::List) return mk(Op::Append, l, {k[0], coerce(k[1], elem(l))});
             if (l.k == TK::Any) return mk(Op::DynAppend, l, {k[0], coerce(k[1], Type::any())});
+            if (l.k == TK::Rec) internal("append to a record", n->line);
             return fail(Err::OperandList, k, 2);
         }
         case NK::Add: case NK::Sub: case NK::Mul: case NK::Div: return arith(n);
@@ -240,6 +275,7 @@ struct Builder {
             case TK::Bot: return x;
             case TK::Int: return mk(Op::AbsI32, Type::i32(), {x});
             case TK::List: return mk(Op::Len, Type::i32(), {x});
+            case TK::Rec: return rec_len(x);
             case TK::Any: return mk(Op::DynAbs, Type::i32(), {x});
             default: return fail(Err::IntOrList, {x});
             }
@@ -251,6 +287,7 @@ struct Builder {
             case TK::Int: return mk(Op::NegI32, Type::i32(), {x});
             case TK::List: return mk(Op::Pop, elem(x->type), {x});
             case TK::Any: return mk(Op::DynNeg, Type::any(), {x});
+            case TK::Rec: internal("pop of a record", n->line);
             default: return fail(Err::IntOrList, {x});
             }
         }
@@ -268,6 +305,7 @@ struct Builder {
             if (TNode* b = bot_short(k, 2)) return b;
             Type l = k[0]->type, i = k[1]->type;
             if (is_nonint_static(i) || l.k == TK::Int || l.k == TK::Fn) return fail(Err::InvalidOp, k, 2);
+            if (l.k == TK::Rec) return rec_get(k[0], n->kids[1], k[1]);
             if (l.k == TK::List) {
                 TNode* idx = i.k == TK::Int ? k[1] : unbox(k[1], Err::InvalidOp);
                 return mk(Op::Index, elem(l), {k[0], idx});
@@ -276,7 +314,8 @@ struct Builder {
         }
         case NK::List: {
             uint32_t e = R.aux_of(inst, n);
-            Type t = Type::list(region(e));
+            Type t = conv(Ty::list(e));
+            if (t.k == TK::Rec) return rec_lit(n, t);
             Type el = elem(t);
             size_t base = stk.size();
             for (uint32_t i = 0; i < n->nkids; ++i) {
@@ -294,6 +333,54 @@ struct Builder {
         default:
             internal("unexpected AST node", n->line);
         }
+    }
+
+    // [e1, ..., ek] of a record region: RecLit; [] of a nullable one: RecNull.
+    TNode* rec_lit(const epq::Node* n, Type t) {
+        const uint32_t k = rreg(t).rec_len;
+        if (n->nkids == 0) {
+            if (!rreg(t).nullable) internal("empty literal of a non-nullable record", n->line);
+            return mk(Op::RecNull, t, {});
+        }
+        if (n->nkids != k) internal("record literal of the wrong length", n->line);
+        size_t base = stk.size();
+        for (uint32_t i = 0; i < n->nkids; ++i) {
+            TNode* x = expr(n->kids[i]);
+            stk.push_back(x);
+        }
+        if (TNode* b = bot_short(stk.data() + base, n->nkids)) {
+            stk.resize(base);
+            return b;
+        }
+        for (uint32_t i = 0; i < k; ++i) stk[base + i] = coerce(stk[base + i], rreg(t).fields[i]);
+        return mkv_top(Op::RecLit, t, base);
+    }
+    // r[j] := v with r : Rec. k = {r, i, v} (already evaluated, none Bot).
+    TNode* rec_set(const epq::Node* idx_ast, TNode** k, bool discard) {
+        if (idx_ast->kind != NK::Int) internal("record store with a non-literal index", line);
+        int64_t j = idx_ast->ival;
+        const Region& rg = rreg(k[0]->type);
+        if (j < 0 || j >= rg.rec_len) return fail(Err::IndexOOB, k, 3);
+        Type ft = rg.fields[(size_t)j];
+        bool nullchk = rg.nullable;
+        Type vt = k[2]->type;
+        size_t base = stk.size();
+        bool keep_v = !discard && vt != ft;
+        if (keep_v) {  // the expression's value keeps v's (narrower) type
+            TNode* kk[2] = {k[0], k[2]};
+            spill(kk, 2);
+            k[0] = kk[0];
+            k[2] = kk[1];
+        }
+        TNode* st = mk(Op::RecSet, ft, {k[0], coerce(k[2], ft)});
+        st->a = (int32_t)j;
+        st->b = nullchk ? 1 : 0;
+        if (keep_v) {
+            stk.push_back(st);
+            stk.push_back(k[2]);
+            return mkv_top(Op::Comma, vt, base);
+        }
+        return with_prefix(base, st);
     }
 
     TNode* unbox(TNode* x, Err e) {
@@ -318,6 +405,7 @@ struct Builder {
         if (TNode* b = bot_short(k, 3)) return b;
         Type l = k[0]->type, i = k[1]->type, vt = k[2]->type;
         if (is_nonint_static(i) || l.k == TK::Int || l.k == TK::Fn) return fail(Err::InvalidOp, k, 3);
+        if (l.k == TK::Rec) return rec_set(tg->kids[1], k, discard);
         Type et = l.k == TK::List ? elem(l) : Type::any();
         size_t base = stk.size();
         bool keep_v = !discard && vt != et;
@@ -356,7 +444,14 @@ struct Builder {
         bool ne = n->kind == NK::Ne;
         Type a = k[0]->type, b = k[1]->type;
         if (a.k == TK::Int && b.k == TK::Int) return mk(ne ? Op::NeI32 : Op::EqI32, Type::i32(), {k[0], k[1]});
-        if (a.k != TK::Any && b.k != TK::Any && !(a.k == TK::List && b.k == TK::List)) {
+        {  // records: `t = []` / `t != []` is a null test (the empty literal has no effects)
+            TNode* r = nullptr;
+            if (a.k == TK::Rec && is_empty_lit(k[1])) r = k[0];
+            else if (b.k == TK::Rec && is_empty_lit(k[0])) r = k[1];
+            if (r && rreg(r->type).nullable) return mk(ne ? Op::NeI32 : Op::EqI32, Type::i32(), {rec_len(r), cint(0)});
+            if (r) return mk(Op::Comma, Type::i32(), {r, cint(ne ? 1 : 0)});
+        }
+        if (a.k != TK::Any && b.k != TK::Any && !(list_like(a) && list_like(b))) {
             bool eq = a.k == b.k && (a.k != TK::Fn || a.a == b.a);
             return mk(Op::Comma, Type::i32(), {k[0], k[1], cint(eq != ne ? 1 : 0)});
         }
@@ -372,7 +467,7 @@ struct Builder {
         Op op = n->kind == NK::Lt ? Op::LtI32 : n->kind == NK::Gt ? Op::GtI32 : n->kind == NK::Le ? Op::LeI32 : Op::GeI32;
         Type a = k[0]->type, b = k[1]->type;
         if (a.k == TK::Int && b.k == TK::Int) return mk(op, Type::i32(), {k[0], k[1]});
-        if (a.k == TK::Fn || b.k == TK::Fn || (a.k == TK::Int && b.k == TK::List) || (a.k == TK::List && b.k == TK::Int))
+        if (a.k == TK::Fn || b.k == TK::Fn || (a.k == TK::Int && list_like(b)) || (list_like(a) && b.k == TK::Int))
             return fail(Err::InvalidCmp, k, 2);
         TNode* r = mk(Op::Cmp, Type::i32(), {k[0], k[1]});
         r->a = (int32_t)M.desc_of(a);
@@ -520,6 +615,8 @@ struct Builder {
             c = mk(Op::LtI32, Type::i32(), {local(idx), mk(Op::AbsI32, Type::i32(), {local(L)})});
             get = fail(Err::InvalidOp, {local(L), local(idx)});
             break;
+        case TK::Rec:
+            internal("for-each over a record", n->line);
         default:  // Fn
             c = fail(Err::IntOrList, {local(L)});
             get = fail(Err::InvalidOp, {});

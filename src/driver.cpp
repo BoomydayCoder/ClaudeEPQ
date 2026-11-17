@@ -115,6 +115,7 @@ std::string compile_cached(const std::string& csrc, bool verbose) {
     key += kEmitterVersion;
     key += '\0';
     if (const char* np = std::getenv("EPQ_NO_PASS")) key += np;  // (already reflected in csrc; explicit)
+    if (const char* nr = std::getenv("EPQ_NO_RECORDS")) key += std::string("\0norec", 6) + nr;  // records (§5.11)
     std::string h = hash_hex(key);
     std::string path = dir + "/" + h + ".dylib";
     if (::access(path.c_str(), R_OK) == 0) {
@@ -260,6 +261,7 @@ Options normalise(const Options& in) {
     for (auto& s : in.only_pass) split_into(o.only_pass, s);
     if (const char* e = std::getenv("EPQ_NO_PASS")) split_into(o.no_pass, e);
     if (const char* e = std::getenv("EPQ_VERIFY_TIR"); e && e[0] == '1') o.verify_tir = true;
+    if (const char* e = std::getenv("EPQ_NO_RECORDS"); e && e[0] == '1') o.no_records = true;  // records (§5.11)
     return o;
 }
 
@@ -271,6 +273,7 @@ int run_backend(const Program& prog, const Options& opts_in) {
     infer::Config cfg;
     cfg.poly = !opts.mono;
     cfg.dedup = !opts.no_dedup;
+    cfg.records = !opts.no_records;
     infer::Result R;
     infer::infer(prog, cfg, R);
     uint64_t Ti = now_us();

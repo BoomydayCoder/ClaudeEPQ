@@ -36,6 +36,7 @@ const char* op_name(Op o) {
         C(Select) C(InlineBlock) C(Break) C(PairMake) C(PairFirst) C(PairSecond) C(PairIndex) C(PairEq) C(PairNe)
         C(PairLt) C(PairLe) C(PairGt) C(PairGe) C(ListData) C(ElemLoad) C(ElemStore) C(CheckIndex) C(Free)
         C(SameList) C(Nop)
+        C(RecLit) C(RecNull) C(RecGet) C(RecSet) C(RecLen)  // records (§5.11)
 #undef C
     }
     return "?";
@@ -87,6 +88,20 @@ uint32_t Module::desc_of(Type t) {
         descs[id].elem = e;
         return id;
     }
+    case TK::Rec: {  // records (§5.11): RECORD {5, k | nullable << 16}, then k FIELD entries
+        if (region_desc_memo.size() < regions.size()) region_desc_memo.resize(regions.size(), -1);
+        if (region_desc_memo[t.a] >= 0) return (uint32_t)region_desc_memo[t.a];
+        const uint32_t k = regions[t.a].rec_len;
+        uint32_t id = (uint32_t)descs.size();
+        descs.push_back({5, k | (regions[t.a].nullable ? 0x10000u : 0u)});
+        for (uint32_t j = 0; j < k; ++j) descs.push_back({6, 0});
+        region_desc_memo[t.a] = (int32_t)id;
+        for (uint32_t j = 0; j < k; ++j) {
+            uint32_t e = desc_of(regions[t.a].fields[j]);
+            descs[id + 1 + j].elem = e;
+        }
+        return id;
+    }
     }
     return 1;
 }
@@ -113,6 +128,12 @@ bool is_pure(const Node* n) {
     case Op::Select: case Op::PairMake: case Op::PairFirst: case Op::PairSecond:
     case Op::PairEq: case Op::PairNe: case Op::PairLt: case Op::PairLe: case Op::PairGt: case Op::PairGe:
     case Op::SameList: case Op::ListData: case Op::ElemLoad: case Op::Nop:
+    case Op::RecNull: case Op::RecLen:
+        for (uint32_t i = 0; i < n->nkids; ++i)
+            if (!is_pure(n->kids[i])) return false;
+        return true;
+    case Op::RecGet:  // records: pure unless it carries a null check
+        if (n->b) return false;
         for (uint32_t i = 0; i < n->nkids; ++i)
             if (!is_pure(n->kids[i])) return false;
         return true;
@@ -140,6 +161,7 @@ std::string type_str(const Module& m, Type t) {
     case TK::List: return "L" + std::to_string(t.a);
     case TK::Pair: return "Pair" + std::to_string(t.a);
     case TK::Ptr: return "Ptr" + std::to_string(t.a);
+    case TK::Rec: return "R" + std::to_string(t.a);
     }
     return "?";
 }
@@ -180,6 +202,7 @@ struct Dumper {
             break;
         case Op::CallDirect: o += " " + m.funcs[(size_t)n->a]->name; break;
         case Op::InlineBlock: case Op::Break: o += " label" + std::to_string(n->a); break;
+        case Op::RecGet: case Op::RecSet: o += " #" + std::to_string(n->a) + (n->b ? " nullchk" : ""); break;
         case Op::While:
             if (n->flags & F_FOREACH) o += " foreach(idx=" + lname((uint32_t)n->a) + ", list=" + lname((uint32_t)n->b) + ")";
             if (n->flags & F_FOR) o += " for";
@@ -217,6 +240,11 @@ void dump(std::string& o, const Module& m) {
         if (m.regions[r].header_mutated) o += " header-mutated";
         if (m.regions[r].elem_stored) o += " elem-stored";
         if (m.regions[r].pair) o += " pair";
+        if (m.regions[r].record) {
+            o += m.regions[r].nullable ? " record? (" : " record (";
+            for (size_t j = 0; j < m.regions[r].fields.size(); ++j) o += (j ? ", " : "") + type_str(m, m.regions[r].fields[j]);
+            o += ")";
+        }
         o += " sites:";
         for (auto& s : m.regions[r].sites)
             o += " f" + std::to_string(s.func) + "/line" + std::to_string(s.line) + "/len" + std::to_string(s.len);
@@ -224,9 +252,10 @@ void dump(std::string& o, const Module& m) {
     }
     o += "descs:";
     for (size_t i = 0; i < m.descs.size(); ++i) {
-        static const char* kn[] = {"INT", "ANY", "FN", "LIST", "PAIR"};
+        static const char* kn[] = {"INT", "ANY", "FN", "LIST", "PAIR", "RECORD", "FIELD"};
         o += " " + std::to_string(i) + "=" + kn[m.descs[i].kind];
-        if (m.descs[i].kind == 3) o += "(" + std::to_string(m.descs[i].elem) + ")";
+        if (m.descs[i].kind == 3 || m.descs[i].kind == 6) o += "(" + std::to_string(m.descs[i].elem) + ")";
+        if (m.descs[i].kind == 5) o += "(" + std::to_string(m.descs[i].elem & 0xffff) + (m.descs[i].elem >> 16 ? "?)" : ")");
     }
     o += "\n";
     for (auto& fp : m.funcs) {

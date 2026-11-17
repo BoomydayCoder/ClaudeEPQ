@@ -43,6 +43,7 @@ void usage(FILE* f, const char* argv0) {
                  "  --list-passes      list the TIR passes in pipeline order\n"
                  "  --mono             one instance per function (no call-site specialisation)\n"
                  "  --no-dedup         keep identical instances separate\n"
+                 "  --no-records       no record typing of fixed-shape lists (also EPQ_NO_RECORDS=1)\n"
                  "  --verbose          compile / cache diagnostics on stderr\n"
                  "  -t                 print \"Execution time: N microseconds\" to stderr\n"
                  "  -e                 dump the parsed AST to stderr (format of the original)\n"
@@ -189,6 +190,7 @@ int frontend_bench(const CompileUnit& src, int iters, const Options& opts) {
             infer::Config cfg;
             cfg.poly = !opts.mono;
             cfg.dedup = !opts.no_dedup;
+            cfg.records = !opts.no_records && !(std::getenv("EPQ_NO_RECORDS") && std::getenv("EPQ_NO_RECORDS")[0] == '1');
             infer::Result R;
             infer::infer(cu.prog, cfg, R);
             uint64_t t3 = Clock::now();
@@ -264,6 +266,8 @@ int main(int argc, char** argv) {
             opts.mono = true;
         } else if (!std::strcmp(a, "--no-dedup")) {
             opts.no_dedup = true;
+        } else if (!std::strcmp(a, "--no-records")) {
+            opts.no_records = true;
         } else if (!std::strcmp(a, "--verbose")) {
             opts.verbose = true;
         } else if (!std::strncmp(a, "--no-pass=", 10)) {
