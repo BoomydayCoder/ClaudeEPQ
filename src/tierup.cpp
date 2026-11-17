@@ -163,7 +163,8 @@ std::string compute_key(const std::string& source, const Options& o) {
     for (size_t i = 0; i < ne; ++i) h.field(envs[i]);
     h.field(o.mono ? "mono" : "poly");
     h.field(o.no_dedup ? "nodedup" : "dedup");
-    for (auto& s : o.no_pass) h.field(s);
+    for (auto& s : o.no_pass) h.field("-" + s);
+    for (auto& s : o.only_pass) h.field("+" + s);
     return h.hex();
 }
 
@@ -328,7 +329,7 @@ bool lock_held(const std::string& lock_path) {
 
 struct Trigger {
     std::string file, dir, key;
-    std::vector<std::string> no_pass;
+    std::vector<std::string> no_pass, only_pass;
     bool mono = false, no_dedup = false, verbose = false;
     unsigned ms = kDefaultTierMs;
     uint64_t t0 = 0;
@@ -345,6 +346,7 @@ pid_t launch_helper(const Trigger& t) {
     if (_NSGetExecutablePath(exe, &sz) != 0) return -1;
     std::vector<std::string> args = {exe, "--tier-compile"};
     for (auto& s : t.no_pass) args.push_back("--no-pass=" + s);
+    for (auto& s : t.only_pass) args.push_back("--only-pass=" + s);
     if (t.mono) args.push_back("--mono");
     if (t.no_dedup) args.push_back("--no-dedup");
     args.push_back(t.file);
@@ -689,7 +691,8 @@ bool start(CompileUnit& cu, const Options& opts, int argc, char** argv, int* rc)
     }
     // Engine policy "auto" only, a real run of a named file only.
     if (opts.file == "-" || opts.emit_c || opts.dump_tir || opts.dump_types || opts.dump_ast || opts.parse_only ||
-        opts.dump_resolved || opts.frontend_time || tier_disabled() || engine_forced(argc, argv))
+        opts.dump_resolved || opts.frontend_time || opts.verify_tir || !opts.dump_tir_after.empty() || tier_disabled() ||
+        engine_forced(argc, argv))
         return false;
 
     uint64_t t0 = now_us();
@@ -732,6 +735,7 @@ bool start(CompileUnit& cu, const Options& opts, int argc, char** argv, int* rc)
     t->dir = dir;
     t->key = key;
     t->no_pass = opts.no_pass;
+    t->only_pass = opts.only_pass;
     t->mono = opts.mono;
     t->no_dedup = opts.no_dedup;
     t->verbose = opts.verbose;
