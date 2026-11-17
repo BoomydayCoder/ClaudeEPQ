@@ -1,0 +1,13 @@
+// pairs flowing into dynamic code (Any): not pairs, must still behave
+f := (x) => { => x; };
+g := f;
+k := [g, 1];
+p := [1, 2];
+q := k[0](p);
+>> q;
+>> q[1];
+>> |q|;
+r := [3, 4];
+>> r;
+s := [r, 5];
+>> s[0] < [3, 5];

@@ -1,0 +1,22 @@
+// lexicographic order of packed pairs: signed ints, first then second
+mk := (a, b) => { => [a, b]; };
+mn := 0 - 2147483647 - 1;
+mx := 2147483647;
+vals := [mn, mn + 1, -5, -1, 0, 1, 7, mx - 1, mx];
+ps := [];
+(a : vals) @ (b : vals) @ ps :+ mk(a, b);
+lt := 0; eq := 0; gt := 0; le := 0; ge := 0; ne := 0;
+(i := 0; i < |ps|; i := i + 1;) @ (j := 0; j < |ps|; j := j + 1;) @ {
+  p := ps[i]; q := ps[j];
+  (p < q) ? lt := lt + i * 7 + j;
+  (p = q) ? eq := eq + i * 3 + j;
+  (p > q) ? gt := gt + i + j * 5;
+  (p <= q) ? le := le + 1;
+  (p >= q) ? ge := ge + 1;
+  (p != q) ? ne := ne + 1;
+}
+>> [lt, eq, gt, le, ge, ne];
+>> ps[0];
+>> ps[|ps| - 1];
+>> [mk(mn, mx) < mk(mn + 1, mn), mk(-1, mx) < mk(0, mn), mk(5, -1) < mk(5, 0), mk(5, mn) < mk(5, mx)];
+>> [mk(mx, mx) > mk(mx, mx - 1), mk(mn, mn) = mk(mn, mn), mk(0, mn) < mk(0, mn + 1)];

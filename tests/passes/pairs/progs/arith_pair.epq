@@ -1,0 +1,4 @@
+// arithmetic on a pair: Operands must be integers
+p := [1, 2];
+>> p = [1, 2];
+>> p + 1;
