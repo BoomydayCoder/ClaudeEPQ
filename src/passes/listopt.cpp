@@ -148,10 +148,12 @@ struct LO {
         }
         return true;  // unclassified
     }
-    bool kills(const Node* n, const Cand& c) const {
-        if (kills_node(n, c, false)) return true;
+    // count_direct: also stop at Append/Pop directly on L (they re-load the cache
+    // only when it is valid, so a straight-line cache gains nothing across them)
+    bool kills(const Node* n, const Cand& c, bool count_direct = false) const {
+        if (kills_node(n, c, count_direct)) return true;
         for (uint32_t i = 0; i < n->nkids; ++i)
-            if (kills(n->kids[i], c)) return true;
+            if (kills(n->kids[i], c, count_direct)) return true;
         return false;
     }
     static bool is_access(const Node* x, uint32_t L) {
@@ -569,7 +571,7 @@ struct LO {
             if (S.valid[c] || !S.asg[cs[c].L]) continue;
             int cnt = 0;
             for (uint32_t j = k; j < seq->nkids && cnt < 2; ++j) {
-                if (kills(seq->kids[j], cs[c])) break;
+                if (kills(seq->kids[j], cs[c], true)) break;
                 cnt += uses(seq->kids[j], cs[c].L, 1);
             }
             if (cnt < 2) continue;
