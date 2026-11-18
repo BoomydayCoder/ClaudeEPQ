@@ -49,7 +49,7 @@ class Snip:
 
 
 FAMILIES = ["rec", "tree", "cons", "pairs", "helpers", "recur", "append", "copy", "idxloop",
-            "ifconv", "litcmp", "reclaim", "glob", "recloop", "inl2", "alias", "glue"]
+            "ifconv", "litcmp", "reclaim", "glob", "recloop", "inl2", "alias", "grow", "glue"]
 
 
 class OptGen:
@@ -404,6 +404,32 @@ class OptGen:
         x3 = self.nm("x")
         s.head.append("(%s : %s) @ (%s < %s) ? %s := %s;" % (x3, P, x3, best, best, x3))
         s.head.append(">> %s; >> %s = [%d, %d]; >> %s != [];" % (best, best, self.ri(0, 9), self.ri(0, 9), P))
+        if self.ch(0.6):
+            # pairs meeting lists of other lengths / literals / records / functions
+            pp, pk = self.params(2)
+            mkp = self.fn(s, "mkp", [pp, pk], ["=> [%s + %s, %s - %s];" % (pp, pk, pp, pk)])
+            Q = self.glob(s, "Q", "%s(%d, %d)" % (mkp, self.ri(0, 9), self.ri(0, 9)))
+            other = self.pick(["[%d]" % self.ri(0, 9), "[%d, %d, %d]" % (self.ri(0, 9), self.ri(0, 9), self.ri(0, 9)),
+                               "[]", "[[%d], %d]" % (self.ri(0, 9), self.ri(0, 9))])
+            ops = ["%s = %s" % (Q, other), "%s != %s" % (other, Q), "|%s|" % Q, "%s = %s" % (Q, best),
+                   "[%s, %d] = [%s(%d, %d), %d]" % (Q, self.ri(0, 3), mkp, self.ri(0, 9), self.ri(0, 9), self.ri(0, 3)),
+                   "%s[0] * 10 + %s[1]" % (Q, Q)]
+            if not other.startswith("[["):
+                ops.append(self.pick(["%s < %s" % (Q, other), "%s < %s" % (other, Q)]))
+            self.r.shuffle(ops)
+            s.head.append(">> [%s];" % ", ".join(ops[:self.ri(2, len(ops))]))
+            rk = self.glob(s, "rk", "[%d, %s]" % (self.ri(0, 9), Q))      # a record holding a pair
+            s.head.append(">> %s; >> %s[1][0] + %s[1][1];" % (rk, rk, rk))
+            if self.ch(0.4):
+                kv = self.read(s, 0, 1, "kv")
+                s.head.append(">> %s[%s] + %s[1 - %s];" % (Q, kv, Q, kv))
+            if self.ch(0.3):
+                ppl = self.glob(s, "pl", "[%s, %s(%d, %d)]" % (Q, mkp, self.ri(0, 9), self.ri(0, 9)))
+                x4, i4, t4 = self.nm("x"), self.nm("i"), self.nm("t")
+                s.head.append("(%s := 0; %s < |%s| - 1; %s := %s + 1;) @ (%s[%s + 1] < %s[%s]) ? "
+                              "{ %s := %s[%s]; %s[%s] := %s[%s + 1]; %s[%s + 1] := %s; }"
+                              % (i4, i4, ppl, i4, i4, ppl, i4, ppl, i4, t4, ppl, i4, ppl, i4, ppl, i4, ppl, i4, t4))
+                s.head.append("(%s : %s) @ >> %s;" % (x4, ppl, x4))
         if self.ch(0.45):
             v = self.pick(["setel", "app", "pop", "each", "dyn"])
             if v == "setel":
@@ -1206,6 +1232,63 @@ class OptGen:
             self.glob(s, "jk", "[%d, %d, %d]" % (self.ri(0, 99), self.ri(0, 99), self.ri(0, 99)))
             s.head.append(">> %s; %s :+ %d; >> %s;" % (r, r, self.ri(0, 9), r))
         self.export(L, "ilist")
+        return s
+
+    # ================================================================== grow
+    def f_grow(self):
+        """Bigger lists (hundreds to thousands of elements): interleaved growth of several
+        lists (grow-in-place vs move), Reserve hints, bulk self-copies whose source buffer
+        moves while copying, temp lists freed in between; observed through checksums."""
+        s = Snip("grow")
+        n = self.pick([self.ri(50, 300), self.ri(300, 1500), self.ri(1, 40)])
+        A = self.glob(s, "A", "[]")
+        B = self.glob(s, "B", "[]")
+        i = self.nm("i")
+        body = ["%s :+ %s * %d;" % (A, i, self.ri(1, 7))]
+        if self.ch(0.6):
+            body.append("%s :+ %s;" % (B, self.pick([i, "-%s" % i])))
+        if self.ch(0.4):
+            body.append("(%s - %s / %d * %d = 0) ? %s := [%s, %s];" % (i, i, 3, 3, self.nm("tmp"), i, i))
+        self.r.shuffle(body)
+        s.head.append("(%s := 0; %s < %d; %s := %s + 1;) @ { %s }" % (i, i, n, i, i, " ".join(body)))
+        ck, ck2, cx = self.params(3)
+        sumf = self.fn(s, "ck", [ck], ["%s := 0;" % ck2, "(%s : %s) @ %s := %s * 31 + %s;" % (cx, ck, ck2, ck2, cx),
+                                     "=> %s;" % ck2])
+        s.head.append(">> |%s|; >> %s(%s); >> |%s|;" % (A, sumf, A, B))
+        # bulk self-copy: source = destination, the buffer moves while it grows
+        lo = self.ri(0, max(0, n - 1))
+        hi = self.ri(lo, n)
+        j = self.nm("i")
+        s.head.append("(%s := %d; %s < %d; %s := %s + 1;) @ %s :+ %s[%s];" % (j, lo, j, hi, j, j, A, A, j))
+        s.head.append(">> |%s|; >> %s(%s);" % (A, sumf, A))
+        # copy into another list with an allocation in between every few elements
+        C = self.glob(s, "C", "[]")
+        k = self.nm("i")
+        junk = self.glob(s, "jk", "[]")
+        md = self.ri(3, 17)
+        s.head.append("(%s := 0; %s < |%s|; %s := %s + %d;) @ { %s :+ %s[%s]; (%s - %s / %d * %d = 0) ? %s :+ [%s]; }"
+                      % (k, k, A, k, k, self.ri(1, 3), C, A, k, k, k, md, md, junk, k))
+        s.head.append(">> |%s|; >> %s(%s); >> |%s|;" % (C, sumf, C, junk))
+        # recursive function that builds and drops temps (reclaim frees them at the bump end)
+        pn, pr, pt, pi = self.params(4)
+        tf = self.nm("tf")
+        s.nglob += 1
+        s.head.append("%s := (%s, %s) => { %s := [%s]; (%s := 1; %s < %s; %s := %s + 1;) @ %s :+ %s; "
+                      "(%s > 0) ? %s[0] := %s(%s / 2 + 1, %s - 1); => |%s| + %s[0]; };"
+                      % (tf, pn, pr, pt, pn, pi, pi, pn, pi, pi, pt, pi, pr, pt, tf, pn, pr, pt, pt))
+        D = self.glob(s, "D", "[]")
+        m = self.nm("i")
+        s.head.append("(%s := 0; %s < %d; %s := %s + 1;) @ { %s :+ %s(%s * %d + 1, %d); %s :+ %s; }"
+                      % (m, m, self.ri(1, 12), m, m, D, tf, m, self.ri(5, 60), self.ri(0, 3), A, m))
+        s.head.append(">> %s; >> |%s|; >> %s(%s);" % (D, A, sumf, A))
+        if self.ch(0.4):
+            # pop most of it again, then grow again
+            q = self.nm("i")
+            s.head.append("(%s := 0; %s < %d & |%s| > 0; %s := %s + 1;) @ -%s;" % (q, q, self.ri(1, n + 5), A, q, q, A))
+            q2 = self.nm("i")
+            s.head.append("(%s := 0; %s < %d; %s := %s + 1;) @ %s :+ %s;" % (q2, q2, self.ri(1, 200), q2, q2, A, q2))
+            s.head.append(">> |%s|; >> %s(%s);" % (A, sumf, A))
+        self.export(B, "ilist")
         return s
 
     # ================================================================== glue
