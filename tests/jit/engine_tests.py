@@ -134,6 +134,7 @@ def main():
         f.write("l := [3, 1, 2];\n>> l[1] + |l|;\n")
     pe = dict(env)
     pe["EPQ_JIT_PRETEND_UNSUPPORTED"] = "Print"
+    pe["EPQ_NO_TIERUP"] = "1"  # --engine=auto is the default policy: a tier-up hit would skip the fallback
     r = run([epq, "--engine=jit", p], env=pe)
     se = r.stderr.decode(errors="replace")
     record("unsupported_forced", r.returncode == 2 and r.stdout == b"" and "unsupported TIR op Print" in se, se.strip())
@@ -144,7 +145,9 @@ def main():
     r = run([epq, "--engine=auto", "--jit-stats", p], env=env)
     record("auto_uses_jit", r.returncode == 0 and r.stdout == b">> 4\n" and b"jit: compile" in r.stderr)
     r = run([epq, "--jit-stats", p], env=env)
-    record("default_is_c", r.returncode == 0 and r.stdout == b">> 4\n" and b"jit: compile" not in r.stderr)
+    record("default_is_jit", r.returncode == 0 and r.stdout == b">> 4\n" and b"jit: compile" in r.stderr)
+    r = run([epq, "--engine=aot", "--jit-stats", p], env=env)
+    record("aot_is_c", r.returncode == 0 and r.stdout == b">> 4\n" and b"jit: compile" not in r.stderr)
 
     bad = [n for n, ok in results if not ok]
     print("%d/%d JIT engine test groups passed" % (len(results) - len(bad), len(results)))
