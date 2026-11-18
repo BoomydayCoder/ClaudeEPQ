@@ -1,70 +1,50 @@
-# Where this stands (17 Nov 2026)
+# Status (17 Nov 2026)
 
-ClaudeEPQ is a new implementation of the EPQ language (original: BoomydayCoder/EPQ). The design is in
-`docs/DESIGN.md`, the language spec in `docs/LANGUAGE.md`.
+ClaudeEPQ is a new implementation of the EPQ language (original: BoomydayCoder/EPQ). The user guide is
+`README.md`. The design is in `docs/DESIGN.md`, the language spec in `docs/LANGUAGE.md`.
 
-## `main` — working and verified (integration of 17 Nov, evening)
+## Done, on `main`
 
-- Front end, whole-program type inference with specialisation, records (fixed-shape lists with
-  per-position types), typed IR (TIR) with the low-level extension, shared runtime (fast I/O,
-  three-way deep compare, grow-in-place lists), **C backend**, batch test mode, background tier-up.
-- **Optimisation pipeline, all ON by default** (`build/epq --list-passes`): simplify, litcmp, inline,
-  recur, pairs, ifconv (scalar only; stores behind `EPQ_IFCONV_STORES=1`), appendopt, listopt,
-  simplify2, reclaim. Default-off list (`kDefaultOff` in src/passes/registry.cpp, enabled with
-  `--enable-pass=NAME` / `EPQ_ENABLE_PASS`): currently empty.
-- Gates on main (fasttest, `--verify-tir`, -O1 and default flags, also `EPQ_POISON_FREED=1`): 389
-  conformance, 50 core, 125 hunt, every `tests/passes/*`, 26 records, 22 rtio (+10 checked by
-  `tests/rtio/run.py`), 13 `tests/integration/progs` (pass-interaction cases) — all pass; TIR
-  self-tests 21/21; tier-up scenarios 8/8. Differential fuzz: 3,000 programs (clean/mixed/nasty) +
-  1,000 with random `EPQ_NO_PASS` subsets: 0 divergences.
-- Benchmarks (C engine, `-t` self time, geomean over 24): passes off 38× the original, default 58×
-  (build/integ/bench1/bench.md has the table). No benchmark is slower with the passes on.
-- Rules for pass authors: `util::may_mutate_header` / `may_store_elems` (src/passes/util.hpp) list every
-  op; an unlisted op counts as "may do anything". `is_pure` does NOT mean "may be moved past a store":
-  `Len`, `ElemLoad`, `RecGet` read mutable memory (recur's `stable_pure` is the value-only whitelist).
+- Front end (lexer, parser, resolver) matching the original exactly, including `-e` AST dumps.
+- Whole-program type inference with call-site specialisation, records (per-position types for
+  fixed-shape lists, nullable records for trees), and a typed IR (TIR) with a verifier (`--verify-tir`).
+- Ten optimisation passes, **all on by default** (`build/epq --list-passes`): simplify, litcmp, inline,
+  recur, pairs, ifconv (scalar bodies only; element stores behind `EPQ_IFCONV_STORES=1`), appendopt,
+  listopt, simplify2, reclaim. The default-off list (`kDefaultOff` in src/passes/registry.cpp) is empty.
+- Shared runtime (buffered I/O, three-way deep compare, grow-in-place lists, static reclamation).
+- Two engines. The **ARM64 JIT** covers every TIR op and type. The **C engine** (`--engine=aot`) emits C,
+  compiles it with cc and caches the dylib. Batch mode (`--batch`) serves the test tools.
+- **Default engine policy `auto`**: the JIT. A program the JIT cannot compile falls back to the C engine,
+  silently (`--verbose` says why). A tier-up artefact is used when one is ready for exactly this
+  source and configuration and has been measured faster than the JIT.
+- **Tier-up**: a run still going after 20 ms spawns one detached background helper that compiles the
+  C version into `~/.cache/claude-epq/tier/`. Runs record their best end-to-end time in
+  `<key>.stats`. After two artefact runs, an artefact that is not faster than the JIT is no longer used.
+  `EPQ_NO_TIERUP=1` turns tier-up off. A cache directory that cannot be written turns it off silently.
+- An unusable cache directory is never fatal: the JIT needs no cache, and the forced C engine falls
+  back to a private `mkdtemp` directory (tests/cache/run.py).
+- `make check`: examples, conformance and core suites, and the cache test, on the default engine.
+  It needs nothing outside the repository.
 
-## Branches
+## Testing
 
-| Branch | State |
-|---|---|
-| `wip/pass-*` (all ten), `wip/records`, `wip/runtime-io`, `wip/tierup` | merged into `main` |
-| `wip/jit` | ARM64 code generator, still in progress, NOT merged; must implement every TIR op listed in `src/tir.hpp` |
+- Expected outputs come from the original (baseline binary: `tools/build_reference.sh`, or
+  `EPQ_BASELINE`). The full gate is tests/conformance, core, hunt, passes, records, rtio, integration
+  and jit/progs. Every program must match on both engines: C through `tools/fasttest.py`, the JIT
+  per process (`--also`). Also run the gate with `EPQ_POISON_FREED=1`, with all passes off and with
+  `EPQ_NO_RECORDS=1`. Then run tests/jit/engine_tests.py, tests/tierup/run.py, tests/tir/run.py,
+  tests/rtio/run.py and tests/cache/run.py, plus a `tools/fuzz.py --batch` differential run.
+- C-engine runs must go through the batch runner. macOS scans every new binary on its first load,
+  one at a time machine-wide, so one dylib per program costs seconds each. JIT runs create no binaries.
 
-## To resume
+## Known gaps
 
-1. Baseline: the original is expected at `../reference/EPQ` (read-only clone) and the comparison binary
-   at `../refbuild/epq_ref`. If they are gone: clone BoomydayCoder/EPQ and run
-   `tools/build_reference.sh <clone> <outdir>`.
-2. One agent per `wip/*` branch: read the branch's commits, finish, run its tests, report.
-3. Merge into `main` in pipeline order (simplify, litcmp, inline, recur, pairs, ifconv, appendopt, listopt,
-   reclaim), then records, runtime-io, tierup, jit. Expect conflicts in `runtime/epq_rt.h` (comparison and
-   growth functions), the end of the `Op` enum in `src/tir.hpp`, and the pass registry in `src/tir.cpp`.
-4. Teach the JIT every op the passes added (`Reserve`, `AppendRange`, record ops, …).
-5. Then: one-byte flag arrays (DESIGN §5.12), full fuzz of both engines against the original with random
-   pass subsets, fixes, final benchmark on a quiet machine, README.
-
-## Things learned the hard way
-
-- **Testing fast:** run C-backend test suites with `python3 tools/fasttest.py tests/conformance
-  tests/core tests/hunt` (options `-k`, `--epq-arg`, `--env`, see `tools/README.md`). It pushes
-  every program through one `epq --batch` (one new dylib per run instead of one per program,
-  none when rerun), so it costs one macOS first-load scan instead of hundreds: ~2 s warm,
-  ~20 s cold for all 564 programs. Use `tests/conformance/run.py` per process only for
-  non-C engines or to test the single-program path itself.
-
-- Agent worktrees are cut from `origin/main`: push `main` before launching agents, and tell each agent to
-  `git merge main` first.
-- Do not message a running workflow agent: it starts a second copy in the same folder.
-- Under load the conformance runner needs `--timeout 120`; its default produces false failures.
-- The first `dlopen` of a freshly compiled dylib takes 2–3 s on macOS (one-off scan per file). The tier-up
-  helper must load it once itself before marking it ready.
-- Known bug on `main`: with an unwritable cache directory the C backend refuses to run the program
-  (`tests/hunt/runtime/bug01_unwritable_cache`).
-- **Every freshly compiled binary costs 3–5 s on its first run** (macOS scans it; the scanner handles one
-  at a time). C-backend tests compile one binary per program, so a 389-test run is ~30 minutes of scanner
-  time and many agents testing at once starve each other. Developer Tools was switched on for Claude on
-  17 Nov; it needs an app restart to take effect (unconfirmed whether it removes the delay). Until
-  confirmed: prefer the JIT for testing, keep C-backend test runs small, never run many in parallel.
-- The workflow tool runs at most 8 agents at once (CPUs − 2); extra agents queue silently. Use several
-  workflows of ≤ 8, and never try to redirect queued agents by editing files they read — they ignore it.
-- If-converting element stores made bubblesort 4.7× slower; only scalar cases are enabled.
+- **Byte lists** (DESIGN §5.12: one byte per element for 0–255 flag arrays) are not merged yet. The
+  work is on a separate branch.
+- No garbage collector. Static reclamation is the only memory reuse; a program that allocates without
+  bound in a long loop can run out of memory. The original has the same limit (it never frees).
+- The JIT is about 0.9× the C engine's speed on its own execution time (geomean). The main remaining
+  losses are bubblesort (loads of just-stored elements), heap sift-down (no load CSE) and lcg_hash.
+  Tier-up recovers these for programs that run repeatedly.
+- Tier-up compares best times across runs, whatever the input. A program run with very different inputs
+  can be judged on an unrepresentative sample. Delete its `.stats` file or use `--tier-clear` to reset.

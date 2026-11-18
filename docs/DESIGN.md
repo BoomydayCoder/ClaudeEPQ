@@ -181,7 +181,12 @@ is one runtime call that knows the layout.
 
 ## 5. TIR passes — where the speed beyond "typed code" comes from
 
-Run in this order; both backends benefit.
+Both engines consume the TIR after these passes. The pipeline (`epq --list-passes`), all on by
+default, each switchable off with `--no-pass=NAME` / `EPQ_NO_PASS`: after the infrastructure steps
+(definite-assignment, constants, demote-globals, fold, region-info) come **simplify** (§5.6),
+**litcmp** (§5.9), **inline** (§5.1), **recur** (§5.10), **pairs** (§5.4), **ifconv** (§5.5),
+**appendopt** (§5.8), **listopt** (§5.2 + §5.3), **simplify2** (§5.6 again, late) and **reclaim** (§5.7).
+Records (§5.11) are part of inference, not a pass (`--no-records` / `EPQ_NO_RECORDS=1`).
 
 ### 5.1 Inlining
 Small non-recursive instances (`swap`, `mod`) are inlined as `InlineBlock`s. Parameters that the callee
@@ -272,9 +277,9 @@ still in cache — no collector, no reference counts, no run-time cost beyond th
 Guarded by a debug mode that poisons freed memory and never reuses it, so the fuzzer turns any unsound
 free into an immediate wrong answer instead of silent corruption.
 
-A conservative mark-sweep collector triggered only when the heap passes a large threshold remains an
+A conservative mark-sweep collector triggered only when the heap passes a large threshold would be an
 optional backstop for programs the original could never run (unbounded allocation in a long loop). It
-is deliberately last: it adds risk and no speed.
+adds risk and no speed and is **not implemented**: static reclamation is the only memory reuse.
 
 ### 5.8–5.12 Optimisations added after profiling the first working compiler
 
@@ -306,7 +311,7 @@ in the same order and raises `Invalid comparison` at the same first invalid pair
   `fib(n-1) + fib(n-2)` becomes `fib(n-2) + fib(n-3) + fib(n-2)` and the two `fib(n-2)` calls collapse.
   Measured on recursive fib: 11.3 → 0.65 ms.
 
-**5.11 Records — per-position types for fixed-shape lists.** *(next wave)* `[key, [a, b]]` mixes an integer
+**5.11 Records — per-position types for fixed-shape lists.** *(implemented, on by default)* `[key, [a, b]]` mixes an integer
 and a list, so the plain rule of §2.2 makes its elements `Any`; a sort of such records was the slowest
 benchmark (6.8×). A region whose allocation sites are all literals of one length *k*, which is only ever
 indexed by constants and never appended to or popped, gets one type variable *per position* instead of
@@ -323,12 +328,17 @@ literals' candidate state). A wrong guess is an ordinary record violation of tha
 it, empty sites included, for good; every site moves only 0 → 1 → 2, so the scheme still terminates,
 and a program never ends worse off than without pre-shaping. bintree: 2.6× faster.
 
-**5.12 Byte lists — narrow element storage.** *(next wave)* When every value ever stored into a region
+**5.12 Byte lists — narrow element storage.** *(in progress on a branch; not on `main` yet)* When every value ever stored into a region
 is a constant in 0–255 (a sieve's flags, n-queens' column marks), the region is laid out one byte per
 element. A 4-byte flag array for the 6 M sieve is 24 MB and misses cache on every stride; one byte per
 flag measured 45 → 23 ms.
 
 ## 6. ARM64 JIT (default engine)
+
+`--engine=auto`, the default, runs the JIT; a program using a construct the JIT does not support
+(none known today) runs on the C engine instead (`--verbose` says why); a ready tier-up artefact (§7)
+is used instead of either when it has been measured to be faster. `--engine=jit` / `--engine=aot`
+(`--jit` / `--aot`) force one engine and bypass tier-up.
 
 One pass over Low TIR per instance, emitting into a `MAP_JIT` region (`pthread_jit_write_protect_np`,
 `sys_icache_invalidate`).
@@ -355,11 +365,23 @@ One pass over Low TIR per instance, emitting into a `MAP_JIT` region (`pthread_j
   per instance, compiled with `cc -O3 -fwrapv -mcpu=native` into a dylib. Header fields and elements use
   distinct C types so LLVM's own alias analysis agrees with ours. Because it consumes TIR *after* §5, it
   gets pair unboxing and if-conversion that LLVM could never derive from C semantics.
-- **Tiering.** A run starts in the JIT immediately. If it is still running after ~20 ms, a detached
-  helper compiles the C version and atomically installs it in `~/.cache/claude-epq/<hash>.dylib` (hash of
-  source text + emitter version + compiler version). The next run of the same source finds the cache,
-  `dlopen`s it, and skips the JIT. `--jit` / `--aot` force one engine; `EPQ_NO_TIERUP=1` disables the
-  background compile.
+- **Forced C engine** (`--engine=aot`): compiles in the foreground into `$EPQ_CACHE_DIR` (default
+  `~/.cache/claude-epq`), `<hash of C source, cc flags, emitter version>.dylib`, reused by later runs. If
+  that directory cannot be created or written it compiles in a private `mkdtemp` directory under
+  `$TMPDIR` instead (removed after loading) and fails only if that fails too.
+- **Tiering** (src/tierup.cpp; default engine only). A run starts in the JIT immediately. If it is still
+  running after 20 ms (`EPQ_TIER_MS`), a detached helper process (`epq --tier-compile FILE`, utility QoS,
+  stdio on /dev/null, at most two at once) compiles the C version, loads it once itself (so the first-load
+  security scan is never paid in the foreground) and atomically installs
+  `$EPQ_CACHE_DIR/tier/<key>.dylib` plus a `<key>.ready` marker. The key covers the source bytes, the
+  `epq` build's UUID, the emitter version, every `EPQ_*` setting and the pass / inference flags, so an
+  artefact is only used for exactly that source and configuration. A later run probes the marker (one
+  `open`), `dlopen`s the artefact and skips the front end and the JIT.
+- **Only while it pays.** JIT runs past the threshold and artefact runs record their best end-to-end
+  time in `<key>.stats`; after two artefact runs, an artefact that is not faster than the JIT is no
+  longer used (the C code is not faster for every program, and near the threshold the `dlopen` can cost
+  as much as the front end saves). `EPQ_NO_TIERUP=1` disables tiering; so does a cache directory that
+  cannot be written (silently). `--tier-status FILE` / `--tier-clear` inspect and empty the cache.
 - Also the first backend to be written: it is the easiest way to validate the inference and TIR passes
   before the JIT exists, and JIT-vs-C disagreement pinpoints backend bugs afterwards.
 
@@ -397,7 +419,7 @@ The original implementation is the oracle.
 docs/      LANGUAGE.md, DESIGN.md
 src/       compiler (front end, inference, TIR, passes, backends, CLI)
 runtime/   shared runtime
-tests/     conformance programs + expected output
-tools/     difftest.py, fuzz.py, bench.py, build_reference.sh
+tests/     conformance programs + expected output, per-feature suites, `make check` (tests/check.py)
+tools/     fasttest.py, difftest.py, fuzz.py, bench.py, build_reference.sh
 bench/     benchmark programs and inputs
 ```
