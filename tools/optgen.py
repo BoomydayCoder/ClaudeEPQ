@@ -517,6 +517,15 @@ class OptGen:
                 s.head.append("%s := (%s) => { (%s < 2) ? => %s; => %s(%s - 1) + %s(%s - 2); };"
                               % (f, n, n, n, f, n, f, n))
                 arg = self.size(s, -2, 14)
+                if self.ch(0.6):
+                    # equal pure calls on both branches / under a condition and after it (CSE must
+                    # not treat a conditional first call as unconditional)
+                    cv = self.glob(s, "cv", "0")
+                    a2 = self.ri(0, 12)
+                    s.head.append("(%s > %d) ? %s := %s(%d) + 1; : %s := %s(%d) * 2;"
+                                  % (arg, self.ri(0, 12), cv, f, a2, cv, f, a2))
+                    s.head.append(">> %s; >> (%s > %d & %s(%d) > 3) + %s(%d);"
+                                  % (cv, arg, self.ri(0, 12), f, a2, f, a2))
                 s.head.append(">> %s(%s); >> %s(%d) * 2 + %s(%d);" % (f, arg, f, self.ri(0, 12), f, self.ri(0, 12)))
             elif kd == "fibl":
                 # fib in a loop over a list (pure-call CSE across iterations)
@@ -820,6 +829,13 @@ class OptGen:
             ])
             s.head.append("(%s := 0; %s < %d; %s := %s + 1;) @ { %s }" % (k, k, self.ri(1, 14), k, k, form))
             s.head.append(">> %s; >> %s;" % (A, sm))
+            if self.ch(0.5):
+                # a guarded index incremented twice per iteration: the second read is not
+                # covered by the loop guard (fails at the last iteration on an odd count)
+                w = self.glob(s, "w", "0")
+                s.head.append("(%s < |%s|) @ { %s := %s + %s[%s]; %s := %s + 1; %s := %s + %s[%s]; %s := %s + 1; }"
+                              % (w, A, sm, sm, A, w, w, w, sm, sm, A, w, w, w))
+                s.head.append(">> %s;" % sm)
         self.export(A, "ilist"); self.export(L, "ilist")  # exports
         return s
 
@@ -957,6 +973,13 @@ class OptGen:
         s.head.append(">> %s;" % c)
         pq = self.nm("p")
         isn = self.fn(s, "isn", [pq], ["=> %s = [];" % pq])
+        if self.ch(0.5):
+            # a literal on the left with non-constant elements, compared with an impure right side
+            # that changes those elements' variables
+            cv = self.glob(s, "cv", str(self.ri(0, 2)))
+            stp = self.fn(s, "st", [], ["%s := %s + 1;" % (cv, cv), "=> [%s, %s];" % (cv, cv)])
+            s.head.append(">> [%s, %s] = %s(); >> [%s] != %s(); >> [%d, %s] = %s();"
+                          % (cv, cv, stp, cv, stp, self.ri(1, 4), cv, stp))
         s.head.append(">> [%s];" % ", ".join("%s(%s)" % (isn, n) for n, k in names))
         if self.ch(0.3):
             s.risky = True
