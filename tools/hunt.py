@@ -98,7 +98,7 @@ def run_chunk(a, k, seed, prof, dis, eng, out, log, batch):
                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, cwd=REPO)
         txt = p.stdout.decode("utf-8", "replace")
         summ = [l for l in txt.splitlines() if " programs in " in l]
-        fails = [l for l in txt.splitlines() if l.startswith(("FAIL", "SUSPECT", "INVALID"))]
+        fails = [l for l in txt.splitlines() if l.startswith(("FAIL", "SUSPECT", "INVALID", "RECHECK"))]
         line = "%s seeds %d..%d profile=%s no_pass=%s rc=%d %.0fs | %s" % (
             time.strftime("%H:%M:%S"), seed, seed + a.chunk - 1, prof, dis or "-", p.returncode, time.time() - t0,
             summ[-1] if summ else txt[-300:].replace("\n", " "))

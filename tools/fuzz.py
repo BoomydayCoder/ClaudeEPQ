@@ -176,6 +176,13 @@ def batch_cases(a, engines, seeds_profile, ex, bdir):
             rs = epqlib.run_batch(e, [(c["pp"], c["ip"]) for c in valid], timeout=t, jobs=a.jobs,
                                   chunk=a.batch_chunk)
             for c, r in zip(valid, rs):
+                if r.timed_out:
+                    # a batch child can be starved on a loaded machine: re-run once per process
+                    # (prints "RECHECK" so the campaign logs can count these)
+                    r2 = epqlib.run_engine(e, c["pp"], stdin_path=c["ip"], timeout=t)
+                    print("RECHECK seed %d: %s timed out in batch; per process: %s"
+                          % (c["seed"], e.name, "timeout" if r2.timed_out else "rc %d" % r2.rc), flush=True)
+                    r = r2
                 c["res"][e.name] = r
     for c in pres:
         try:

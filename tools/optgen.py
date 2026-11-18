@@ -49,7 +49,7 @@ class Snip:
 
 
 FAMILIES = ["rec", "tree", "cons", "pairs", "helpers", "recur", "append", "copy", "idxloop",
-            "ifconv", "litcmp", "reclaim", "glob", "recloop", "inl2", "glue"]
+            "ifconv", "litcmp", "reclaim", "glob", "recloop", "inl2", "alias", "glue"]
 
 
 class OptGen:
@@ -896,7 +896,8 @@ class OptGen:
                          % (j, j, "|%s|" % u, self.ri(0, 4), j, j, v, j, j, j, sm, sm, t, j, j),
                          "(%s > %d) ? %s[0] := %s + %s[|%s| - 1][1];" % (sm, self.ri(0, 30), t, sm, v, v)
                          if self.ch(0.5) else "%s := %s + |%s|;" % (sm, sm, v)]
-            ret = self.pick(["int", "int", "t", "u", "alias", "store", "storeel", "idret", "pick", "nested"])
+            ret = self.pick(["int", "int", "t", "u", "alias", "store", "storeel", "idret", "pick", "nested",
+                             "aliasx", "aliasx"])
             # self-recursion through a depth parameter: never inlined, so reclaim sees it
             if ret in ("int", "store", "storeel"):
                 body.append("(%s > 0) ? %s[0] := %s[0] + %s(%s + 1, %s - 1);" % (dp, u, u, f, n, dp))
@@ -916,6 +917,8 @@ class OptGen:
                 body += ["%s := [%s, 1];" % (w, t), "%s :+ %s;" % (keep, w), "=> 0;"]
             elif ret == "idret":
                 body.append("=> %s(%s);" % (idf, self.pick([t, u])))
+            elif ret == "aliasx":
+                body.append("=> %s;" % self.alias_expr(self.pick([t, u]), (idf, "[%s]" % t)))
             elif ret == "pick":
                 body.append("=> %s(%s, %s, %s - %s / 2 * 2);" % (pick, t, u, n, n))
             else:
@@ -1098,6 +1101,80 @@ class OptGen:
             A = self.glob(s, "A", "[]")
             s.head.append(">> %s(%s, %s, %d); >> %s(%s, [], %d);" % (sw, A, self.pick(["[]", A]), self.ri(0, 7),
                                                                      sw, A, self.ri(0, 5)))
+        return s
+
+    # ================================================================= alias
+    def alias_expr(self, L, names):
+        """An expression whose value is the list L itself, reached by an unusual route.
+        `names` provides fresh helper names (identity function, holder list)."""
+        idf, hold = names
+        return self.pick([
+            "%s :+ %d" % (L, self.ri(0, 9)),        # append's value is the list
+            "%s | 0" % L,                           # a list is true: | returns it
+            "0 | %s" % L,
+            "1 & %s" % L,                           # & returns its right operand
+            "%s(%s)" % (idf, L),
+            "[%s][0]" % L,
+            "[%d, %s][1]" % (self.ri(0, 9), L),     # through a record field
+            "-[%s]" % L,                            # pop returns the element itself
+            "(%s)" % L,
+            "%s[0]" % hold,                         # through an element stored earlier
+        ])
+
+    def f_alias(self):
+        """A list aliased by an unusual route, then mutated through the alias while an
+        indexed loop / cached header reads the original (listopt uniqueness, appendopt,
+        reclaim escape analysis)."""
+        s = Snip("alias")
+        n = self.ri(1, 9)
+        L = self.glob(s, "L", "[%s]" % ", ".join(str(self.ri(0, 30)) for _ in range(n)))
+        idf = self.nm("id")
+        pp = self.nm("p")
+        s.nglob += 1
+        s.head.append("%s := (%s) => { => %s; };" % (idf, pp, pp))
+        hold = self.glob(s, "hd", "[%s]" % L)
+        A = self.glob(s, "A", self.alias_expr(L, (idf, hold)))
+        if self.ch(0.3):
+            # chained / conditional aliasing
+            B = self.glob(s, "B", "[]")
+            s.head.append("(|%s| > %d) ? %s := %s; : %s := %s;" % (L, self.ri(0, 5), B, A, B, L))
+            A = B
+        if self.ch(0.25):
+            x = self.nm("x")
+            E = self.glob(s, "E", "[]")
+            s.head.append("(%s : %s) @ %s := %s;" % (x, hold, E, x))   # for-each variable aliases the element
+            A = E
+        sm = self.glob(s, "sm", "0")
+        i = self.nm("i")
+        mut = self.pick([
+            "(%s = %d & |%s| < %d) ? %s :+ %s;" % (i, self.ri(0, 4), A, n + 6, A, i),
+            "(%s = %d & |%s| > 1) ? %s := %s + -%s;" % (i, self.ri(0, 4), A, sm, sm, A),
+            "(%s + 1 < |%s|) ? %s[%s + 1] := %s[%s + 1] + %s;" % (i, A, A, i, A, i, i),
+            "(|%s| < %d) ? %s :+ %s[%s];" % (A, n + 4, A, L, i),
+        ])
+        s.head.append("(%s := 0; %s < |%s| & %s < 30; %s := %s + 1;) @ { (%s < |%s|) ? { %s := %s + %s[%s]; %s } }"
+                      % (i, i, L, i, i, i, i, L, sm, sm, L, i, mut))
+        s.head.append(">> %s; >> %s; >> %s = %s;" % (sm, L, A, L))
+        # a copy loop whose destination is the alias
+        if self.ch(0.5):
+            j = self.nm("i")
+            lim = self.ri(0, n)
+            s.head.append("(%s := 0; %s < %d; %s := %s + 1;) @ %s :+ %s[%s];" % (j, j, lim, j, j, A, L, j))
+            s.head.append(">> %s;" % L)
+        # functions: alias of a fresh list escapes through an unusual route
+        for _ in range(self.ri(1, 3)):
+            pn, t, u, w, dp = self.params(5)
+            f = self.nm("af")
+            ex = self.alias_expr(t, (idf, "[%s]" % t)) if self.ch(0.8) else u
+            body = ["%s := [%s, %s + 1];" % (t, pn, pn), "%s := [%s];" % (u, pn),
+                    "(%s > 0) ? %s := %s(%s + 1, %s - 1);" % (dp, w, f, pn, dp) if self.ch(0.6) else "%s := 0;" % w,
+                    "=> %s;" % ex]
+            s.nglob += 1
+            s.head.append("%s := (%s, %s) => { %s };" % (f, pn, dp, " ".join(body)))
+            r = self.glob(s, "rr", "%s(%d, %d)" % (f, self.ri(0, 9), self.ri(0, 3)))
+            self.glob(s, "jk", "[%d, %d, %d]" % (self.ri(0, 99), self.ri(0, 99), self.ri(0, 99)))
+            s.head.append(">> %s; %s :+ %d; >> %s;" % (r, r, self.ri(0, 9), r))
+        self.export(L, "ilist")
         return s
 
     # ================================================================== glue
