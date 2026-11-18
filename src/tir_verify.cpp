@@ -397,7 +397,7 @@ struct Verifier {
 }  // namespace
 
 void verify(Module& m, const char* after_pass) {
-    Verifier V{m, after_pass ? after_pass : "?"};
+    Verifier V{m, after_pass ? after_pass : "?", nullptr, {}, {}};
     for (size_t r = 0; r < m.regions.size(); ++r) {
         const Region& R = m.regions[r];
         if (R.elem.k == TK::Ptr) std::fprintf(stderr, "epq: TIR verifier (after %s): region %zu has Ptr elements\n", V.after, r), std::abort();

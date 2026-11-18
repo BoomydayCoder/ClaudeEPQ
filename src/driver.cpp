@@ -11,6 +11,8 @@
 #include <time.h>
 #include <unistd.h>
 
+#include <dirent.h>
+
 #include <cerrno>
 #include <cstdio>
 #include <cstdlib>
@@ -123,10 +125,22 @@ std::string cache_hash(const std::string& csrc, const std::string& flags) {
 }
 // ---- end cache key ----
 
-// Compiles `csrc` into a cached dylib; returns its path or "" on failure.
-std::string compile_cached(const std::string& csrc, bool verbose) {
+// Removes a private compile directory (flat: only our own files).
+void remove_tmpdir(const std::string& dir) {
+    if (DIR* d = ::opendir(dir.c_str())) {
+        while (struct dirent* e = ::readdir(d))
+            if (std::strcmp(e->d_name, ".") != 0 && std::strcmp(e->d_name, "..") != 0)
+                ::unlink((dir + "/" + e->d_name).c_str());
+        ::closedir(d);
+    }
+    ::rmdir(dir.c_str());
+}
+
+// Compiles `csrc` into `dir`/<hash>.dylib (reused if present); returns its path
+// or "" if the directory cannot be created or written (`*why` says what failed),
+// or "" with *why empty if the C compiler failed (already reported).
+std::string compile_into(const std::string& dir, const std::string& csrc, bool verbose, std::string* why) {
     std::string flags = cc_flags();
-    std::string dir = cache_dir_path();
     std::string h = cache_hash(csrc, flags);
     std::string path = dir + "/" + h + ".dylib";
     if (::access(path.c_str(), R_OK) == 0) {
@@ -134,7 +148,7 @@ std::string compile_cached(const std::string& csrc, bool verbose) {
         return path;
     }
     if (!mkdirs(dir)) {
-        std::fprintf(stderr, "epq: cannot create cache directory %s\n", dir.c_str());
+        *why = "cannot create cache directory " + dir;
         return "";
     }
     char uniq[64];
@@ -143,7 +157,7 @@ std::string compile_cached(const std::string& csrc, bool verbose) {
     std::string tpath = dir + "/" + h + uniq + ".dylib";
     int fd = ::open(cpath.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (fd < 0) {
-        std::fprintf(stderr, "epq: cannot write %s\n", cpath.c_str());
+        *why = "cannot write to cache directory " + dir;
         return "";
     }
     write_all(fd, csrc);
@@ -160,12 +174,47 @@ std::string compile_cached(const std::string& csrc, bool verbose) {
     ::unlink(cpath.c_str());
     if (rc != 0) {
         ::unlink(tpath.c_str());
+        why->clear();
         std::fprintf(stderr, "epq: C compilation failed (rc %d)\n", rc);
         return "";
     }
     if (::rename(tpath.c_str(), path.c_str()) != 0) {
         ::unlink(tpath.c_str());
-        if (::access(path.c_str(), R_OK) != 0) return "";
+        if (::access(path.c_str(), R_OK) != 0) {
+            *why = "cannot write to cache directory " + dir;
+            return "";
+        }
+    }
+    return path;
+}
+
+// Compiles `csrc` into the dylib cache. If the cache directory cannot be
+// created or written, compiles into a private mkdtemp directory under $TMPDIR
+// instead and sets *tmpdir (the caller removes it after dlopen). Returns the
+// dylib path, or "" after printing why.
+std::string compile_cached(const std::string& csrc, bool verbose, std::string* tmpdir) {
+    std::string why;
+    std::string path = compile_into(cache_dir_path(), csrc, verbose, &why);
+    if (!path.empty() || why.empty()) return path;
+    if (verbose) std::fprintf(stderr, "epq: %s; compiling in a temporary directory\n", why.c_str());
+    const char* t = std::getenv("TMPDIR");
+    std::string tmpl = std::string(t && *t ? t : "/tmp");
+    while (tmpl.size() > 1 && tmpl.back() == '/') tmpl.pop_back();
+    tmpl += "/claude-epq-XXXXXX";
+    std::vector<char> buf(tmpl.begin(), tmpl.end());
+    buf.push_back(0);
+    if (!::mkdtemp(buf.data())) {
+        std::fprintf(stderr, "epq: %s, and cannot create a temporary directory under %s: %s\n", why.c_str(),
+                     t && *t ? t : "/tmp", std::strerror(errno));
+        return "";
+    }
+    *tmpdir = buf.data();
+    std::string why2;
+    path = compile_into(*tmpdir, csrc, verbose, &why2);
+    if (path.empty()) {
+        if (!why2.empty()) std::fprintf(stderr, "epq: %s, and %s\n", why.c_str(), why2.c_str());
+        remove_tmpdir(*tmpdir);
+        tmpdir->clear();
     }
     return path;
 }
@@ -344,7 +393,11 @@ int run_module(tir::Module& M, const Options& opts_in) {
         return 0;
     }
     uint64_t T1 = now_us();
-    bool use_jit = opts.engine == Engine::Jit && !opts.emit_c && (opts.jit_mode != 0 || opts.dump_asm);
+    if (opts.dump_asm && (opts.engine != Engine::Jit || opts.emit_c)) {
+        std::fprintf(stderr, "epq: --dump-asm shows the JIT's code; it cannot be combined with --engine=aot or --emit-c\n");
+        return 2;
+    }
+    bool use_jit = opts.engine == Engine::Jit && !opts.emit_c;
     if (use_jit) {
         std::string why = jitcg::unsupported(M);
         if (!why.empty()) {
@@ -375,9 +428,11 @@ int run_module(tir::Module& M, const Options& opts_in) {
     // ---- batch mode (src/batch.cpp): hand the C to the batch parent instead of compiling it ----
     if (const char* bp = std::getenv(kBatchEmitEnv); bp && *bp) return batch_emit_c(c, bp);
     // ---- end batch mode ----
-    std::string path = compile_cached(c, opts.verbose);
+    std::string tmpdir;
+    std::string path = compile_cached(c, opts.verbose, &tmpdir);
     if (path.empty()) return 2;
     void* h = dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL);
+    if (!tmpdir.empty()) remove_tmpdir(tmpdir);  // the mapping stays valid
     if (!h) {
         std::fprintf(stderr, "epq: dlopen failed: %s\n", dlerror());
         return 2;
