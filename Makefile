@@ -2,6 +2,7 @@
 #
 #   make            optimised build        -> build/epq
 #   make debug      ASan + UBSan build     -> build/epq-asan
+#   make check      quick self-test (examples, conformance, core; needs nothing else)
 #   make test-frontend   parser/resolver differential tests against the baseline
 #   make clean
 #
@@ -33,7 +34,7 @@ DEPS     := $(OBJS:.o=.d) $(ASANOBJS:.o=.d)
 
 SANFLAGS := -fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=undefined
 
-.PHONY: all debug clean test-frontend
+.PHONY: all debug clean check test-frontend
 all: build/epq
 
 debug: build/epq-asan
@@ -67,6 +68,9 @@ $(RTINC): runtime/epq_rt.h
 	cd runtime && xxd -i epq_rt.h > ../$@.tmp && mv ../$@.tmp ../$@ && sed -i '' 's/^unsigned/static const unsigned/' ../$@
 
 $(OBJDIR)/src/cgen.o $(ASANDIR)/src/cgen.o: $(RTINC)
+
+check: build/epq
+	@python3 tests/check.py
 
 test-frontend: build/epq
 	python3 tests/frontend/run_tests.py
