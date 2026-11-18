@@ -2193,7 +2193,7 @@ public:
     }
     bool li_fast(const Node* n) {
         Type ta = n->kids[0]->type, tb = n->kids[1]->type;
-        return ta.k == TK::List && tb.k == TK::List && M.elem_is_i32(ta.a) && M.elem_is_i32(tb.a);
+        return ta.k == TK::List && tb.k == TK::List && M.elem_width(ta.a) == 4 && M.elem_width(tb.a) == 4;
     }
     bool rec_rec(const Node* n) {
         Type ta = n->kids[0]->type, tb = n->kids[1]->type;
@@ -2287,7 +2287,7 @@ public:
                 generic(st.eq ? H_EQ : H_CMP3, fda, fdb, off);
                 if (st.eq) A->cbz(W(0), lzero);
                 else A->cbnz(W(0), lret);
-            } else if (fa.k == TK::List && fb.k == TK::List && M.elem_is_i32(fa.a) && M.elem_is_i32(fb.a)) {
+            } else if (fa.k == TK::List && fb.k == TK::List && M.elem_width(fa.a) == 4 && M.elem_width(fb.a) == 4) {
                 A->ldr(X(0), mem(X(19), off));
                 A->ldr(X(1), mem(X(20), off));
                 call_helper(st.eq ? H_EQ_LI : H_CMP3_LI);
@@ -2505,7 +2505,17 @@ public:
     }
 
     // ---- lists
-    uint32_t esz_of(uint32_t rg) { return M.elem_is_i32(rg) ? 4 : 8; }
+    uint32_t esz_of(uint32_t rg) { return M.elem_width(rg); }  // 1 (byte region), 4 or 8
+    // Element load / store of width esz: ldrb/strb (byte lists; loads zero-extend),
+    // 32-bit ldr/str (Int), 64-bit (words). s is a w register unless esz == 8.
+    void ld_elem(int d, const Mem& m, uint32_t esz) {
+        if (esz == 1) A->ldrb(W(d), m);
+        else A->ldr(esz == 4 ? W(d) : X(d), m);
+    }
+    void st_elem(Reg s, const Mem& m, uint32_t esz) {
+        if (esz == 1) A->strb(s, m);
+        else A->str(s, m);
+    }
 
     // epq_list_new(n, esz) sizes (runtime/epq_rt.h)
     static uint32_t lit_bytes(uint32_t n, uint32_t esz) {
@@ -2572,10 +2582,10 @@ public:
             Reg l = R(lst, true);
             uint32_t off = 16 + i * esz;
             if (v.k == V::IMM && v.imm == 0) {
-                A->str(esz == 8 ? xzr : wzr, mem(l, off));
+                st_elem(esz == 8 ? xzr : wzr, mem(l, off), esz);
             } else {
                 Reg s = R(v, esz == 8);
-                A->str(s, mem(l, off));
+                st_elem(s, mem(l, off), esz);
             }
             release(v);
         }
@@ -2604,7 +2614,7 @@ public:
     }
     Mem elem_mem(V& i, uint32_t esz) {
         if (i.k == V::IMM) return mem(X(16), (int64_t)(uint32_t)(int32_t)i.imm * esz);
-        return memr(X(16), W(i.r), UXTW, true);
+        return memr(X(16), W(i.r), UXTW, esz != 1);
     }
     V from_word(Type t, int d, int want) {
         if (t.k == TK::Fn) {
@@ -2627,7 +2637,7 @@ public:
         release(k[0]);
         release(k[1]);
         int d = dest(want);
-        A->ldr(esz == 4 ? W(d) : X(d), m);
+        ld_elem(d, m, esz);
         return from_word(n->type, d, want);
     }
 
@@ -2640,7 +2650,7 @@ public:
         if (k[1].k != V::IMM) R(k[1], false);
         Reg s = (w.k == V::IMM && w.imm == 0) ? (esz == 8 ? xzr : wzr) : R(w, esz == 8);
         bounds(l, k[1], err(Err::IndexOOB));
-        A->str(s, elem_mem(k[1], esz));
+        st_elem(s, elem_mem(k[1], esz), esz);
         release(k[0]);
         release(k[1]);
         // value of SetIndex is v: for 8-byte slots its word (word_of only rewrites Int/Fn)
@@ -2662,7 +2672,7 @@ public:
         A->cmp(W(16), W(17));
         A->b(EQ, grow);
         A->ldr(X(17), mem(l, 0));
-        A->str(v, memr(X(17), W(16), UXTW, true));
+        st_elem(v, memr(X(17), W(16), UXTW, esz != 1), esz);
         A->add(W(16), W(16), 1u);
         A->str(W(16), mem(l, 8));
         uint32_t save = live_caller_saved(0);
@@ -2701,7 +2711,7 @@ public:
         Label top = A->here(), grow = A->new_label();
         A->cmp(len, cap);
         A->b(EQ, grow);
-        A->str(v, memr(dreg, len, UXTW, true));
+        st_elem(v, memr(dreg, len, UXTW, esz != 1), esz);
         A->add(len, len, 1u);
         uint32_t save = live_caller_saved(0);
         cold(grow, [=, this]() {
@@ -2730,7 +2740,7 @@ public:
         A->ldr(X(16), mem(l, 0));
         release(k);
         int d = dest(want);
-        A->ldr(esz == 4 ? W(d) : X(d), memr(X(16), W(17), UXTW, true));
+        ld_elem(d, memr(X(16), W(17), UXTW, esz != 1), esz);
         return from_word(n->type, d, want);
     }
 
@@ -3088,7 +3098,7 @@ public:
     }
     Mem elem_at(Reg base, V& i, uint32_t esz) {
         if (i.k == V::IMM) return mem(base, (int64_t)(int32_t)i.imm * esz);
-        return memr(base, W(i.r), SXTW, true);
+        return memr(base, W(i.r), SXTW, esz != 1);
     }
     V elem_load(const Node* n, int want) {
         V k[2];
@@ -3101,7 +3111,7 @@ public:
         release(k[1]);
         if (n->type.k == TK::Fn) return V::none();
         int d = dest(want);
-        A->ldr(esz == 4 ? W(d) : X(d), m);
+        ld_elem(d, m, esz);
         return result(d, want);
     }
     V elem_store(const Node* n) {
@@ -3113,7 +3123,7 @@ public:
         Reg d0 = R(k[0], true);
         if (k[1].k != V::IMM) R(k[1], false);
         Reg s = (w.k == V::IMM && w.imm == 0) ? (esz == 8 ? xzr : wzr) : R(w, esz == 8);
-        A->str(s, elem_at(d0, k[1], esz));
+        st_elem(s, elem_at(d0, k[1], esz), esz);
         release(k[0]);
         release(k[1]);
         if (vt.k == TK::Fn) {
@@ -3222,7 +3232,7 @@ public:
             A->cmp(X(16), X(17));
             A->b(NE, slow);
             A->ldr(W(16), mem(l, 12));
-            A->lsl(W(16), W(16), esz == 4 ? 2 : 3);
+            if (esz != 1) A->lsl(W(16), W(16), esz == 4 ? 2 : 3);
             A->add(W(16), W(16), 16u);
             A->and_(W(16), W(16), (uint64_t)~15u);
             A->cmp(W(16), 512u);

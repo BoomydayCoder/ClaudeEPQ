@@ -14,7 +14,8 @@
 //            lists of a region share one element type, and two list values of
 //            different regions can never be the same list (Steensgaard
 //            classes from inference). Region element type Int/Bot => int32
-//            element array, otherwise 8-byte EAny words (runtime/epq_rt.h).
+//            element array (uint8 for a byte region, Region::bytes), otherwise
+//            8-byte EAny words (runtime/epq_rt.h). Module::elem_width.
 //   Fn(d)    a function value whose DefId d is statically known; no run-time
 //            representation (C uses a dummy int32 0)
 //   Any      tagged 64-bit dynamic value (runtime/epq_rt.h). Soundness
@@ -75,8 +76,8 @@
 //            exactly like the two-element integer list it stands for
 //            (descriptor kind PAIR; DynArith: always OperandsInt; truthy).
 //            Pairs never flow into Any (no Box of a Pair).
-//   Ptr(r)   raw pointer to the element buffer of a list of region r: int32
-//            elements if elem(r) is Int/Bot, else 8-byte slots. Only ever
+//   Ptr(r)   raw pointer to the element buffer of a list of region r:
+//            Module::elem_width(r) bytes per element (1, 4 or 8). Only ever
 //            held in compiler-created locals (LocalKind::Cache). It becomes
 //            stale when the list's header changes (Append may move the buffer
 //            and frees the old one; Free).
@@ -388,6 +389,12 @@ struct Region {
     bool nullable = false;   // record region with `[]` sites (the null record)
     uint32_t rec_len = 0;    // k, 1..16
     std::vector<Type> fields;
+    // Byte region (DESIGN.md §5.12, set only by pass "bytes", src/passes/bytes.cpp):
+    // elem is Int and every value ever stored into an element of any list of
+    // the region is provably in [0, 255]; elements are stored one byte each
+    // (zero-extended on load). Module::elem_width is the one place the element
+    // layout of a region is derived; never test elem types for a width.
+    bool bytes = false;
 };
 
 // Static type descriptors (runtime EDesc). Index 0 INT, 1 ANY, 2 LIST(ANY), 3 FN.
@@ -418,7 +425,15 @@ struct Module {
     Node* node(Op op, Type t, std::initializer_list<Node*> kids);
     uint32_t desc_of(Type t);
     uint32_t new_temp(Func* f, Type t);
-    bool elem_is_i32(uint32_t region) const { return regions[region].elem.is_int_like(); }
+    // Element width in bytes of lists of `region` (and Ptr(region)): 1 for a
+    // byte region, 4 for Int/Bot elements, else 8 (EW64 words).
+    uint32_t elem_width(uint32_t region) const {
+        const Region& R = regions[region];
+        if (R.bytes) return 1;
+        return R.elem.is_int_like() ? 4 : 8;
+    }
+    // Descriptor INT8 {INT, 1}: element descriptor of byte-region LIST descriptors.
+    uint32_t desc_int8();
     std::vector<int32_t> region_desc_memo;
 };
 

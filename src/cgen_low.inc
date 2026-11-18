@@ -35,7 +35,7 @@ std::string low_pair_cmp(Op c, const std::string& a, const std::string& b) {
     return "((int32_t)(" + a + " " + sym + " " + b + "))";
 }
 
-std::string elem_size(uint32_t region) { return M.elem_is_i32(region) ? "4" : "8"; }
+std::string elem_size(uint32_t region) { return std::to_string(M.elem_width(region)); }
 
 bool low_E(const Node* n, std::string& r) {
     switch (n->op) {
@@ -83,13 +83,16 @@ bool low_E(const Node* n, std::string& r) {
         Kids k = kids(n, 0, 2);
         uint32_t reg = n->kids[0]->type.a;
         std::string ld = k.v[0] + "[" + k.v[1] + "].v";
-        r = se(k.pre, M.elem_is_i32(reg) ? ld : from_word(n->type, ld));
+        uint32_t w = M.elem_width(reg);
+        r = se(k.pre, w == 1 ? "((int32_t)" + ld + ")" : w == 4 ? ld : from_word(n->type, ld));
         return true;
     }
     case Op::ElemStore: {
         Kids k = kids(n, 0, 3);
         uint32_t reg = n->kids[0]->type.a;
-        if (M.elem_is_i32(reg)) {
+        if (M.elem_width(reg) == 1) {  // value in 0..255 (pass "bytes"): the stored byte is the value
+            r = se(k.pre, "((int32_t)(" + k.v[0] + "[" + k.v[1] + "].v = (epq_u8_t)(" + k.v[2] + ")))");
+        } else if (M.elem_width(reg) == 4) {
             r = se(k.pre, "(" + k.v[0] + "[" + k.v[1] + "].v = " + k.v[2] + ")");
         } else {
             std::string w = word(n->kids[2]->type, k.v[2], is_pure(n->kids[2]));

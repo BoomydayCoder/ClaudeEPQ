@@ -18,5 +18,6 @@ void pass_listopt(Module& m);    // §5.2/§5.3 header caching + check elision (
 void pass_reclaim(Module& m);    // §5.7 static reclamation (Free)
 void pass_litcmp(Module& m);     // comparisons against list literals (litcmp.cpp)
 void pass_appendopt(Module& m);  // append loops: Reserve hints + AppendRange bulk copies
+void pass_bytes(Module& m);      // §5.12 byte lists: 1-byte elements for regions of values in 0..255
 
 }  // namespace epq::tir
