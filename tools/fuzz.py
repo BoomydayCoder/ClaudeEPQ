@@ -5,7 +5,7 @@ Generates random programs inside the well-defined subset (tools/epqgen.py),
 runs them on the baseline and every other engine, compares stdout + exit code,
 saves and automatically reduces failing cases.
 
-  tools/fuzz.py --seed S --count N [--profile clean|mixed|nasty|any]
+  tools/fuzz.py --seed S --count N [--profile clean|mixed|nasty|opt|any]
                 [--engine NAME=CMD ...] [--pyref] [--jobs J] [--timeout T]
                 [--out DIR] [--no-reduce] [--reduce-time SECS] [--batch [--batch-chunk N]]
   tools/fuzz.py --self-check --count N [--profile P]     # baseline + pyref only, statistics
