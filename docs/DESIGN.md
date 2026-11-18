@@ -332,7 +332,9 @@ and a program never ends worse off than without pre-shaping. bintree: 2.6× fast
 **5.12 Byte lists — narrow element storage (`bytes`).** *(implemented, on by default)* When every value
 ever stored into a region is provably in 0–255 (a sieve's flags, n-queens' column marks), the region is
 laid out one byte per element. A 4-byte flag array for the 6 M sieve is 24 MB and misses cache on every
-stride; one byte per flag measured 45 → 23 ms by hand.
+stride; one byte per flag measured 45 → 23 ms by hand. Implemented (min of 7, `-t`, machine load ~25,
+so indicative): sieve_big 33.8 → 18.7 ms (JIT) / 32.3 → 17.2 ms (C); eratosthenes n = 2 M 8.8 → 7.5 /
+10.1 → 8.5 ms; peak memory of sieve_big 25 → 7 MB. nqueens and unrelated programs unchanged.
 - *Rule* (src/passes/bytes.cpp). A plain Int region (not pair, not record) qualifies iff every
   element-storing op into it — `ListLit` elements, `SetIndex` / `ElemStore` / `Append` values — stores a
   value that is provably in range: a constant 0–255; a 0/1 result (comparisons, `!`, `Eq`/`Ne`/`Cmp`,
