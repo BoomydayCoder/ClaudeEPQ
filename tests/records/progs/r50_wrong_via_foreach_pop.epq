@@ -1,0 +1,11 @@
+// pre-shaped empties popped through a for-each variable over a list of subtrees
+ins := (t, v) => {
+    (t = []) ? => [v, [], []];
+    (v < t[0]) ? t[1] := ins(t[1], v); : (v > t[0]) ? t[2] := ins(t[2], v);
+    => t;
+};
+tree := [];
+(i := 0; i < 6; i := i + 1;) @ tree := ins(tree, 3 + (i * 5) - (i * 5) / 7 * 7);
+subs := [tree[1], tree[2]];
+(s : subs) @ { (|s| > 0) ? { >> -s; >> s; } }
+>> tree;

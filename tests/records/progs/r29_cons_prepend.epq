@@ -1,0 +1,21 @@
+// cons lists built by prepending from l := []
+lst := [];
+(i := 0; i < 10; i := i + 1;) @ lst := [i * i, lst];
+>> lst;
+sum := (c) => { s := 0; (c != []) @ { s := s + c[0]; c := c[1]; } => s; };
+rev := (c) => { r := []; (|c| > 0) @ { r := [c[0], r]; c := c[1]; } => r; };
+len := (c) => { (c = []) ? => 0; => 1 + len(c[1]); };
+>> sum(lst);
+rv := rev(lst);
+>> rv;
+>> len(rv);
+>> rv[0];
+>> rv[1][1][0];
+m := [];
+>> m;
+>> rev(m);
+>> sum([]);
+cell := rv[1];
+cell[0] := 100;
+>> rv[1][0];
+>> sum(rv);

@@ -29,6 +29,12 @@ struct Options {
     bool no_dedup = false;       // --no-dedup
     bool no_records = false;     // --no-records / EPQ_NO_RECORDS=1: no record typing (DESIGN.md §5.11)
     bool verbose = false;        // --verbose: compile/cache diagnostics on stderr
+    bool dump_asm = false;       // --dump-asm: print the JIT's disassembly, exit
+    bool jit_stats = false;      // --jit-stats: JIT compile time / code size on stderr
+    // engine == Jit: 1 = --engine=jit (forced: an op the JIT lacks is an error),
+    // 2 = auto, the default (JIT; the C engine for programs the JIT does not support).
+    // engine == Aot (--engine=aot): the C engine.
+    int jit_mode = 2;
     std::vector<std::string> no_pass;  // --no-pass=NAME (TIR passes and build options:
                                        // definite-assignment, demote-globals, constants)
     std::string file;            // source path as given on the command line

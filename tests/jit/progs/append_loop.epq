@@ -1,0 +1,28 @@
+// Append loops with len / cap / data in registers (JIT): growth, nesting, other lists,
+// early exits through inlined returns, list values, the list read after the loop.
+a := [];
+(i := 0; i < 1000; i := i + 1;) @ a :+ i * 3;
+>> |a|; >> a[0]; >> a[999];
+b := [7];
+(i := 0; i < 5; i := i + 1;) @ { (j := 0; j < i; j := j + 1;) @ b :+ i * 10 + j; }
+>> b;
+first := (n) => { (k := 0; k < n; k := k + 1;) @ { (k * k > n) ? => k; } => n; };
+c := [];
+(i := 1; i < 40; i := i + 1;) @ { c :+ first(i); }
+>> c;
+d := [[1]]; e := [];
+(i := 0; i < 300; i := i + 1;) @ { d :+ [i, i + 1]; (i - i / 7 * 7 = 0) ? e :+ i; }
+>> |d|; >> d[299]; >> e;
+f := [];
+s := 0;
+(i := 0; i < 2000; i := i + 1;) @ { f :+ i; s := s + i; (s > 100000) ? s := s - 99999; }
+>> s; >> |f|; >> f[1999];
+g := [];
+k := 0;
+(k < 100) @ { g :+ k; k := k + 1; } >> g[99] + |g|;
+h := [1, 2, 3];
+(x : h) @ { (j := 0; j < x; j := j + 1;) @ g :+ x; }
+>> |g|; >> g[100]; >> g[105];
+z := [];
+(i := 0; i < 50; i := i + 1;) @ { z :+ 100 / (49 - i); }
+>> z;

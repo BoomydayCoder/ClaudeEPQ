@@ -339,6 +339,17 @@ struct Trigger {
 };
 
 pid_t launch_helper(const Trigger& t) {
+    // No usable cache directory (read-only, impossible path, unwritable $HOME):
+    // tier-up switches itself off; the foreground run never notices.
+    if (!mkdirs(t.dir) || ::access(t.dir.c_str(), W_OK) != 0) {
+        tier_log("trigger-skip-unwritable %s", t.dir.c_str());
+        if (t.verbose) {
+            char buf[160];
+            int n = std::snprintf(buf, sizeof buf, "epq: tier-up off: cache directory not writable\n");
+            (void)!::write(2, buf, (size_t)n);
+        }
+        return -1;
+    }
     if (lock_held(t.dir + "/" + t.key + ".lock")) {
         tier_log("trigger-skip-locked %s", t.key.c_str());
         return -1;
@@ -640,7 +651,8 @@ bool has_arg(int argc, char** argv, const char* a) {
 
 bool engine_forced(int argc, char** argv) {
     for (int i = 1; i < argc; ++i)
-        if (!std::strncmp(argv[i], "--engine=", 9) || !std::strcmp(argv[i], "--jit") || !std::strcmp(argv[i], "--aot"))
+        if ((!std::strncmp(argv[i], "--engine=", 9) && std::strcmp(argv[i], "--engine=auto") != 0) ||
+            !std::strcmp(argv[i], "--jit") || !std::strcmp(argv[i], "--aot"))
             return true;
     return false;
 }
@@ -695,7 +707,7 @@ bool start(CompileUnit& cu, const Options& opts, int argc, char** argv, int* rc)
     }
     // Engine policy "auto" only, a real run of a named file only.
     if (opts.file == "-" || opts.emit_c || opts.dump_tir || opts.dump_types || opts.dump_ast || opts.parse_only ||
-        opts.dump_resolved || opts.frontend_time || opts.verify_tir || !opts.dump_tir_after.empty() || tier_disabled() ||
+        opts.dump_resolved || opts.frontend_time || opts.dump_asm || opts.jit_stats || opts.verify_tir || !opts.dump_tir_after.empty() || tier_disabled() ||
         engine_forced(argc, argv))
         return false;
 

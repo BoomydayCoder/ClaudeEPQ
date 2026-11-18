@@ -12,8 +12,10 @@
 //   helper     flock-guarded single compile: emit C, cc, rename, dlopen-warm,
 //              write the marker atomically, evict to the size cap.
 //
-// Engine policy: active only when no --engine/--jit/--aot flag is given
-// ("auto"); EPQ_NO_TIERUP=1 makes all of it inert.
+// Engine policy: active only under the default policy "auto" (no engine flag,
+// or --engine=auto; --engine=jit/aot force one engine and skip tier-up);
+// EPQ_NO_TIERUP=1 makes all of it inert, and so does a cache directory that
+// cannot be created or written (the helper is then never spawned).
 #pragma once
 
 #include "backend.hpp"

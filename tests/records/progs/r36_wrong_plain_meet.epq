@@ -1,0 +1,15 @@
+// the empty site meets an ordinary growing list in another phase of the program
+ins := (t, v) => {
+    (t = []) ? => [v, [], []];
+    (v < t[0]) ? t[1] := ins(t[1], v); : (v > t[0]) ? t[2] := ins(t[2], v);
+    => t;
+};
+g := [];
+(i := 0; i < 4; i := i + 1;) @ g := ins(g, 10 - i);
+>> g;
+>> |g|;
+g := [];
+(i := 0; i < 6; i := i + 1;) @ g :+ i * i;
+>> g;
+>> |g|;
+>> g[5];

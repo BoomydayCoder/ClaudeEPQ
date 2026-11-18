@@ -1,0 +1,17 @@
+// a tree's empty child reached through aliases is appended to, far away
+ins := (t, v) => {
+    (t = []) ? => [v, [], []];
+    (v < t[0]) ? t[1] := ins(t[1], v); : (v > t[0]) ? t[2] := ins(t[2], v);
+    => t;
+};
+tree := [];
+(i := 0; i < 6; i := i + 1;) @ tree := ins(tree, (i * 5) - (i * 5) / 7 * 7);
+>> tree;
+leaf := (t) => { (t[1] = []) ? => t; => leaf(t[1]); };
+far := (x) => { x :+ 9; => x; };
+l := leaf(tree);
+>> l;
+e := l[1];
+>> far(e);
+>> tree;
+>> l;

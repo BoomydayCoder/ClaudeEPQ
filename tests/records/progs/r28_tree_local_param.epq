@@ -1,0 +1,26 @@
+// BST from a local empty tree and from a parameter
+ins := (t, v) => {
+    (|t| = 0) ? => [v, [], []];
+    (v < t[0]) ? t[1] := ins(t[1], v); : t[2] := ins(t[2], v);
+    => t;
+};
+sum := (t) => { (t = []) ? => 0; => t[0] + sum(t[1]) + sum(t[2]); };
+build := (n) => {
+    t := [];
+    (i := 0; i < n; i := i + 1;) @ t := ins(t, (i * 7) - (i * 7) / 11 * 11);
+    => t;
+};
+grow := (t, n) => {
+    (i := 0; i < n; i := i + 1;) @ t := ins(t, i * 3);
+    => t;
+};
+a := build(20);
+>> sum(a);
+>> a[0];
+b := grow([], 5);
+>> b;
+c := grow(build(3), 2);
+>> c;
+>> sum(c);
+>> build(0);
+>> build(0) = [];

@@ -1,0 +1,9 @@
+// a global [] that receives records of length 2 in one place and 3 in another
+g := [];
+setp := () => { g := [1, g]; => 0; };
+sett := () => { g := [1, g, g]; => 0; };
+setp();
+>> g;
+sett();
+>> g;
+>> g[1];

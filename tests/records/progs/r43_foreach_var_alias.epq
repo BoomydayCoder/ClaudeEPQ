@@ -1,0 +1,12 @@
+// for-each variable aliases tree nodes; mutated through it
+ins := (t, v) => {
+    (t = []) ? => [v, [], []];
+    (v < t[0]) ? t[1] := ins(t[1], v); : (v > t[0]) ? t[2] := ins(t[2], v);
+    => t;
+};
+ts := [];
+(i := 0; i < 3; i := i + 1;) @ { t := []; t := ins(t, i); t := ins(t, i + 10); ts :+ t; }
+(t : ts) @ { t[0] := t[0] * 2; }
+>> ts;
+(t : ts) @ { (t[2] != []) ? t[2][1] := [7, [], []]; }
+>> ts[1];

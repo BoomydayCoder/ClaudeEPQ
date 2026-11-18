@@ -1,6 +1,6 @@
 // ClaudeEPQ command line.
 //
-//   epq [--engine=jit|aot] [-t] [-e] [--parse-only] [--dump-resolved] FILE
+//   epq [--engine=auto|jit|aot] [-t] [-e] [--parse-only] [--dump-resolved] FILE   (epq -h)
 //
 // Exit status: 0 ok, 1 syntax / compile / run-time error (as the original),
 // 2 usage error or missing back end.
@@ -33,7 +33,12 @@ void usage(FILE* f, const char* argv0) {
     std::fprintf(f,
                  "Usage: %s [options] FILE        (FILE '-' reads the program from stdin)\n"
                  "Options:\n"
-                 "  --engine=jit|aot   back end (default: jit; the C backend until the JIT exists)\n"
+                 "  --engine=auto      (default) run on the ARM64 JIT; programs the JIT cannot\n"
+                 "                     compile run on the C engine instead (--verbose says why);\n"
+                 "                     a cached background compile (tier-up, below) is used if ready\n"
+                 "  --engine=jit, --jit   JIT only (an unsupported construct is an error)\n"
+                 "  --engine=aot, --aot   C engine only: emit C, compile with cc, cache the dylib\n"
+                 "                     ($EPQ_CACHE_DIR, default ~/.cache/claude-epq)\n"
                  "  --emit-c           print the generated C and exit\n"
                  "  --dump-tir         print the typed IR and exit\n"
                  "  --dump-types       print inferred types of globals / instances and exit\n"
@@ -46,6 +51,8 @@ void usage(FILE* f, const char* argv0) {
                  "  --list-passes      list the TIR passes in pipeline order\n"
                  "  --mono             one instance per function (no call-site specialisation)\n"
                  "  --no-dedup         keep identical instances separate\n"
+                 "  --dump-asm         print the JIT's machine code (disassembly) and exit\n"
+                 "  --jit-stats        print JIT compile time and code size to stderr (JIT runs only)\n"
                  "  --no-records       no record typing of fixed-shape lists (also EPQ_NO_RECORDS=1)\n"
                  "  --verbose          compile / cache diagnostics on stderr\n"
                  "  -t                 print \"Execution time: N microseconds\" to stderr\n"
@@ -55,9 +62,12 @@ void usage(FILE* f, const char* argv0) {
                  "  --frontend-time    print front-end phase timings to stderr\n"
                  "  --frontend-bench=N run parse..TIR passes N times in process, report per-phase timing\n"
                  "                     (with --parse-only: lex+parse+resolve only)\n"
-                 "  --tier-status FILE / --tier-clear   background-compiled cache (src/tierup.hpp)\n"
+                 "  --tier-status FILE / --tier-clear   background-compiled cache (src/tierup.hpp):\n"
+                 "                     with the default engine, a run still going after 20 ms starts\n"
+                 "                     a one-off background C compile; later runs of the same source\n"
+                 "                     and settings use it. EPQ_NO_TIERUP=1 turns this off\n"
                  "  --batch MANIFEST [-j N] [--timeout SEC]\n"
-                 "                     run many programs with one dylib (see src/batch.cpp, tools/README.md)\n"
+                 "                     run many programs on the C engine with one dylib (tools/README.md)\n"
                  "  -h, --help         this help\n",
                  argv0);
 }
@@ -276,6 +286,10 @@ int main(int argc, char** argv) {
             opts.mono = true;
         } else if (!std::strcmp(a, "--no-dedup")) {
             opts.no_dedup = true;
+        } else if (!std::strcmp(a, "--dump-asm")) {
+            opts.dump_asm = true;
+        } else if (!std::strcmp(a, "--jit-stats")) {
+            opts.jit_stats = true;
         } else if (!std::strcmp(a, "--no-records")) {
             opts.no_records = true;
         } else if (!std::strcmp(a, "--verbose")) {
@@ -299,6 +313,10 @@ int main(int argc, char** argv) {
             return epq::tir_selftest(a + 15, opts);
         } else if (!std::strcmp(a, "--engine=jit") || !std::strcmp(a, "--jit")) {
             opts.engine = Engine::Jit;
+            opts.jit_mode = 1;
+        } else if (!std::strcmp(a, "--engine=auto")) {
+            opts.engine = Engine::Jit;
+            opts.jit_mode = 2;
         } else if (!std::strcmp(a, "--engine=aot") || !std::strcmp(a, "--aot")) {
             opts.engine = Engine::Aot;
         } else if (tierup::is_flag(a)) {  // tier-up hook: --tier-compile/--tier-status/--tier-clear

@@ -1,0 +1,12 @@
+// store into the empty tree evaluates the value first, then fails
+ins := (t, v) => {
+    (t = []) ? => [v, [], []];
+    (v < t[0]) ? t[1] := ins(t[1], v); : (v > t[0]) ? t[2] := ins(t[2], v);
+    => t;
+};
+tree := [];
+tree := ins(tree, 3);
+f := () => { >> 77; => [1, [], []]; };
+e := tree[2];
+e[1] := f();
+>> 0;

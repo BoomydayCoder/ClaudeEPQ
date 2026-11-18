@@ -61,6 +61,8 @@ enum : uint8_t {
     EV_BAD = 1 << 1,    // record region violated a record condition (this run is discarded)
     EV_FIELD = 1 << 2,  // a position variable of a record, not a region
     EV_NULL = 1 << 3,   // (final result, roots) record region with an empty-literal site
+    EV_ABS = 1 << 4,    // literal-index stores into a non-record region (content that would pile up in
+                        // an undetermined region later absorbed by a record), or a record absorbed such content
 };
 
 struct EVar {

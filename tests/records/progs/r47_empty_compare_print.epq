@@ -1,0 +1,16 @@
+// pre-shaped empties compared and printed against ordinary lists
+ins := (t, v) => {
+    (t = []) ? => [v, [], []];
+    (v < t[0]) ? t[1] := ins(t[1], v); : (v > t[0]) ? t[2] := ins(t[2], v);
+    => t;
+};
+tr := [];
+>> tr;
+>> tr = [];
+>> tr < [1];
+>> [0] < tr;
+tr := ins(tr, 4); tr := ins(tr, 2);
+>> tr = [4, [2, [], []], []];
+>> tr < [4, [3]];
+>> tr < [4, [2, [], []], [0]];
+>> [tr, tr];

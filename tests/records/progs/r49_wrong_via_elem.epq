@@ -1,0 +1,15 @@
+// the pre-shaped empty reaches an append through an element of another list
+ins := (t, v) => {
+    (t = []) ? => [v, [], []];
+    (v < t[0]) ? t[1] := ins(t[1], v); : (v > t[0]) ? t[2] := ins(t[2], v);
+    => t;
+};
+tree := [];
+(i := 0; i < 6; i := i + 1;) @ tree := ins(tree, (i * 5) - (i * 5) / 7 * 7);
+holder := [tree[1], 0];
+>> holder;
+grab := (h) => { => h[0]; };
+x := grab(holder);
+x :+ 1;
+>> tree;
+>> holder;

@@ -1,0 +1,20 @@
+// a queue as two cons lists [front, back]
+rev := (c) => { r := []; (c != []) @ { r := [c[0], r]; c := c[1]; } => r; };
+qq := [[], []];
+push := (q, v) => { q[1] := [v, q[1]]; => 0; };
+pop := (q) => {
+    (q[0] = []) ? { q[0] := rev(q[1]); q[1] := []; }
+    v := q[0][0];
+    q[0] := q[0][1];
+    => v;
+};
+(i := 0; i < 5; i := i + 1;) @ push(qq, i);
+>> pop(qq);
+>> pop(qq);
+push(qq, 50);
+>> qq;
+s := 0;
+(i := 0; i < 4; i := i + 1;) @ s := s * 100 + pop(qq);
+>> s;
+>> qq;
+>> pop(qq);

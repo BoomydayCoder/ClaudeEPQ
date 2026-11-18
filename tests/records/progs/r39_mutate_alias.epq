@@ -1,0 +1,24 @@
+// in-place mutation of tree nodes, observed through aliases
+ins := (t, v) => {
+    (t = []) ? => [v, [], []];
+    (v < t[0]) ? t[1] := ins(t[1], v); : (v > t[0]) ? t[2] := ins(t[2], v);
+    => t;
+};
+tree := [];
+(i := 0; i < 7; i := i + 1;) @ tree := ins(tree, (i * 3) - (i * 3) / 7 * 7);
+>> tree;
+n := tree[2];
+keep := [n, tree];
+n[0] := 99;
+>> tree[2][0];
+keep[0][1] := [42, [], []];
+>> tree;
+set := (t, k, v) => { t[k] := v; => t; };
+>> set(tree, 0, -1)[0];
+w := tree[2][1];
+w[2] := tree[2][2];
+>> tree[2][1][2] = tree[2][2];
+>> tree < keep[1];
+>> tree = keep[1];
+tree[1] := [];
+>> tree;
