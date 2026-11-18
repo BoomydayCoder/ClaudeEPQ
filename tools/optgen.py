@@ -760,15 +760,33 @@ class OptGen:
         A = self.glob(s, "A", L)
         sm = self.glob(s, "sm", "0")
         pl = self.nm("p")
-        grow = self.fn(s, "gr", [pl], ["(|%s| < %d) ? %s :+ %d;" % (pl, self.ri(n, n + 10), pl, self.ri(0, 9)),
-                                      "=> 0;"])
+        if self.ch(0.5):
+            grow = self.fn(s, "gr", [pl], ["(|%s| < %d) ? %s :+ %d;" % (pl, self.ri(n, n + 10), pl, self.ri(0, 9)),
+                                          "=> 0;"])
+        else:
+            # recursive, so never inlined: the loop sees a CallDirect that mutates the list
+            grow = self.nm("gr")
+            gd = self.nm("p")
+            s.nglob += 1
+            s.head.append("%s := (%s) => { (|%s| < %d) ? { %s :+ %d; %s(%s); } => 0; };"
+                          % (grow, pl, pl, self.ri(n, n + 6), pl, self.ri(0, 9), grow, pl))
         pl2 = self.nm("p")
-        shr = self.fn(s, "sh", [pl2], ["(|%s| > %d) ? => -%s;" % (pl2, self.ri(0, 3), pl2), "=> 0;"])
+        if self.ch(0.5):
+            shr = self.fn(s, "sh", [pl2], ["(|%s| > %d) ? => -%s;" % (pl2, self.ri(0, 3), pl2), "=> 0;"])
+        else:
+            shr = self.nm("sh")
+            sd = self.nm("p")
+            s.nglob += 1
+            s.head.append("%s := (%s, %s) => { (%s > 0) ? => %s(%s, %s - 1); (|%s| > %d) ? => -%s; => 0; };"
+                          % (shr, pl2, sd, sd, shr, pl2, sd, pl2, self.ri(0, 3), pl2))
+            shr = "%s_D_" % shr
         i = self.nm("i")
         muts = [
             "(%s = %d) ? %s :+ %d;" % (i, self.ri(0, 5), A, self.ri(0, 9)),
             "(%s = %d) ? %s(%s);" % (i, self.ri(0, 5), grow, A),
-            "(%s = %d) ? %s := %s + %s(%s);" % (i, self.ri(0, 5), sm, sm, shr, A),
+            "(%s = %d) ? %s := %s + %s;" % (i, self.ri(0, 5), sm, sm,
+                                            "%s(%s, %d)" % (shr[:-3], A, self.ri(0, 2)) if shr.endswith("_D_")
+                                            else "%s(%s)" % (shr, A)),
             "(%s = %d & |%s| > 1) ? -%s;" % (i, self.ri(0, 5), A, A),
             "(%s = %d) ? %s := [%d, %d, %d];" % (i, self.ri(0, 5), L, self.ri(0, 9), self.ri(0, 9), self.ri(0, 9)),
             "%s(%s);" % (grow, L),
@@ -1008,7 +1026,12 @@ class OptGen:
             elif ret == "elemret":
                 body += ["%s := [%s];" % (w, n), "%s :+ %s;" % (w, t), "=> %s;" % w]
             elif ret == "setelret":
-                body += ["%s := [0, 0];" % w, "%s[%d] := %s;" % (w, self.ri(0, 1), u), "=> %s;" % w]
+                if self.ch(0.5):
+                    body += ["%s := [0, 0];" % w, "%s[%d] := %s;" % (w, self.ri(0, 1), u), "=> %s;" % w]
+                else:
+                    # indexed by a variable: a plain list, not a record (SetIndex, not RecSet)
+                    body += ["%s := [[], [], []];" % w, "%s[%s - %s / 3 * 3] := %s;" % (w, dp, dp, self.pick([t, u])),
+                             "=> %s;" % w]
             elif ret == "aliasx":
                 body.append("=> %s;" % self.alias_expr(self.pick([t, u]), (idf, "[%s]" % t)))
             elif ret == "pick":
@@ -1344,8 +1367,8 @@ class OptGen:
         nullable flips, input-dependent shapes, mutually nested shapes, records popped
         out of lists, int-terminated chains."""
         s = Snip("rec2")
-        parts = self.r.sample(["fnfield", "twoshape", "nullflip", "union", "mutual", "popped", "intchain"],
-                              self.ri(2, 4))
+        parts = self.r.sample(["fnfield", "twoshape", "nullflip", "union", "mutual", "popped", "intchain",
+                               "grown", "grown", "mkempty"], self.ri(2, 4))
         for part in parts:
             if part == "fnfield":
                 a, b = self.params(2)
@@ -1402,6 +1425,37 @@ class OptGen:
                 x = self.nm("x")
                 s.head.append("(%s : %s) @ %s[0] := %s[0] + %s[1][0];" % (x, RL, x, x, x))
                 s.head.append(">> %s;" % RL)
+            elif part == "grown":
+                # an empty literal filled by appends to a fixed shape (pre-shaped record), then
+                # read with literal indexes; sometimes a distant extra append / variable index
+                G = self.glob(s, "G", "[]")
+                s.head.append("%s :+ %d; %s :+ [%d]; %s :+ %d;" % (G, self.ri(0, 9), G, self.ri(0, 9), G, self.ri(0, 9)))
+                s.head.append(">> %s[0] + %s[1][0] + %s[2]; %s[1] := [%d, %d]; >> %s;"
+                              % (G, G, G, G, self.ri(0, 9), self.ri(0, 9), G))
+                q = self.nm("p")
+                hd = self.fn(s, "hd", [q], ["=> %s[0];" % q])
+                s.head.append(">> %s(%s) + %s([%d, %d]);" % (hd, G, hd, self.ri(0, 9), self.ri(0, 9)))
+                v = self.pick(["", "", "app", "idx", "pop"])
+                if v == "app":
+                    s.tail.append("%s :+ %d; >> %s;" % (G, self.ri(0, 9), G))
+                elif v == "idx":
+                    kv = self.read(s, 0, 2, "kv")
+                    s.tail.append(">> %s[%s];" % (G, kv))
+                elif v == "pop":
+                    s.tail.append(">> -%s; >> %s;" % (G, G))
+            elif part == "mkempty":
+                mk = self.fn(s, "MK", [], ["=> [];"])
+                t, v = self.params(2)
+                ins = self.nm("ins")
+                s.nglob += 1
+                s.head.append("%s := (%s, %s) => { (|%s| = 0) ? => [%s, %s(), %s()]; (%s < %s[0]) ? %s[1] := %s(%s[1], %s); "
+                              ": (%s > %s[0]) ? %s[2] := %s(%s[2], %s); => %s; };"
+                              % (ins, t, v, t, v, mk, mk, v, t, t, ins, t, v, v, t, t, ins, t, v, t))
+                T = self.glob(s, "T", "%s()" % mk)
+                i = self.nm("i")
+                s.head.append("(%s := 0; %s < %d; %s := %s + 1;) @ %s := %s(%s, %s);"
+                              % (i, i, self.ri(0, 9), i, i, T, ins, T, self.mod("(%s * 7 + %d)" % (i, self.ri(0, 9)), 11)))
+                s.head.append(">> %s; >> |%s|;" % (T, T))
             else:
                 C = self.glob(s, "C", "0")
                 i = self.nm("i")
