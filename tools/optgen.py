@@ -1368,7 +1368,7 @@ class OptGen:
         out of lists, int-terminated chains."""
         s = Snip("rec2")
         parts = self.r.sample(["fnfield", "twoshape", "nullflip", "union", "mutual", "popped", "intchain",
-                               "grown", "grown", "mkempty"], self.ri(2, 4))
+                               "grown", "grown", "mkempty", "wide", "wide"], self.ri(2, 4))
         for part in parts:
             if part == "fnfield":
                 a, b = self.params(2)
@@ -1443,6 +1443,26 @@ class OptGen:
                     s.tail.append(">> %s[%s];" % (G, kv))
                 elif v == "pop":
                     s.tail.append(">> -%s; >> %s;" % (G, G))
+            elif part == "wide":
+                # wide heterogeneous literals (records with many fields) built from main's
+                # locals / globals, also in statement and condition position, compared with
+                # ints and lists (the shape of tests/fuzzfound/bug01: JIT out of temporaries)
+                ks = [self.glob(s, "v", str(self.ri(0, 9))) for _ in range(self.ri(3, 6))]
+                dv = self.glob(s, "dv", "0")
+                s.head.append("(%s) ? %s := [%d];" % (ks[0], dv, self.ri(0, 9)))
+                blk = self.nm("i")
+                s.head.append("{ %s := %s + 1; (%s := 0; %s < %d; %s := %s + 1;) @ { %s := %s + %s; } }"
+                              % (ks[1], ks[1], blk, blk, self.ri(0, 3), blk, blk, ks[2], ks[2], blk))
+                n = self.ri(8, 16)
+                fields = [self.pick(ks + [str(self.ri(0, 9)), "%s + 1" % self.pick(ks)]) for _ in range(n)] + [dv]
+                self.r.shuffle(fields)
+                lit = "[%s]" % ", ".join(fields)
+                form = self.pick(["([(%s != 0)]) ? ;" % lit, "([%s = []]) ? >> 1;" % lit, "%s;" % lit,
+                                  ">> [%s, %d] = [%s, %d];" % (lit, self.ri(0, 1), lit, self.ri(0, 1)),
+                                  "{ (%s : [1]) @ { %s := 1; } ([(%s != 0)]) ? ; }" % (self.nm("x"), ks[0], lit)])
+                s.head.append(form)
+                W = self.glob(s, "W", lit)
+                s.head.append(">> %s[0]; >> %s[%d]; >> %s;" % (W, W, n, W))
             elif part == "mkempty":
                 mk = self.fn(s, "MK", [], ["=> [];"])
                 t, v = self.params(2)

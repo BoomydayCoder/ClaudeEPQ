@@ -91,6 +91,13 @@ def run_all(src, inp, engines, timeout, use_pyref, tag="p"):
     return res, pr
 
 
+# Known, already reported divergences: an engine whose stderr contains one of these
+# substrings (--known S, repeatable; env EPQ_FUZZ_KNOWN, '|'-separated) is not counted
+# as a FAIL; the case is reported on a "KNOWN" line instead (so a campaign is not
+# flooded by one bug while it is being fixed).
+KNOWN = [k for k in os.environ.get("EPQ_FUZZ_KNOWN", "").split("|") if k]
+
+
 def diff_names(res, pr, engines):
     base = res[engines[0].name]
     bad = []
@@ -100,6 +107,10 @@ def diff_names(res, pr, engines):
             continue
         if r.timed_out or r.signal is not None or r.truncated or r.spawn_error \
                 or r.rc != base.rc or r.stdout != base.stdout:
+            if KNOWN and any(k.encode() in r.stderr for k in KNOWN):
+                print("KNOWN   %s: %s" % (e.name, epqlib.first_line(r.stderr).decode("utf-8", "replace")),
+                      flush=True)
+                continue
             bad.append(e.name)
     suspect = False
     if pr is not None and pr.status != "limit":
@@ -708,7 +719,12 @@ def main(argv=None):
                     help="run C-backend engines through `epq --batch` (one new dylib per chunk instead of one per "
                          "program; see tools/README.md). The reducer still runs single programs per process")
     ap.add_argument("--batch-chunk", type=int, default=300, help="programs per epq --batch (default 300)")
+    ap.add_argument("--known", action="append", default=[], metavar="STDERR_SUBSTR",
+                    help="do not count a divergence whose stderr contains this (already reported bug)")
     a = ap.parse_args(argv)
+    if a.known:
+        os.environ["EPQ_FUZZ_KNOWN"] = "|".join(KNOWN + a.known)  # inherited by the worker processes
+        KNOWN.extend(a.known)
     if a.emit:
         return emit(a)
     engines = epqlib.engines_from_args(a.engine)

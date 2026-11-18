@@ -47,6 +47,7 @@ def main():
     ap.add_argument("--out", default=os.path.join(REPO, "build", "hunt"))  # absolute paths below
     ap.add_argument("--reduce-time", type=float, default=90.0)
     ap.add_argument("--jobs", type=int, default=os.cpu_count() or 4)
+    ap.add_argument("--known", action="append", default=[], help="passed to fuzz.py --known")
     a = ap.parse_args()
     base = os.environ.get("EPQ_BASELINE")
     if not base or not os.path.exists(base):
@@ -97,11 +98,12 @@ def run_chunk(a, k, seed, prof, dis, eng, out, log, batch):
         p = subprocess.run([sys.executable, os.path.join(TOOLS, "fuzz.py")] + (["--batch"] if batch else []) + [
                             "--seed", str(seed),
                             "--count", str(a.chunk), "--profile", prof, "--out", out, "--jobs", str(a.jobs),
-                            "--reduce-time", str(a.reduce_time), "--max-reduce", "3", "--timeout", "10"] + eng,
+                            "--reduce-time", str(a.reduce_time), "--max-reduce", "3", "--timeout", "10"] + eng +
+                           sum((["--known", k] for k in a.known), []),
                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, cwd=REPO)
         txt = p.stdout.decode("utf-8", "replace")
         summ = [l for l in txt.splitlines() if " programs in " in l]
-        fails = [l for l in txt.splitlines() if l.startswith(("FAIL", "SUSPECT", "INVALID", "RECHECK"))]
+        fails = [l for l in txt.splitlines() if l.startswith(("FAIL", "SUSPECT", "INVALID", "RECHECK", "KNOWN"))]
         line = "%s seeds %d..%d profile=%s no_pass=%s rc=%d %.0fs | %s" % (
             time.strftime("%H:%M:%S"), seed, seed + a.chunk - 1, prof, dis or "-", p.returncode, time.time() - t0,
             summ[-1] if summ else txt[-300:].replace("\n", " "))
