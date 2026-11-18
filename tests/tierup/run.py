@@ -267,7 +267,8 @@ def t_corrupt():
     case("dylib not loadable", undlopenable, "bad-artefact")
     del dylib
     left = [n for n in os.listdir(os.path.join(c, "tier")) if not n.startswith(".")]
-    check(sorted(x.rsplit(".", 1)[1] for x in left) == ["dylib", "ready"], "leftover files: %r" % left)
+    exts = sorted(set(x.rsplit(".", 1)[1] for x in left) - {"stats"})  # stats: run times (t_measured)
+    check(exts == ["dylib", "ready"] and len(left) <= 3, "leftover files: %r" % left)
 
 
 def t_disabled():
