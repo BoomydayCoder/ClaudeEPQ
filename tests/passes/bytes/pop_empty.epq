@@ -1,0 +1,8 @@
+// popping an empty byte list: the error after the output so far
+// bytes: yes
+f := [1, 0]; // FLAG
+>> -f;
+>> -f;
+>> f;
+>> -f;
+>> 99;

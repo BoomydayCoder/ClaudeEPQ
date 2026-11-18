@@ -1,0 +1,9 @@
+// a local set in a branch to an arithmetic value: no bytes
+// bytes: no
+f := [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]; // FLAG
+(i := 0; i < 10; i := i + 1;) @ {
+    x := 0;
+    (i / 3 * 3 = i) ? x := 1; : x := i * 40;
+    f[i] := x;
+}
+>> f;

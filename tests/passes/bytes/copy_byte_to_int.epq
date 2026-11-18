@@ -1,0 +1,13 @@
+// copy loops from a byte list into an int list (appendopt bulk copy; AppendRange
+// couples the two regions: either both are bytes or neither)
+// bytes: no
+b := []; // FLAG
+(i := 0; i < 50; i := i + 1;) @ b :+ (i / 3 * 3 = i);
+ints := [1000, 2000];
+(i := 0; i < |b|; i := i + 1;) @ ints :+ b[i];
+>> ints;
+>> |ints|;
+c := [];
+(i := 5; i < 20; i := i + 1;) @ c :+ ints[i];
+>> c;
+>> b;

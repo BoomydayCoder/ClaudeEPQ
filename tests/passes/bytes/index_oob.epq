@@ -1,0 +1,9 @@
+// out-of-bounds store into a byte list: error order unchanged
+// bytes: yes
+f := [0, 0, 0]; // FLAG
+f[2] := 1;
+>> f;
+k := 3;
+>> f[k - 1];
+f[k] := 1;
+>> f;

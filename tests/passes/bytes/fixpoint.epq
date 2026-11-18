@@ -1,0 +1,17 @@
+// values read from one byte list stored into another (both bytes, a cycle);
+// a second cycle reaches a violator and neither list of it is bytes
+// bytes: yes
+a := [1, 0, 1, 0]; // FLAG
+b := [0, 0, 0, 0];
+(i := 0; i < 4; i := i + 1;) @ b[i] := a[3 - i];
+(i := 0; i < 4; i := i + 1;) @ a[i] := b[i];
+>> a;
+>> b;
+c := [0, 0];
+d := [0, 0];
+c[0] := d[1];
+d[0] := c[1];
+d[1] := 500;
+c[1] := d[1];
+>> c;
+>> d;
