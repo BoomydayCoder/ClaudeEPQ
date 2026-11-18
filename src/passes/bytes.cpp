@@ -27,6 +27,7 @@
 //   SetLocal / SetGlobal / SetIndex / ElemStore used as a value: the stored value;
 //   Index / ElemLoad / Pop of a region still in the set; a Local whose every
 //   assignment (SetLocal, in its function) is in range — parameters are unknown;
+//   (header-cache locals of listopt are never in range either);
 //   a GetGlobal of a global whose every SetGlobal is in range; a CallDirect of a
 //   (non-main, non-generic) instance whose every Return value is in range.
 // Anything else (arithmetic, Input, UnboxInt, PairFirst, RecGet, ...) is not.
@@ -105,6 +106,7 @@ struct Bytes {
         util::walk(body, [&](Node* n, Node*, uint32_t) {
             switch (n->op) {
             case Op::ListLit:
+                if (n->type.k != TK::List) break;
                 for (uint32_t i = 0; i < n->nkids; ++i) stores.push_back({n->type.a, f, n->kids[i]});
                 break;
             case Op::SetIndex:
@@ -146,7 +148,10 @@ struct Bytes {
             const Func& F = *M.funcs[f];
             loc[f].assign(F.locals.size(), 0);
             for (size_t l = 0; l < F.locals.size(); ++l)
-                loc[f][l] = F.locals[l].type.k == TK::Int && F.locals[l].kind != LocalKind::Param;
+                // Parameters are assigned by calls, header-cache locals (listopt) hold
+                // lengths: neither is ever in range.
+                loc[f][l] = F.locals[l].type.k == TK::Int && F.locals[l].kind != LocalKind::Param &&
+                            F.locals[l].kind != LocalKind::Cache;
             ret[f] = !F.is_main && !F.generic && F.ret.k == TK::Int;
         }
         glob.assign(M.globals.size(), 0);

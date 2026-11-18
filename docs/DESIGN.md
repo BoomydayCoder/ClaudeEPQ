@@ -185,7 +185,8 @@ Both engines consume the TIR after these passes. The pipeline (`epq --list-passe
 default, each switchable off with `--no-pass=NAME` / `EPQ_NO_PASS`: after the infrastructure steps
 (definite-assignment, constants, demote-globals, fold, region-info) come **simplify** (§5.6),
 **litcmp** (§5.9), **inline** (§5.1), **recur** (§5.10), **pairs** (§5.4), **ifconv** (§5.5),
-**appendopt** (§5.8), **listopt** (§5.2 + §5.3), **simplify2** (§5.6 again, late) and **reclaim** (§5.7).
+**appendopt** (§5.8), **listopt** (§5.2 + §5.3), **simplify2** (§5.6 again, late), **reclaim** (§5.7)
+and **bytes** (§5.12).
 Records (§5.11) are part of inference, not a pass (`--no-records` / `EPQ_NO_RECORDS=1`).
 
 ### 5.1 Inlining
@@ -328,10 +329,34 @@ literals' candidate state). A wrong guess is an ordinary record violation of tha
 it, empty sites included, for good; every site moves only 0 → 1 → 2, so the scheme still terminates,
 and a program never ends worse off than without pre-shaping. bintree: 2.6× faster.
 
-**5.12 Byte lists — narrow element storage.** *(in progress on a branch; not on `main` yet)* When every value ever stored into a region
-is a constant in 0–255 (a sieve's flags, n-queens' column marks), the region is laid out one byte per
-element. A 4-byte flag array for the 6 M sieve is 24 MB and misses cache on every stride; one byte per
-flag measured 45 → 23 ms.
+**5.12 Byte lists — narrow element storage (`bytes`).** *(implemented, on by default)* When every value
+ever stored into a region is provably in 0–255 (a sieve's flags, n-queens' column marks), the region is
+laid out one byte per element. A 4-byte flag array for the 6 M sieve is 24 MB and misses cache on every
+stride; one byte per flag measured 45 → 23 ms by hand.
+- *Rule* (src/passes/bytes.cpp). A plain Int region (not pair, not record) qualifies iff every
+  element-storing op into it — `ListLit` elements, `SetIndex` / `ElemStore` / `Append` values — stores a
+  value that is provably in range: a constant 0–255; a 0/1 result (comparisons, `!`, `Eq`/`Ne`/`Cmp`,
+  pair comparisons, `DynIsEmptyList`, `SameList`); `Select` / value-form `&` `|` of in-range values; the
+  last value of a `Comma`; the value of an assignment or element store; an element loaded from (or
+  popped off) a region that itself qualifies; an Int local all of whose assignments in its function are
+  in range (parameters: unknown); an Int global all of whose assignments are in range; a call of an
+  instance all of whose `Return` values are in range. Everything else (arithmetic, input, unboxing,
+  record fields, ...) is not. Solved as a greatest fixpoint: start with every candidate, remove
+  violators until nothing changes. An `AppendRange(l, m)` (a bitwise copy) couples l's and m's regions:
+  both are byte regions or neither. Because inference gives every alias of a list the same region, and
+  Int-element lists never flow into `Any`, every store into a region is one of these ops in some instance
+  of the module, so the layout change is a whole-program property and sound.
+- *Position*: last, after reclaim. Nothing earlier bakes in a width: `Ptr(r)` (listopt), `Reserve` /
+  `AppendRange` (appendopt) and `Free` (reclaim) derive it from the region when code is emitted
+  (`Module::elem_width`, the one place a width is derived), and only then is the set of stores final.
+- *Representation.* `EU8` elements; in C a struct of `unsigned _BitInt(8)`, which (unlike `unsigned
+  char`) is not a character type, so type-based alias analysis keeps byte stores apart from list
+  headers. The JIT uses `ldrb`/`strb` (loads zero-extend). The region's LIST descriptor gets the element
+  descriptor INT8 = `{INT, 1}`: as a value descriptor it is exactly INT, as an element descriptor it
+  tells the runtime's equality, three-way comparison and printing to read bytes, so a byte list compares
+  equal to an int list with the same values. `--dump-types` ends with the TIR layout
+  (`List(L0: Int8)`); `--no-pass=bytes` restores the 4-byte layout. Tests: tests/passes/bytes
+  (`check_fires.py` checks where it fires and where it must not).
 
 ## 6. ARM64 JIT (default engine)
 
