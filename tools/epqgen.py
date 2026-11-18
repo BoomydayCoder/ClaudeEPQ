@@ -1586,7 +1586,7 @@ def mix_opt(gen, root, seed):
     rng = random.Random(seed * 104729 + 3)
     if rng.random() >= OPT_MIX.get(gen.profile, 0.0):
         return root, 0, []
-    og = optgen.OptGen(rng)
+    og = optgen.OptGen(rng, glue=False)  # tails may land before later heads: no cross-snippet use
     stmts = list(root.ch)
     nreads = 0
     fams = []

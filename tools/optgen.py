@@ -49,13 +49,19 @@ class Snip:
 
 
 FAMILIES = ["rec", "tree", "cons", "pairs", "helpers", "recur", "append", "copy", "idxloop",
-            "ifconv", "litcmp", "reclaim"]
+            "ifconv", "litcmp", "reclaim", "glob", "recloop", "inl2", "glue"]
 
 
 class OptGen:
-    def __init__(self, rng, start=0):
+    def __init__(self, rng, start=0, glue=True):
         self.r = rng
         self.k = start
+        self.glue = glue
+        self.exports = []   # (name, kind) of values later snippets may use (kinds below, f_glue)
+
+    def export(self, name, kind):
+        if self.glue:
+            self.exports.append((name, kind))
 
     # ------------------------------------------------------------------ utils
     def nm(self, t):
@@ -191,6 +197,7 @@ class OptGen:
                           % (j, j, rs, j, j, rs, j, rs, j, rs, j))
         s.head.append(">> %s; >> %s;" % (acc, rs))
         self.rec_violation(s, [r1], inner is not None, mk)
+        self.export(r1, "rec")  # exports
         return s
 
     def rec_violation(self, s, names, has_inner, mk):
@@ -293,6 +300,7 @@ class OptGen:
                 s.tail.append("(%s : %s) @ >> %s = [];" % (x, T, x))
             else:
                 s.tail.append(">> |%s| + |%s|;" % (T, U))
+        self.export(U, "tree"); self.export(T, "tree")  # exports
         return s
 
     # ============================================================== cons lists
@@ -341,6 +349,7 @@ class OptGen:
                 s.tail.append("(%s != []) ? { >> -%s; >> %s; }" % (C, C, C))
             else:
                 s.tail.append("(%s != []) ? %s[%s] := [%d]; >> %s;" % (C, C, kv, self.ri(0, 9), C))
+        self.export(C, "cons"); self.export(D, "cons")  # exports
         return s
 
     # =================================================================== pairs
@@ -411,6 +420,7 @@ class OptGen:
                 g = self.fn(s, "dg", [pp], ["=> %s[1];" % pp])
                 gl = self.glob(s, "fl", "[%s]" % g)
                 s.tail.append(">> %s[0](%s);" % (gl, best))
+        self.export(P, "pairs")  # exports
         return s
 
     # ================================================================ helpers
@@ -465,6 +475,7 @@ class OptGen:
             prf = self.fn(s, "pr", [pp2], [">> %s;" % pp2, "=> %s * 2;" % pp2])
             s.head.append(">> %s(1) + (%s := %s + 1) + %s(1);" % (imp, gv, gv, imp))
             s.head.append(">> %s(%d) + %s(%d);" % (prf, self.ri(0, 9), prf, self.ri(0, 9)))
+        self.export(L, "ilist")  # exports
         return s
 
     # ================================================================== recur
@@ -617,6 +628,7 @@ class OptGen:
             j = self.glob(s, "j", "0")
             s.head.append("(%s < %d) @ { %s :+ %s; %s := %s + 1; }" % (j, self.ri(0, 12), M, j, j, j))
             s.head.append(">> %s; >> %s;" % (j, M))
+        self.export(L, "ilist"); self.export(M, "ilist")  # exports
         return s
 
     def f_copy(self):
@@ -696,6 +708,7 @@ class OptGen:
                 llen += cnt
             s.head.append(">> %s;" % L)
         s.head.append(">> %s; >> |%s| + |%s|;" % (M, L, M))
+        self.export(M, "ilist")  # exports
         return s
 
     # =========================================================== indexed loops
@@ -748,6 +761,7 @@ class OptGen:
             ])
             s.head.append("(%s := 0; %s < %d; %s := %s + 1;) @ { %s }" % (k, k, self.ri(1, 14), k, k, form))
             s.head.append(">> %s; >> %s;" % (A, sm))
+        self.export(A, "ilist"); self.export(L, "ilist")  # exports
         return s
 
     # ================================================================= ifconv
@@ -799,6 +813,7 @@ class OptGen:
             s.head.append("(%s := 0; %s < %d; %s := %s + 1;) @ %s := %s + %s(%s - %d, %d - %s);"
                           % (k2, k2, self.ri(1, 15), k2, k2, ac, ac, f, k2, self.ri(0, 9), self.ri(0, 9), k2))
             s.head.append(">> %s;" % ac)
+        self.export(L, "ilist"); self.export(H, "ilist")  # exports
         return s
 
     # ================================================================= litcmp
@@ -945,10 +960,194 @@ class OptGen:
             s.tail.append(">> %s; >> %s;" % (r2, keep))
         return s
 
+    # ================================================================== glob
+    def f_glob(self):
+        """Constant / late-defined / main-only globals, perturbed far away."""
+        s = Snip("glob")
+        K = self.glob(s, "K", str(self.ri(1, 9)))
+        x = self.nm("p")
+        late = self.nm("Lg")
+        f = self.fn(s, "gf", [x], ["=> %s * %s + %s;" % (x, K, late)])
+        if self.ch(0.15):
+            # read before definition: Undefined global
+            s.risky = True
+            s.head.append(">> %s(%d);" % (f, self.ri(0, 9)))
+        s.nglob += 1
+        s.head.append("%s := %d;" % (late, self.ri(0, 9)))
+        s.head.append(">> %s(%d) + %s(%s);" % (f, self.ri(0, 9), f, K))
+        i = self.nm("i")
+        acc = self.glob(s, "ac", "0")
+        s.head.append("(%s := 0; %s < %s; %s := %s + 1;) @ %s := %s + %s(%s);" % (i, i, K, i, i, acc, acc, f, i))
+        s.head.append(">> %s;" % acc)
+        # main-only global (demotable), list-valued and int-valued
+        mv = self.glob(s, "mv", "[%s]" % ", ".join(str(self.ri(0, 9)) for _ in range(self.ri(0, 6))))
+        mc = self.glob(s, "mc", "0")
+        j = self.nm("i")
+        s.head.append("(%s := 0; %s < |%s|; %s := %s + 1;) @ { %s := %s + %s[%s] * %s; %s[%s] := %s; }"
+                      % (j, j, mv, j, j, mc, mc, mv, j, K, mv, j, mc))
+        s.head.append(">> %s; >> %s;" % (mv, mc))
+        if self.ch(0.5):
+            v = self.pick(["setK", "typeK", "readmv", "setlate", "kself"])
+            if v == "setK":
+                g = self.fn(s, "sk", [], ["%s := %s + 1;" % (K, K), "=> 0;"])
+                s.tail.append("%s(); >> %s(%d);" % (g, f, self.ri(0, 9)))
+            elif v == "typeK":
+                s.tail.append("%s := [%s]; >> %s;" % (K, K, K))
+            elif v == "readmv":
+                g = self.fn(s, "rm", [], ["=> |%s| + %s;" % (mv, mc)])
+                s.tail.append(">> %s();" % g)
+            elif v == "setlate":
+                s.tail.append("%s := %s + 1; >> %s(%d);" % (late, late, f, self.ri(0, 9)))
+            else:
+                s.tail.append("%s := %s; >> %s(1);" % (K, K, f))
+        self.export(mv, "ilist")  # exports
+        return s
+
+    # =============================================================== recloop
+    def f_recloop(self):
+        """Lists stored in record fields: indexed loops, appends and copies through the field."""
+        s = Snip("recloop")
+        n = self.ri(0, 8)
+        M = self.glob(s, "M", "[%s]" % ", ".join(str(self.ri(0, 50)) for _ in range(n)))
+        R = self.glob(s, "R", "[%d, %s]" % (self.ri(0, 9), M if self.ch(0.6) else "[%d]" % self.ri(0, 9)))
+        R2 = self.glob(s, "R", "[%s, []]" % R if self.ch(0.5) else "[%d, []]" % self.ri(0, 9))
+        i = self.nm("i")
+        sm = self.glob(s, "sm", "0")
+        body = ["%s := %s + %s[1][%s];" % (sm, sm, R, i)]
+        extra = self.pick(["", "app", "pop", "field", "callee"])
+        if extra == "app":
+            body.append("(%s = %d & |%s| < 20) ? %s[1] :+ %s;" % (i, self.ri(0, 3), M, R, i))
+        elif extra == "pop":
+            body.append("(%s = %d & |%s[1]| > 1) ? %s := %s + -%s[1];" % (i, self.ri(0, 3), R, sm, sm, R))
+        elif extra == "field":
+            body.append("(%s = %d) ? %s[1] := [%d, %d, %d];" % (i, self.ri(0, 3), R, self.ri(0, 9), self.ri(0, 9),
+                                                               self.ri(0, 9)))
+        elif extra == "callee":
+            pr = self.nm("p")
+            g = self.fn(s, "ga", [pr], ["(|%s[1]| < 12) ? %s[1] :+ %s[0];" % (pr, pr, pr), "=> 0;"])
+            body.append("(%s = %d) ? %s(%s);" % (i, self.ri(0, 3), g, R))
+        s.head.append("(%s := 0; %s < |%s[1]|; %s := %s + 1;) @ { (%s < |%s[1]|) ? { %s } }"
+                      % (i, i, R, i, i, i, R, " ".join(body)))
+        s.head.append(">> %s; >> %s; >> %s;" % (sm, R, M))
+        # copy loops from / into a field
+        j = self.nm("i")
+        D = self.glob(s, "D", "[]")
+        s.head.append("(%s := 0; %s < |%s[1]|; %s := %s + 1;) @ %s :+ %s[1][%s];" % (j, j, R, j, j, D, R, j))
+        if self.ch(0.5):
+            k = self.nm("i")
+            lim = self.ri(0, 6)
+            s.head.append("(%s := 0; %s < %d; %s := %s + 1;) @ (%s < |%s|) ? %s[1] :+ %s[%s];"
+                          % (k, k, lim, k, k, k, D, R2, D, k))
+            s.head.append(">> %s;" % R2)
+        s.head.append(">> %s;" % D)
+        # record holding a list, returned by a function, then mutated through both
+        pa, pl = self.params(2)
+        mk = self.fn(s, "mkr", [pa, pl], ["=> [%s, %s];" % (pa, pl)])
+        Q = self.glob(s, "Q", "%s(%d, %s)" % (mk, self.ri(0, 9), D))
+        s.head.append("%s[1] :+ %d; >> %s; >> %s[1] = %s; >> %s[0] + (%s[0] := %d) + %s[0];"
+                      % (Q, self.ri(0, 9), D, Q, D, Q, Q, self.ri(0, 9), Q))
+        if self.ch(0.4):
+            v = self.pick(["idx", "app", "each"])
+            kv = self.read(s, 0, 1, "kv")
+            if v == "idx":
+                s.tail.append(">> %s[%s];" % (Q, kv))
+            elif v == "app":
+                s.tail.append("%s :+ %s; >> |%s|;" % (Q, kv, Q))
+            else:
+                x = self.nm("x")
+                s.tail.append("(%s : %s) @ >> %s;" % (x, R, x))
+        self.export(R, "rec"); self.export(D, "ilist")  # exports
+        return s
+
+    # ================================================================== inl2
+    def f_inl2(self):
+        """Inlining: callees that assign their parameters, argument evaluation order,
+        calls with side effects in arguments, callees mutating lists passed in."""
+        s = Snip("inl2")
+        a, b = self.params(2)
+        f1 = self.fn(s, "pa", [a, b], ["%s := %s + %s;" % (a, a, b), "%s := %s * 2;" % (b, a), "=> %s - %s;" % (a, b)])
+        G = self.glob(s, "G", str(self.ri(0, 9)))
+        H = self.glob(s, "H", str(self.ri(0, 9)))
+        s.head.append(">> %s(%s, %s); >> [%s, %s];" % (f1, G, H, G, H))
+        s.head.append(">> %s(%s, %s := %s + 1) + %s;" % (f1, G, G, G, G))
+        s.head.append(">> %s(%s := %d, %s) + %s(%s, %s := %d);" % (f1, H, self.ri(0, 9), H, f1, H, H, self.ri(0, 9)))
+        c = self.glob(s, "cn", "0")
+        tick = self.fn(s, "tk", [], ["%s := %s + 1;" % (c, c), "=> %s;" % c])
+        s.head.append(">> %s(%s(), %s()) * 10 + %s;" % (f1, tick, tick, c))
+        l, v = self.params(2)
+        push = self.fn(s, "ps", [l, v], ["%s :+ %s;" % (l, v), "%s := [];" % l, "=> |%s|;" % l])
+        L = self.glob(s, "L", "[]")
+        i = self.nm("i")
+        s.head.append("(%s := 0; %s < %d; %s := %s + 1;) @ %s := %s + %s(%s, %s);"
+                      % (i, i, self.ri(1, 8), i, i, G, G, push, L, i))
+        s.head.append(">> %s; >> %s;" % (L, G))
+        # nested calls of inlinable helpers inside conditions and indexes
+        x, y = self.params(2)
+        mn = self.fn(s, "mn", [x, y], ["(%s < %s) ? => %s;" % (x, y, x), "=> %s;" % y])
+        j = self.nm("i")
+        s.head.append("(%s := 0; %s < |%s|; %s := %s + 1;) @ (%s[%s(%s, |%s| - 1)] > %s(%s, 3)) ? %s := %s + 1;"
+                      % (j, j, L, j, j, L, mn, j, L, mn, j, c, c))
+        s.head.append(">> %s;" % c)
+        if self.ch(0.5):
+            # tail-recursive function swapping two list arguments
+            p1, p2, pn = self.params(3)
+            sw = self.nm("swl")
+            s.nglob += 1
+            s.head.append("%s := (%s, %s, %s) => { (%s < 1) ? => [%s, %s]; %s :+ %s; => %s(%s, %s, %s - 1); };"
+                          % (sw, p1, p2, pn, pn, p1, p2, p1, pn, sw, p2, p1, pn))
+            A = self.glob(s, "A", "[]")
+            s.head.append(">> %s(%s, %s, %d); >> %s(%s, [], %d);" % (sw, A, self.pick(["[]", A]), self.ri(0, 7),
+                                                                     sw, A, self.ri(0, 5)))
+        return s
+
+    # ================================================================== glue
+    def f_glue(self):
+        """Values exported by earlier snippets passed through shared polymorphic helpers
+        (generic instances; for-each / variable index / generic store on records and
+        pairs from other snippets = distant violations), boxed together and compared."""
+        s = Snip("glue")
+        if len(self.exports) < 2:
+            return None
+        ex = self.r.sample(self.exports, min(len(self.exports), self.ri(2, 4)))
+        x1 = self.nm("p")
+        fst = self.fn(s, "fst", [x1], ["(%s = []) ? => -1;" % x1, "=> %s[0];" % x1])
+        x2 = self.nm("p")
+        ln = self.fn(s, "len", [x2], ["=> |%s|;" % x2])
+        x3, r3, e3 = self.params(3)
+        cp = self.fn(s, "cp", [x3], ["%s := [];" % r3, "(%s : %s) @ %s :+ %s;" % (e3, x3, r3, e3), "=> %s;" % r3])
+        x4, r4, i4 = self.params(3)
+        rv = self.fn(s, "rv", [x4], ["%s := [];" % r4, "(%s := |%s| - 1; %s >= 0; %s := %s - 1;) @ %s :+ %s[%s];"
+                                     % (i4, x4, i4, i4, i4, r4, x4, i4), "=> %s;" % r4])
+        x5, v5 = self.params(2)
+        st = self.fn(s, "s0", [x5, v5], ["(%s != []) ? %s[0] := %s;" % (x5, x5, v5), "=> %s;" % v5])
+        for n, k in ex:
+            ops = [">> %s(%s);" % (fst, n), ">> %s(%s);" % (ln, n), ">> %s(%s) = %s;" % (cp, n, n),
+                   ">> %s(%s(%s)) = %s;" % (rv, rv, n, n), ">> %s(%s);" % (rv, n)]
+            if k in ("ilist", "rec", "tree", "cons"):
+                ops.append(">> %s[0] + %s(%s, %d) + %s(%s);" % (n, st, n, self.ri(0, 9), fst, n)
+                           if k == "rec" else ">> %s(%s, %d) + %s(%s);" % (st, n, self.ri(0, 9), fst, n))
+            if k in ("ilist", "pairs"):
+                ops.append("(%s : %s(%s)) @ >> %s;" % (self.nm("x"), cp, n, "%s(%s)" % (ln, n)))
+            self.r.shuffle(ops)
+            s.head += ops[:self.ri(1, 4)]
+        box = self.glob(s, "bx", "[%s]" % ", ".join(n for n, k in ex))
+        x = self.nm("x")
+        s.head.append("(%s : %s) @ >> %s(%s) + %s(%s);" % (x, box, ln, x, ln, "%s(%s)" % (cp, x)))
+        s.head.append(">> %s(%s) = %s;" % (fst, box, ex[0][0]))
+        same = [(a, b) for a in ex for b in ex if a[0] < b[0] and a[1] == b[1] and a[1] in ("ilist", "pairs")]
+        for (a, _), (b, _) in same[:2]:
+            s.head.append(">> %s < %s; >> %s = %s;" % (a, b, a, b))
+        return s
+
     # ================================================================ program
     def snippet(self, fam=None):
         fam = fam or self.pick(FAMILIES)
-        return getattr(self, "f_" + fam)()
+        if fam == "glue" and not self.glue:
+            fam = "rec"
+        s = getattr(self, "f_" + fam)()
+        if s is None:
+            s = self.f_rec()
+        return s
 
 
 def program(rng, n_lo=4, n_hi=7, risky_p=0.25):
@@ -956,15 +1155,19 @@ def program(rng, n_lo=4, n_hi=7, risky_p=0.25):
     g = OptGen(rng)
     snips = []
     risky = None
-    fams = list(FAMILIES)
+    fams = [f for f in FAMILIES if f != "glue"]
     rng.shuffle(fams)
+    # glue (uses exports of earlier snippets) goes somewhere after the second snippet
+    fams.insert(rng.randint(2, len(fams)), "glue")
     want = rng.randint(n_lo, n_hi)
     allow_risky = rng.random() < risky_p
     tries = 0
     while len(snips) < want and tries < 40:
+        n0 = len(g.exports)
         s = g.snippet(fams[tries % len(fams)] if rng.random() < 0.7 else None)
         tries += 1
         if s.risky:
+            del g.exports[n0:]  # risky snippets run last (or not at all): nothing may use their values
             if allow_risky and risky is None:
                 risky = s
             continue
