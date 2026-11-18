@@ -41,7 +41,7 @@ def main():
     ap.add_argument("--cflags", default="-O0")
     ap.add_argument("--jit", action="store_true", help="also run build/epq --engine=jit per process")
     ap.add_argument("--jit-only", metavar="BIN", help="only JIT engines of BIN (per process, no C compiles): "
-                    "jit, jitnorec, jitpois, jitrnd")
+                    "jit, jitnorec, jitpois, jitrnd, jitx")
     ap.add_argument("--rnd-every", type=int, default=2, help="rnd engine on every N-th chunk (0: never)")
     ap.add_argument("--norec-every", type=int, default=2, help="norec engine on every N-th chunk (0: never)")
     ap.add_argument("--out", default=os.path.join(REPO, "build", "hunt"))  # absolute paths below
@@ -68,7 +68,10 @@ def main():
                    "--engine", "jit=%s --engine=jit --verify-tir" % J,
                    "--engine", "jitnorec=env EPQ_NO_RECORDS=1 %s --engine=jit" % J,
                    "--engine", "jitpois=env EPQ_POISON_FREED=1 %s --engine=jit" % J,
-                   "--engine", "jitrnd=env EPQ_NO_PASS=%s %s --engine=jit" % (dis, J)]
+                   "--engine", "jitrnd=env EPQ_NO_PASS=%s %s --engine=jit" % (dis, J),
+                   # non-default paths: element-store if-conversion, one instance per function, no dedup
+                   "--engine", "jitx=env EPQ_IFCONV_STORES=1 %s --engine=jit %s" % (J, rng.choice(["", "--mono",
+                                                                                                "--no-dedup"]))]
             out = os.path.join(a.out, "c%d" % seed)
             run_chunk(a, k, seed, prof, dis, eng, out, log, batch=False)
             continue

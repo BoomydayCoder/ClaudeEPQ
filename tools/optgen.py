@@ -831,6 +831,39 @@ class OptGen:
         body = self.r.sample(opts, self.ri(2, 5))
         s.head.append("(%s := 0; %s < |%s|; %s := %s + 1;) @ { %s }" % (i, i, L, i, i, " ".join(body)))
         s.head.append(">> [%s, %s, %s, %s, %s];" % (mn, mx, mi, c, q))
+        if self.ch(0.7):
+            # established-bounds near misses: the guarded body indexes something the condition
+            # did (or did not quite) establish; inlined swaps; a second list / alias; while
+            # loops whose index changes after the guarded update
+            M = self.glob(s, "M", self.pick([L, "[%s]" % ", ".join(str(self.ri(0, 30)) for _ in range(self.ri(0, 6)))]))
+            sw = None
+            if self.ch(0.5):
+                pl, pa, pb, pt = self.params(4)
+                sw = self.fn(s, "sw", [pl, pa, pb], ["%s := %s[%s];" % (pt, pl, pa), "%s[%s] := %s[%s];" % (pl, pa, pl, pb),
+                                                    "%s[%s] := %s;" % (pl, pb, pt), "=> 0;"])
+            j = self.nm("i")
+            ej, ej1 = "%s[%s]" % (L, j), "%s[%s + 1]" % (L, j)
+            t = self.nm("t")
+            p = self.nm("p")
+            opts = [
+                "(%s > %s) ? { %s := %s; %s[%s] := %s; %s[%s + 1] := %s; }" % (ej, ej1, t, ej, L, j, ej1, L, j, t),
+                "(%s > %s) ? %s := %s;" % (ej, ej1, mn, ej1),
+                "(%s > %d) ? %s := %s + %s;" % (ej, self.ri(0, 20), q, q, "%s[1 + %s]" % (L, j)),
+                "(%s < |%s| & %s < %d) ? %s := %s + %s[%s];" % (j, M, ej, self.ri(0, 30), c, c, M, j),
+                "(%s < |%s|) ? { (%s[%s] > %s) ? %s := %s[%s]; }" % (j, M, M, j, ej, mx, M, j),
+                "{ %s := %s + 1; (%s < %s[%s]) ? %s := %s[%s] - %s; }" % (p, j, ej, L, p, q, L, p, ej),
+                "(%s > 0 & %s[%s - 1] < %s) ? %s := %s[%s - 1];" % (j, L, j, ej, mn, L, j),
+            ]
+            if sw:
+                opts.append("(%s > %s) ? %s(%s, %s, %s + 1);" % (ej, ej1, sw, L, j, j))
+            body = self.r.sample(opts, self.ri(1, 4))
+            s.head.append("(%s := 0; %s + 1 < |%s|; %s := %s + 1;) @ { %s }" % (j, j, L, j, j, " ".join(body)))
+            s.head.append(">> %s; >> [%s, %s, %s, %s];" % (L, mn, mx, c, q))
+            if self.ch(0.5):
+                w = self.glob(s, "w", "0")
+                s.head.append("(%s + 1 < |%s|) @ { (%s[%s] < %s[%s + 1]) ? %s := %s + %s[%s + 1]; %s := %s + %d; }"
+                              % (w, L, L, w, L, w, c, c, L, w, w, w, self.ri(1, 2)))
+                s.head.append(">> %s;" % c)
         # heap child selection with guarded index inside a function
         h, k, ch, go, t = self.params(5)
         sift = self.fn(s, "sd", [h, k], [
