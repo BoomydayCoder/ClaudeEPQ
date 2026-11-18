@@ -24,6 +24,10 @@ ClaudeEPQ is a new implementation of the EPQ language (original: BoomydayCoder/E
   `EPQ_NO_TIERUP=1` turns tier-up off. A cache directory that cannot be written turns it off silently.
 - An unusable cache directory is never fatal: the JIT needs no cache, and the forced C engine falls
   back to a private `mkdtemp` directory (tests/cache/run.py).
+- **Start-up** (docs/DESIGN.md §1): an `epq` run of `>> 1;` is ~13.8 M instructions per process
+  (trivial C program 10.9 M, the original 12.6 M), down from 21.2 M. The Makefile links with no weak
+  exports and binds directly to the libSystem sub-libraries; both were dyld costs before main().
+  Check after link changes: `otool -hv build/epq` must not show WEAK_DEFINES.
 - `make check`: examples, conformance and core suites, and the cache test, on the default engine.
   It needs nothing outside the repository.
 

@@ -38,7 +38,6 @@ Range g_guards[kMaxStacks];
 std::atomic<OverflowCallback> g_cb{nullptr};
 struct sigaction g_old_segv, g_old_bus;
 std::atomic<bool> g_installed{false};
-thread_local bool t_altstack = false;
 
 void default_overflow() {
     static const char msg[] = "Stack overflow\n";
@@ -66,7 +65,10 @@ void on_fault(int sig, siginfo_t* si, void* uctx) {
 void set_overflow_callback(OverflowCallback cb) { g_cb.store(cb); }
 
 void install_overflow_handler() {
-    if (!t_altstack) {
+    // One alternate signal stack per thread. Asked of the kernel rather than
+    // kept in a thread_local: a TLV costs every process start-up in dyld.
+    stack_t cur{};
+    if (sigaltstack(nullptr, &cur) == 0 && (cur.ss_flags & SS_DISABLE)) {
         size_t sz = 64 * 1024;
         void* p = mmap(nullptr, sz, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
         if (p != MAP_FAILED) {
@@ -74,7 +76,6 @@ void install_overflow_handler() {
             ss.ss_sp = p;
             ss.ss_size = sz;
             sigaltstack(&ss, nullptr);
-            t_altstack = true;
         }
     }
     bool expected = false;

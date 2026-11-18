@@ -46,6 +46,18 @@ Implementation: C++20, Apple clang, plain `Makefile`, no dependencies. Tooling: 
 - **Startup budget:** the whole pipeline up to the first executed instruction must cost well under
   300 µs for the example programs — an `epq` run of an empty program should be indistinguishable from
   `/usr/bin/true`. No iostreams, no static constructors, raw `read`/`write`, arenas mapped lazily.
+  Measured (Nov 2026, macOS 26 / M5, instructions retired per process from `/usr/bin/time -l`, which is
+  far steadier than wall time): a trivial C program costs ~10.9 M instructions before it exits (the
+  system floor: libSystem's ~1,150-image closure); the original EPQ ~12.6 M; `epq` on `>> 1;` was
+  21.2 M, of which ~20.4 M ran *before main()*, and is now 13.8 M. What made the difference is all in
+  dyld, and the Makefile now avoids both: (1) **no weak exports** — one weak definition exported by
+  the executable (`std::piecewise_construct`) made dyld coalesce it against every loaded image, ~4 M
+  instructions / ~0.25 ms; (2) **direct binds to the libSystem sub-libraries** (`libsystem_c`,
+  `_kernel`, `_pthread`, …, and `libc++abi`) — each of the ~260 imports reached through libSystem's
+  re-exports cost a re-export search, ~4 M instructions / ~0.2 ms in all. Not costs (measured, keep
+  in mind before "fixing"): binary size / untouched code, the 2.7 MB `.bss`, rebases, the symbol
+  table, a thread_local (removed anyway). main() to exit is ~0.9 M instructions for `>> 1;` (front
+  end, passes, JIT, 8 GB stack reservation, run, flush). Re-measure with `tests/jit/spawnbench.c`.
 
 ## 2. Type inference
 
