@@ -144,7 +144,7 @@ redefinable global slots `h*` and redefined, aliasing through params/globals/nes
 lists then observed through another alias, for-each over lists grown/shrunk in the
 body, `:+` chains, short-circuit side effects, top-level return, globals read
 before their definition, deep-ish recursion, 32-bit overflow, `INT_MIN` literals,
-`INT_MIN / -1`, wrapping and saturating literals); `any` picks per program. A
+`INT_MIN / -1`, wrapping and saturating literals); `any` picks per program (clean/mixed/nasty; `opt` only when asked for, see below). A
 per-program "loose" flag (4–12%) enables error-prone operations (indexing values of
 unknown kind, unguarded pops, raw indices, dynamic calls); in addition each
 program has ~15–20% chance of one injected error of a uniformly chosen kind (all 12
@@ -172,6 +172,85 @@ distribution (clean exit / each run-time error / compile errors / timeouts), the
 pyref-vs-baseline agreement rate, sizes, baseline time distribution, injected-error
 counts and feature coverage; suspects/invalid cases are saved (`--reduce-suspects K`
 reduces them).
+
+**Pitfall in a git worktree:** `../refbuild/epq_ref` "next to the repo" does not exist
+there, and the default engine list then silently starts with `jit` (so `--self-check`
+compares pyref with the JIT, and every program costs a C compile when the JIT falls
+back). Always `export EPQ_BASELINE=$ROOT/refbuild/epq_ref` (the first line of output
+names the engines; check it says `baseline=`).
+
+`--known SUBSTR` (repeatable; env `EPQ_FUZZ_KNOWN`, `|`-separated): a divergence whose
+stderr contains SUBSTR is printed as `KNOWN …` and not counted as a FAIL (keeps one
+open, already reported bug from flooding a campaign). In `--batch` mode a batch child
+that times out is re-run once per process (`RECHECK seed …` line) before it counts:
+on a heavily loaded machine (load 100+) forked batch children are sometimes starved.
+
+### Profile `opt` — optimisation-targeted programs (tools/optgen.py)
+
+The kind-based generator almost never produces the shapes the optimisation passes look
+for (measured with optcov.py below: recur, ifconv, appendopt and nullable records fired
+in < 1 % of clean/mixed/nasty programs, and a re-introduced copy of the recur × records
+CSE bug found by the integrator was hit by 0 of 600 nasty programs). `--profile opt`
+builds every program from 4–7 *snippets* of tools/optgen.py, each a self-contained piece
+of top-level code (names `O<tag><n>`, unique per program, so they never collide with each
+other or with epqgen's lower-case names), one family each:
+
+| family | shapes |
+|---|---|
+| rec | fixed-shape records `[int, list]`, `[int, [int,int]]`, `[int, list, int]`, `[int,int,int]` from literals and maker functions; mutated through aliases (other variable, parameter, element of an outer list, global in a function) and read back in the same expression (`sq(r[0]) + (r2[0] := 4) + sq(r[0])` with `sq` inlinable or recursive); compared, printed, in lists, for-each over a list of records |
+| tree / cons | `[v, l, r]` trees and `[v, next]` cons lists with `[]` as nil, built recursively (BST insert) and iteratively, walked by while loops, tail-recursive / doubly recursive sums, reverse, destructive append at the end, mutation through aliases |
+| rec2 | record-typing stress: function fields, two shapes through one helper, nullable flips (`N := []` then a record again), input-dependent shape, mutually nested shapes, records popped out of lists, int-terminated chains, empty literals grown by appends (pre-shaped records), `MK()` empties, wide (8–16 field) heterogeneous literals in statement / condition position |
+| recloop | lists in record fields: indexed loops, appends, pops, field replacement and copy loops through the field |
+| pairs | lists of `[int, int]`: insertion sort by pair, binary heap of pairs (push / pop with sift), adjacency lists, min pair; pairs vs lists of other lengths / literals, a record holding a pair, variable index into a pair |
+| helpers / inl2 | swap / min / max / mod / predicate helpers called in loops (bubble sort, reductions); helpers assigning their parameters, argument evaluation order with side effects, callees mutating list arguments, tail-recursive functions swapping two list arguments |
+| recur | fib (two self calls), binomial, gcd and accumulator tail recursion, argument swaps `=> f(b, a, n - 1)`, impure look-alikes (global read that changes in the same expression, printing), pure functions that fail for some inputs, tail recursion with local lists (escaping into the accumulator or dropped) |
+| append / copy / grow | counted loops with 1–3 appends per iteration (`<`, `<=`, step 1–3, bounds from input), early return; copy loops `L :+ M[i]` with in-bounds / empty / reversed / partly out-of-bounds ranges, `L` aliasing `M` (lengths tracked statically so a re-evaluated bound never follows a growing list), loop variable used afterwards, in a function; merge loops; hundreds to thousands of elements with interleaved growth, self-copies whose buffer moves, temps freed in between, pop then regrow |
+| idxloop / alias | indexed loops over a list mutated in the loop through an alias or a callee (inlinable or recursive, so the loop sees a real call), reassigned, popped; lists aliased through `:+` results, `|`, `&`, `[L][0]`, record fields, `-[L]`, for-each variables, chained / conditional assignment; error-order forms (index / stored value with side effects or failures) |
+| ifconv | conditional min / max / counters / guarded index / division in loops, `&` chains whose first operand guards the second, heap sift-down child selection, established-bounds near misses (index the condition did / did not evaluate, a second shorter list, inlined swaps, while loops) |
+| litcmp | `x = []`, `x != [0, 1]`, `[] < x`, `x >= [1]`, … on ints, int lists, nested lists, a dynamic value, a function, in loops over heterogeneous lists and through a function parameter; literal elements that may fail |
+| reclaim | short-lived lists in self-recursive (never inlined) functions: dropped, returned, aliased, returned through identity / pick / `\|` / `&` / `:+` / record field / pop, stored in a global, into a list parameter, into an element; a recursive driver; allocations after each call so that a premature free is observed (run also with `EPQ_POISON_FREED=1`) |
+| glob | single-literal globals (constants) used in functions and loops, globals defined after the function that reads them, main-only globals (demotable); far-away reassignment / type change / read before definition |
+| glue | values exported by earlier snippets (int lists, records, pairs, trees, cons lists) passed through shared polymorphic helpers (first / len / copy by for-each / reverse by variable index / store at 0), boxed together, compared |
+
+Perturbation: about 40 % of the rec / tree / cons / pairs / recloop / glob / rec2 snippets
+add a *tail* statement that breaks the optimisation's precondition — variable index, append,
+pop, for-each, dynamic call, store of another type, reassignment — and all tails run after
+every snippet's main part, i.e. far away from the code that was optimised; glue does the
+same through generic functions. Risky snippets (that may stop the program with a run-time
+error depending on the input) are at most one per program and placed last. Inputs are
+small numbers; every read is clamped right away, so epqgen's huge inputs are fine too.
+
+`mixed` / `nasty` now also get 1–2 snippets (35 % / 45 % of programs) inserted at random
+top-level positions (own RNG stream, so the epqgen part of a seed's program is unchanged;
+`clean` is unchanged). Self-check (1000 `opt` programs): ~95 % clean exits, ~5 % run-time
+errors (all from risky snippets), 0 timeouts, pyref agrees 100 %.
+
+## optcov.py — which optimisations fire on generated programs
+
+    tools/optcov.py --profile opt --profile nasty --count 1000 --seed 910000 [--jobs J]
+    tools/optcov.py --dir tests/passes          # any directory of .epq files
+    tools/optcov.py --profile opt --show recur_unroll   # seeds where it fires / does not
+
+Front end only (no C compiler): for each program `--dump-types` (records: fixed /
+nullable regions) and `--dump-tir-after=P` for the whole pipeline; a pass fires when its
+dump differs from the previous pass's; refined by op counts (Reserve / AppendRange,
+Select added by ifconv, Free added by reclaim, Pair ops, While added by recur = tail-call
+loop, InlineBlock under a Comma added by recur = self-unrolling; recur_cse = recur changed
+something else). `demoted` = some global is demoted; `constants` = `--no-pass=constants`
+changes the TIR. Prints profile × feature = % of compiling programs where it fires.
+
+## hunt.py — campaign driver
+
+    tools/hunt.py --seed 940000 --chunks 200 --chunk 150 [--cflags -O0] [--profiles opt,opt,nasty,opt,mixed]
+    tools/hunt.py --seed 1300000 --chunks 200 --chunk 1000 --jit-only build/epq --known "out of temporaries"
+
+Runs fuzz.py chunk after chunk (logging one line per chunk to OUT/log.txt). C mode
+(`--batch`): `aot` (default passes, `--verify-tir`), `poison` (EPQ_POISON_FREED=1: a
+run-time switch, so it reuses aot's objects for free), and on alternating chunks `norec`
+(EPQ_NO_RECORDS=1) and `rnd` (EPQ_NO_PASS = a random 1–5 of the 10 passes + 4 build
+steps, logged). JIT mode (`--jit-only BIN`, per process, no C compiles, ~20–40 programs/s):
+`jit` (`--verify-tir`), `jitnorec`, `jitpois`, `jitrnd`, `jitx` (EPQ_IFCONV_STORES=1 plus
+`--mono` or `--no-dedup` at random).
 
 ## pyref.py — reference interpreter
 

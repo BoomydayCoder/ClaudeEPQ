@@ -1,0 +1,5 @@
+// fuzz seed 1228746 (profile mixed), reduced: the JIT aborts while compiling main
+// ("jit internal error: out of temporaries"); the baseline runs it silently.
+zb := 0; g1 := zb; g8 := zb; g9 := 1; g35 := []; (g41 := zb) ? { { g8 := g35; } }
+w46 := 0; { w46 := 1; } w53 := 0;
+{ w53 := 1; (e57 : g35) @ { { zb := 1; } } ([([g9, g41, zb, g41, g41, w53, w46, w53, g1, g8] != 0)]) ? ; }

@@ -40,6 +40,7 @@ Invariants enforced by construction
 """
 import random
 
+import optgen
 import pyref
 from pyref import Ast
 
@@ -1507,8 +1508,107 @@ class Gen:
         return " ".join(map(str, vals)) + "\n"
 
 
+def parse_text(text):
+    """Parses EPQ source with pyref's parser; returns the root SEQ."""
+    return pyref.parse(pyref.lex(text, "-", []), "-")
+
+
+def limits_ok(root, top_cap=200, fn_cap=200, glob_cap=200):
+    """Baseline limits on an AST: constants per body, list literal sizes, globals."""
+    if count_consts(root) > top_cap:
+        return False
+    gl = {}
+    pyref.find_globals(root, gl)
+    if len(gl) >= glob_cap:
+        return False
+    stack = [root]
+    while stack:
+        a = stack.pop()
+        if a.type == "DEF" and count_consts(a.ch[1]) > fn_cap:
+            return False
+        if a.type == "LST" and len(a.ch) > 50:
+            return False
+        stack.extend(a.ch)
+    return True
+
+
+# share of mixed / nasty programs that get optimisation-targeted snippets inserted
+OPT_MIX = {"clean": 0.0, "mixed": 0.35, "nasty": 0.45}
+
+
+def opt_inputs(rng, nreads):
+    vals = []
+    for _ in range(2 * nreads + 8):
+        r = rng.random()
+        if r < 0.75:
+            vals.append(rng.randint(0, 16))
+        elif r < 0.9:
+            vals.append(rng.randint(-5, 40))
+        else:
+            vals.append(rng.choice([0, -1, 2147483647, -2147483648, 1000]))
+    return " ".join(map(str, vals)) + "\n"
+
+
+def generate_opt(seed):
+    """Profile `opt`: a program made only of tools/optgen.py snippets."""
+    for attempt in range(20):
+        rng = random.Random(seed * 7919 + 17 + attempt)
+        snips, risky, _ = optgen.program(rng)
+        while True:
+            src = optgen.assemble(snips, risky, rng)
+            root = parse_text(src)
+            if limits_ok(root, top_cap=230, fn_cap=200, glob_cap=230) or not snips:
+                break
+            if risky is not None:
+                risky = None
+            else:
+                snips.pop()
+        if not snips or not limits_ok(root, top_cap=230, fn_cap=200, glob_cap=230):
+            continue
+        nreads = sum(x.reads for x in snips) + (risky.reads if risky else 0)
+        fams = [x.fam for x in snips]
+        feats = {}
+        for f in fams:
+            feats["opt:" + f] = feats.get("opt:" + f, 0) + 1
+        if risky is not None:
+            feats["opt-risky:" + risky.fam] = 1
+        src = pyref.unparse(root)
+        info = {"profile": "opt", "features": feats, "err_plan": None, "consts_top": count_consts(root),
+                "globals": None, "cost": None, "reads": nreads, "bytes": len(src), "attempt": attempt,
+                "snippets": fams + (["risky:" + risky.fam] if risky else [])}
+        return src, opt_inputs(rng, nreads), info
+    raise RuntimeError("could not generate an opt program within limits for seed %d" % seed)
+
+
+def mix_opt(gen, root, seed):
+    """Inserts 1-2 optgen snippets (heads at random top-level positions, tails later) into an
+    epqgen program.  Uses its own RNG so the epqgen part of the program is unchanged."""
+    rng = random.Random(seed * 104729 + 3)
+    if rng.random() >= OPT_MIX.get(gen.profile, 0.0):
+        return root, 0, []
+    og = optgen.OptGen(rng, glue=False)  # tails may land before later heads: no cross-snippet use
+    stmts = list(root.ch)
+    nreads = 0
+    fams = []
+    for _ in range(rng.randint(1, 2)):
+        sn = og.snippet()
+        if sn.risky and rng.random() < 0.7:
+            continue
+        head = parse_text("\n".join(sn.head) + "\n").ch
+        tail = parse_text("\n".join(sn.tail) + "\n").ch if sn.tail else []
+        pos = rng.randint(1, len(stmts))
+        stmts[pos:pos] = head
+        tpos = rng.randint(pos + len(head), len(stmts))
+        stmts[tpos:tpos] = tail
+        nreads += sn.reads
+        fams.append(sn.fam)
+    return Ast("SEQ", stmts), nreads, fams
+
+
 def generate(seed, profile="mixed"):
     """Returns (source_text, stdin_text, info dict)."""
+    if profile == "opt":
+        return generate_opt(seed)
     for attempt in range(20):
         gen = Gen(seed * 1000003 + attempt if attempt else seed, profile)
         root = gen.program()
@@ -1530,6 +1630,12 @@ def generate(seed, profile="mixed"):
         walk(root)
         if not ok:
             continue
+        mroot, mreads, mfams = mix_opt(gen, root, seed)
+        if mfams and limits_ok(mroot, top_cap=200, fn_cap=200, glob_cap=200):
+            root = mroot
+            gen.nreads += mreads
+            for f in mfams:
+                gen.features["opt:" + f] = gen.features.get("opt:" + f, 0) + 1
         src = pyref.unparse(root)
         info = {"profile": gen.profile, "features": gen.features, "err_plan": gen.err_plan,
                 "consts_top": tops, "globals": nglob, "cost": gen.top_cost, "reads": gen.nreads,

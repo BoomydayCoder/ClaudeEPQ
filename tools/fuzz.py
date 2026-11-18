@@ -5,7 +5,7 @@ Generates random programs inside the well-defined subset (tools/epqgen.py),
 runs them on the baseline and every other engine, compares stdout + exit code,
 saves and automatically reduces failing cases.
 
-  tools/fuzz.py --seed S --count N [--profile clean|mixed|nasty|any]
+  tools/fuzz.py --seed S --count N [--profile clean|mixed|nasty|opt|any]
                 [--engine NAME=CMD ...] [--pyref] [--jobs J] [--timeout T]
                 [--out DIR] [--no-reduce] [--reduce-time SECS] [--batch [--batch-chunk N]]
   tools/fuzz.py --self-check --count N [--profile P]     # baseline + pyref only, statistics
@@ -91,6 +91,13 @@ def run_all(src, inp, engines, timeout, use_pyref, tag="p"):
     return res, pr
 
 
+# Known, already reported divergences: an engine whose stderr contains one of these
+# substrings (--known S, repeatable; env EPQ_FUZZ_KNOWN, '|'-separated) is not counted
+# as a FAIL; the case is reported on a "KNOWN" line instead (so a campaign is not
+# flooded by one bug while it is being fixed).
+KNOWN = [k for k in os.environ.get("EPQ_FUZZ_KNOWN", "").split("|") if k]
+
+
 def diff_names(res, pr, engines):
     base = res[engines[0].name]
     bad = []
@@ -100,6 +107,10 @@ def diff_names(res, pr, engines):
             continue
         if r.timed_out or r.signal is not None or r.truncated or r.spawn_error \
                 or r.rc != base.rc or r.stdout != base.stdout:
+            if KNOWN and any(k.encode() in r.stderr for k in KNOWN):
+                print("KNOWN   %s: %s" % (e.name, epqlib.first_line(r.stderr).decode("utf-8", "replace")),
+                      flush=True)
+                continue
             bad.append(e.name)
     suspect = False
     if pr is not None and pr.status != "limit":
@@ -176,6 +187,13 @@ def batch_cases(a, engines, seeds_profile, ex, bdir):
             rs = epqlib.run_batch(e, [(c["pp"], c["ip"]) for c in valid], timeout=t, jobs=a.jobs,
                                   chunk=a.batch_chunk)
             for c, r in zip(valid, rs):
+                if r.timed_out:
+                    # a batch child can be starved on a loaded machine: re-run once per process
+                    # (prints "RECHECK" so the campaign logs can count these)
+                    r2 = epqlib.run_engine(e, c["pp"], stdin_path=c["ip"], timeout=t)
+                    print("RECHECK seed %d: %s timed out in batch; per process: %s"
+                          % (c["seed"], e.name, "timeout" if r2.timed_out else "rc %d" % r2.rc), flush=True)
+                    r = r2
                 c["res"][e.name] = r
     for c in pres:
         try:
@@ -683,7 +701,7 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--count", type=int, default=1000)
-    ap.add_argument("--profile", default="any", choices=["clean", "mixed", "nasty", "any"])
+    ap.add_argument("--profile", default="any", choices=["clean", "mixed", "nasty", "opt", "any"])
     ap.add_argument("--engine", action="append", default=[], metavar="NAME=CMD")
     ap.add_argument("--pyref", action="store_true", help="also compare pyref (in-process) against the baseline")
     ap.add_argument("--jobs", "-j", type=int, default=epqlib.jobs_default())
@@ -701,7 +719,12 @@ def main(argv=None):
                     help="run C-backend engines through `epq --batch` (one new dylib per chunk instead of one per "
                          "program; see tools/README.md). The reducer still runs single programs per process")
     ap.add_argument("--batch-chunk", type=int, default=300, help="programs per epq --batch (default 300)")
+    ap.add_argument("--known", action="append", default=[], metavar="STDERR_SUBSTR",
+                    help="do not count a divergence whose stderr contains this (already reported bug)")
     a = ap.parse_args(argv)
+    if a.known:
+        os.environ["EPQ_FUZZ_KNOWN"] = "|".join(KNOWN + a.known)  # inherited by the worker processes
+        KNOWN.extend(a.known)
     if a.emit:
         return emit(a)
     engines = epqlib.engines_from_args(a.engine)
