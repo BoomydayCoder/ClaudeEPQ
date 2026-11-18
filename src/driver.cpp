@@ -420,7 +420,18 @@ int run_module(tir::Module& M, const Options& opts_in) {
         jc.verbose = opts.verbose;
         if (opts.verbose) std::fprintf(stderr, "epq: passes %llu us\n", (unsigned long long)(T1 - Tb));
         g_ran_on_jit = true;
-        return jitcg::run(M, jc);
+        std::string jit_err;
+        int st = jitcg::run(M, jc, &jit_err);
+        if (st != jitcg::kCompileFailed) return st;
+        // The JIT could not compile the program (a code-generator limit); nothing
+        // has run yet. auto: the C engine runs it; --engine=jit / --dump-asm: an error.
+        g_ran_on_jit = false;
+        if (opts.jit_mode != 2 || opts.dump_asm) {
+            std::fprintf(stderr, "epq: jit: cannot compile this program: %s (use --engine=aot or --engine=auto)\n",
+                         jit_err.c_str());
+            return 2;
+        }
+        if (opts.verbose) std::fprintf(stderr, "epq: jit: cannot compile (%s); using the C engine\n", jit_err.c_str());
     }
     std::string c = emit_c(M);
     uint64_t T2 = now_us();

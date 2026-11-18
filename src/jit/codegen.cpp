@@ -39,6 +39,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <exception>
 #include <functional>
 #include <string>
 #include <unordered_map>
@@ -336,9 +337,10 @@ public:
     std::vector<std::pair<Label, uint32_t>> inline_breaks;  // (label id, InlineBlock a)
 
     // ------------------------------------------------------------------ utils
+    // A compile-time limit or internal inconsistency: thrown as a64::Error and
+    // caught by run() before any of the program runs (see compile_or_fail).
     [[noreturn]] void bug(const char* what) {
-        std::fprintf(stderr, "epq: jit internal error: %s (function %s)\n", what, F ? F->name.c_str() : "?");
-        std::abort();
+        throw a64::Error{std::string("internal error: ") + what + " (function " + (F ? F->name : std::string("?")) + ")"};
     }
     const NInfo& I(const Node* n) {
         const NInfo* p = info.get(n);
@@ -392,9 +394,10 @@ public:
     }
 
     // ------------------------------------------------------------------ temporaries
+    uint32_t temp_limit_ = 32;  // EPQ_JIT_TEMP_LIMIT=N (test hook): at most N live temporaries
     int talloc() {
         uint32_t f = temp_free;
-        if (!f) bug("out of temporaries");
+        if (!f || (uint32_t)__builtin_popcount(temp_pool & ~f) >= temp_limit_) bug("out of temporaries");
         int r = __builtin_ctz(f);
         temp_free &= ~bit(r);
         return r;
@@ -404,7 +407,11 @@ public:
         temp_free &= ~bit(r);
         return r;
     }
-    int nfree() const { return __builtin_popcount(temp_free); }
+    int nfree() const {
+        int f = __builtin_popcount(temp_free);
+        int left = (int)temp_limit_ - __builtin_popcount(temp_pool & ~temp_free);
+        return f < left ? f : left;
+    }
     int salloc() {
         for (size_t i = 0; i < slot_busy.size(); ++i)
             if (!slot_busy[i]) {
@@ -1442,8 +1449,9 @@ public:
     // Before a hot call: no temporary may be live.
     void check_no_temps(const char* where) {
         if ((temp_free & temp_pool) != temp_pool) {
-            std::fprintf(stderr, "epq: jit: live temporaries at call (%s): %x\n", where, temp_pool & ~temp_free);
-            bug("live temporaries across a call");
+            char buf[96];
+            std::snprintf(buf, sizeof buf, "live temporaries across a call (%s): %x", where, temp_pool & ~temp_free);
+            bug(buf);
         }
     }
     // Call a helper with arguments (released), result register x0 (allocated) or none.
@@ -2970,7 +2978,10 @@ public:
                 const Node* sel = b->kids[0];
                 bool x64 = is64(sel->type);
                 uint32_t x = canon((uint32_t)b->a);
-                V k[2] = {expr(sel->kids[1]), expr(sel->kids[2])};
+                V k[2];
+                k[0] = expr(sel->kids[1]);
+                hold(k[0], sel, 2, 2);
+                k[1] = expr(sel->kids[2]);
                 auto reg_or_zr = [&](V& v) -> Reg {
                     if (v.k == V::IMM && v.imm == 0) return x64 ? xzr : wzr;
                     return R(v, x64);
@@ -3008,6 +3019,7 @@ public:
         if (t.k == TK::Fn) return V::none();
         V k[2];
         k[0] = expr(n->kids[1]);
+        hold(k[0], n, 2, 2);  // a Select chain must not pin one temporary per level
         k[1] = expr(n->kids[2]);
         auto reg_or_zr = [&](V& v) -> Reg {
             if (v.k == V::IMM && v.imm == 0) return x64 ? xzr : wzr;
@@ -3183,11 +3195,17 @@ public:
         });
     }
     // RecLit: every kid first (in order), then epq_rec_new(k) and k slot stores.
+    // Each kid is converted to its slot word right away and then held like any
+    // pending value (hold spills it to a callee-saved register or a frame slot
+    // when temporaries run low or a later kid calls), so a wide literal never
+    // needs more than a bounded number of temporaries.
     V rec_lit(const Node* n) {
         uint32_t k = n->nkids;
         std::vector<V> v(k);
-        eval_kids(n, 0, k, v.data());
-        for (uint32_t i = 0; i < k; ++i) v[i] = word_of(n->kids[i]->type, v[i]);
+        for (uint32_t i = 0; i < k; ++i) {
+            v[i] = word_of(n->kids[i]->type, expr(n->kids[i]));
+            if (i + 1 < k) hold(v[i], n, i + 1, k - 1);
+        }
         uint32_t total = (8 * k + 15) & ~15u;
         if (total == 0) total = 16;
         int d = talloc();
@@ -3878,6 +3896,15 @@ public:
         default: return false;
         }
     }
+    // Upper bound on the temporaries a simple_param_expr needs: values are
+    // not spilled before the prologue (hold is off), so deep expressions must
+    // be refused instead (they then run after the prologue, with spilling).
+    static uint32_t early_need(const Node* n) {
+        if (n->nkids == 0) return 1;
+        uint32_t m = 0;
+        for (uint32_t i = 0; i < n->nkids; ++i) m = std::max(m, early_need(n->kids[i]) + i);
+        return m + 1;
+    }
     const Node* early_return_value(const Node* s) {
         if (s->op != Op::If) return nullptr;
         const Node* e = s->kids[2];
@@ -3924,13 +3951,19 @@ public:
     uint32_t early_returns() {
         tail_if_true_ = false;
         if (F->is_main || !hot_calls || F->body->op != Op::Seq) return 0;
-        uint32_t k = 0;
-        while (k < F->body->nkids && early_return_value(F->body->kids[k])) ++k;
-        const Node* tail = tail_return_value(k);
-        if (!k && !tail) return 0;
-        early_ = true;
         uint32_t argregs = 0;
         for (size_t i = 0; i < F->params.size() && i < 8; ++i) argregs |= bit((int)i);
+        uint32_t avail = (uint32_t)__builtin_popcount(temp_pool & ~argregs);
+        if (temp_limit_ < avail) avail = temp_limit_;
+        auto fits = [&](const Node* c, const Node* v) { return early_need(c) <= avail && early_need(v) <= avail; };
+        uint32_t k = 0;
+        while (k < F->body->nkids && early_return_value(F->body->kids[k]) &&
+               fits(F->body->kids[k]->kids[0], early_return_value(F->body->kids[k])))
+            ++k;
+        const Node* tail = tail_return_value(k);
+        if (tail && !fits(F->body->kids[k]->kids[0], tail)) tail = nullptr;
+        if (!k && !tail) return 0;
+        early_ = true;
         temp_free = temp_pool & ~argregs;
         if (nfree() < 5) {
             early_ = false;
@@ -4199,6 +4232,7 @@ public:
         no_madd_ = getenv("EPQ_JIT_NO_MADD") != nullptr;
         no_pushcache_ = getenv("EPQ_JIT_NO_PUSHCACHE") != nullptr;
         getenv_coarse_loops_ = getenv("EPQ_JIT_COARSE_LOOPS") != nullptr;
+        if (const char* tl = getenv("EPQ_JIT_TEMP_LIMIT")) temp_limit_ = (uint32_t)std::max(0, atoi(tl));
         for (auto& f : M.funcs) compile_func(*f);
         F = nullptr;
         emit_rec_stubs();
@@ -4340,7 +4374,25 @@ std::string unsupported(const Module& m) {
     return "";
 }
 
-int run(const Module& m, const JitConfig& cfg) {
+// Compiles every function of m (nothing runs). nullptr and *why on a compile failure.
+static Compiler* compile_or_fail(const Module& m, std::string* why) {
+    Compiler* C = new Compiler(m);  // never freed: the process exits
+    try {
+        if (!C->compile()) {
+            *why = "cannot allocate code memory";
+            return nullptr;
+        }
+    } catch (const a64::Error& e) {
+        *why = e.msg;
+        return nullptr;  // C (and its code region) is leaked: the process runs on another engine
+    } catch (const std::exception& e) {  // e.g. a container size limit
+        *why = std::string("internal error: ") + e.what();
+        return nullptr;
+    }
+    return C;
+}
+
+int run(const Module& m, const JitConfig& cfg, std::string* why) {
     static_assert(sizeof(tir::Desc) == 8, "EDesc layout");
     if (getenv("EPQ_JIT_QOS")) pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
     uint64_t t0 = now_us();
@@ -4349,18 +4401,15 @@ int run(const Module& m, const JitConfig& cfg) {
         uint64_t best = UINT64_MAX;
         for (int i = 0; i < n; ++i) {
             uint64_t a = now_us();
-            Compiler* X = new Compiler(m);
-            X->compile();
+            Compiler* X = compile_or_fail(m, why);
+            if (!X) return kCompileFailed;
             best = std::min(best, now_us() - a);
             delete X;
         }
         std::fprintf(stderr, "jit: best of %d compiles: %llu us\n", n, (unsigned long long)best);
     }
-    Compiler* C = new Compiler(m);  // never freed: the process exits
-    if (!C->compile()) {
-        std::fprintf(stderr, "epq: jit: cannot allocate code memory\n");
-        return 2;
-    }
+    Compiler* C = compile_or_fail(m, why);
+    if (!C) return kCompileFailed;
     uint64_t t1 = now_us();
     if (cfg.stats) {
         std::fprintf(stderr, "jit: compile %llu us, code %zu bytes, %zu functions\n", (unsigned long long)(t1 - t0),

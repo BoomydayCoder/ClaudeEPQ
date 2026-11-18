@@ -12,6 +12,10 @@ Runs, with `--engine=jit`:
   overflow   unbounded recursion -> "Stack overflow" on stderr, exit 1, stdout
              flushed first; also inside a dynamic call
   dumpasm    --dump-asm prints function names; --jit-stats prints compile time
+  limits     a code-generator limit (EPQ_JIT_TEMP_LIMIT=0) falls back to the C engine
+             silently by default, is a one-line error (exit 2) with --engine=jit;
+             tests/jit/progs with only 3 temporaries; fuzzfound bug02 with its passes off
+  stress     tests/jit/stress.py (60 programs) when the baseline binary exists
 Exit status 0 iff everything passed.
 """
 import argparse
@@ -148,6 +152,54 @@ def main():
     record("default_is_jit", r.returncode == 0 and r.stdout == b">> 4\n" and b"jit: compile" in r.stderr)
     r = run([epq, "--engine=aot", "--jit-stats", p], env=env)
     record("aot_is_c", r.returncode == 0 and r.stdout == b">> 4\n" and b"jit: compile" not in r.stderr)
+
+    # a code-generator limit is never an abort: EPQ_JIT_TEMP_LIMIT=0 makes every
+    # program "out of temporaries" at compile time (before anything runs). The
+    # default engine then runs it on the C engine silently (--verbose says why);
+    # --engine=jit reports it in one line, exit 2, no output.
+    p = os.path.join(ROOT, "bench", "original", "heapsort.epq")
+    with open(os.path.join(ROOT, "bench", "original", "heapsort.out"), "rb") as f:
+        exp = f.read()
+    pe = dict(env)
+    pe["EPQ_JIT_TEMP_LIMIT"] = "0"
+    pe["EPQ_NO_TIERUP"] = "1"
+    r = run([epq, p], env=pe)
+    record("limit_fallback_default", r.returncode == 0 and r.stdout == exp and r.stderr == b"",
+           "rc=%d stderr=%r" % (r.returncode, r.stderr[:200]))
+    r = run([epq, "--engine=auto", "--verbose", p], env=pe)
+    se = r.stderr.decode(errors="replace")
+    record("limit_fallback_verbose", r.returncode == 0 and r.stdout == exp and "out of temporaries" in se
+           and "using the C engine" in se, "rc=%d" % r.returncode)
+    r = run([epq, "--engine=jit", p], env=pe)
+    se = r.stderr.decode(errors="replace")
+    record("limit_forced_jit", r.returncode == 2 and r.stdout == b"" and se.count("\n") == 1
+           and "cannot compile" in se and "out of temporaries" in se, se.strip())
+    # a tiny pool (3 temporaries) must still compile everything, by spilling
+    suite("progs_temp_limit3", progs_runner, epq, a.j, {"EPQ_JIT_TEMP_LIMIT": "3"})
+    # tests/fuzzfound bug02 needs these passes off to reach the wide record literal
+    b2 = os.path.join(HERE, "progs", "fz_bug02_wide_reclit_nopass")
+    with open(b2 + ".out", "rb") as f:
+        exp = f.read()
+    with open(b2 + ".code") as f:
+        code = int(f.read().strip() or 0)
+    pe = dict(env)
+    pe["EPQ_NO_PASS"] = "constants,definite-assignment,ifconv,simplify,simplify2"
+    pe["EPQ_NO_TIERUP"] = "1"
+    ok = True
+    for eng in ("--engine=jit", "--engine=auto"):
+        r = run([epq, eng, b2 + ".epq"], env=pe)
+        ok = ok and r.returncode == code and r.stdout == exp and b"internal error" not in r.stderr
+    record("fuzzfound_bug02_nopass", ok)
+    # wide / deep expression stress (tests/jit/stress.py), when the baseline is available
+    base = os.environ.get("EPQ_BASELINE") or os.path.join(os.path.dirname(ROOT), "refbuild", "epq_ref")
+    if os.path.exists(base):
+        r = subprocess.run([sys.executable, os.path.join(HERE, "stress.py"), "--count", "60", "--seed", "1",
+                            "-j", str(a.j), "--epq", epq, "--baseline", base, "--keep", os.path.join(tmp, "stress")],
+                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        out = r.stdout.decode(errors="replace").strip().splitlines()
+        record("stress", r.returncode == 0, (out[-1:] or [""])[0].split(";")[0])
+        if r.returncode != 0:
+            sys.stdout.write("\n".join(out[-30:]) + "\n")
 
     bad = [n for n, ok in results if not ok]
     print("%d/%d JIT engine test groups passed" % (len(results) - len(bad), len(results)))

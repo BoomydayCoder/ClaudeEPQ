@@ -29,6 +29,12 @@
 
 namespace a64 {
 
+// An encoding the assembler cannot produce (offset out of range, ...). Thrown,
+// not aborted: the JIT turns it into a compile failure, and the driver then
+// falls back to the C engine (--engine=auto) or reports it (--engine=jit).
+struct Error {
+    std::string msg;
+};
 [[noreturn]] void fatal(const char* msg);
 
 // ---------------------------------------------------------------- registers

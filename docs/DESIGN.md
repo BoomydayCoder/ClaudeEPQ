@@ -340,6 +340,15 @@ flag measured 45 → 23 ms.
 is used instead of either when it has been measured to be faster. `--engine=jit` / `--engine=aot`
 (`--jit` / `--aot`) force one engine and bypass tier-up.
 
+The same holds for the code generator's own limits (out of temporaries, an encoding out of range, any
+internal inconsistency): they throw `a64::Error` during compilation, and every function is compiled
+before main starts, so nothing has run yet. `auto` then runs the C engine silently (`--verbose` says
+why); `--engine=jit` prints one line and exits 2. Never an abort. `EPQ_JIT_TEMP_LIMIT=N` (test hook)
+caps the live temporaries at N: 0 forces the fallback, 3 still compiles every test program by spilling.
+Held values (`hold`) go to a callee-saved register or a frame slot when fewer than 6 temporaries are
+free or a later sibling calls, so no expression shape (wide literals, many arguments, deep nesting)
+needs more than a constant number of temporaries; tests/jit/stress.py generates such shapes.
+
 One pass over Low TIR per instance, emitting into a `MAP_JIT` region (`pthread_jit_write_protect_np`,
 `sys_icache_invalidate`).
 

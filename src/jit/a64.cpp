@@ -8,10 +8,7 @@
 
 namespace a64 {
 
-void fatal(const char* msg) {
-    std::fprintf(stderr, "a64 assembler: %s\n", msg);
-    std::abort();
-}
+void fatal(const char* msg) { throw Error{std::string("a64 assembler: ") + msg}; }
 
 const char* cond_name(Cond c) {
     static const char* n[16] = {"eq", "ne", "hs", "lo", "mi", "pl", "vs", "vc",

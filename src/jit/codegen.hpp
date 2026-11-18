@@ -22,6 +22,11 @@ struct JitConfig {
 std::string unsupported(const tir::Module& m);
 
 // Compiles and runs the module (which must pass unsupported()). Returns the process exit status.
-int run(const tir::Module& m, const JitConfig& cfg);
+// If the code generator hits one of its own limits (out of temporaries, an
+// encoding out of range, any internal inconsistency), nothing has run yet:
+// every function is compiled before main starts. run() then returns
+// kCompileFailed with the reason in *why, and the caller picks another engine.
+constexpr int kCompileFailed = -1;
+int run(const tir::Module& m, const JitConfig& cfg, std::string* why);
 
 }  // namespace epq::jitcg

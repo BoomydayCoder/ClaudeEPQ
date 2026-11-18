@@ -14,7 +14,8 @@ ClaudeEPQ is a new implementation of the EPQ language (original: BoomydayCoder/E
 - Shared runtime (buffered I/O, three-way deep compare, grow-in-place lists, static reclamation).
 - Two engines. The **ARM64 JIT** covers every TIR op and type. The **C engine** (`--engine=aot`) emits C,
   compiles it with cc and caches the dylib. Batch mode (`--batch`) serves the test tools.
-- **Default engine policy `auto`**: the JIT. A program the JIT cannot compile falls back to the C engine,
+- **Default engine policy `auto`**: the JIT. A program the JIT cannot compile (an unsupported construct,
+  or a code-generator limit hit while compiling, before anything runs) falls back to the C engine,
   silently (`--verbose` says why). A tier-up artefact is used when one is ready for exactly this
   source and configuration and has been measured faster than the JIT.
 - **Tier-up**: a run still going after 20 ms spawns one detached background helper that compiles the
