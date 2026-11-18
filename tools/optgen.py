@@ -49,7 +49,7 @@ class Snip:
 
 
 FAMILIES = ["rec", "tree", "cons", "pairs", "helpers", "recur", "append", "copy", "idxloop",
-            "ifconv", "litcmp", "reclaim", "glob", "recloop", "inl2", "alias", "grow", "glue"]
+            "ifconv", "litcmp", "reclaim", "glob", "recloop", "inl2", "alias", "grow", "rec2", "glue"]
 
 
 class OptGen:
@@ -944,6 +944,20 @@ class OptGen:
             s.risky = True
             v, k = self.pick(names)
             s.head.append(">> %s < [%d];" % (v, self.ri(0, 2)))
+        elif self.ch(0.25):
+            # literal elements that may fail (only reached when the lengths match, or always?)
+            s.risky = True
+            kv2 = self.read(s, -1, 3, "kv")
+            v, k = self.pick([nk for nk in names if nk[1] != "fn"] or names)
+            late = self.nm("Lg")
+            pq2 = self.nm("p")
+            lf = self.fn(s, "lf", [pq2], ["=> %s = [%s, %s];" % (pq2, late, pq2)])
+            el = self.pick(["%d / %s" % (self.ri(1, 9), kv2), "[1, 2][%s]" % kv2, "%s[%s]" % (v, kv2)
+                            if k == "list" else "%d / %s" % (self.ri(1, 9), kv2)])
+            s.head.append(">> %s = [%s]; >> [%s, %d] != %s;" % (v, el, el, self.ri(0, 2), v))
+            s.head.append(">> %s(%s);" % (lf, v))
+            s.head.append("%s := %d;" % (late, self.ri(0, 3)))
+            s.nglob += 1
         return s
 
     # ================================================================ reclaim
@@ -1322,6 +1336,80 @@ class OptGen:
             s.head.append("(%s := 0; %s < %d; %s := %s + 1;) @ %s :+ %s;" % (q2, q2, self.ri(1, 200), q2, q2, A, q2))
             s.head.append(">> |%s|; >> %s(%s);" % (A, sumf, A))
         self.export(B, "ilist")
+        return s
+
+    # ================================================================== rec2
+    def f_rec2(self):
+        """Record-typing stress: function fields, two shapes through one generic helper,
+        nullable flips, input-dependent shapes, mutually nested shapes, records popped
+        out of lists, int-terminated chains."""
+        s = Snip("rec2")
+        parts = self.r.sample(["fnfield", "twoshape", "nullflip", "union", "mutual", "popped", "intchain"],
+                              self.ri(2, 4))
+        for part in parts:
+            if part == "fnfield":
+                a, b = self.params(2)
+                f1 = self.fn(s, "fa", [a], ["=> %s * 2;" % a])
+                f2 = self.fn(s, "fb", [b], ["=> %s + 100;" % b])
+                R = self.glob(s, "R", "[%s, %d]" % (f1, self.ri(0, 9)))
+                s.head.append(">> %s[0](%s[1]); %s[0] := %s; >> %s[0](%s[1]); >> %s[0] = %s; >> %s[1];"
+                              % (R, R, R, f2, R, R, R, f1, R))
+                pr = self.nm("p")
+                ap = self.fn(s, "ap", [pr], ["%s[1] := %s[0](%s[1]);" % (pr, pr, pr), "=> %s[1];" % pr])
+                s.head.append(">> %s(%s) + %s(%s);" % (ap, R, ap, R))
+            elif part == "twoshape":
+                a, b = self.params(2)
+                m1 = self.fn(s, "m1", [a], ["=> [%s, [%s]];" % (a, a)])
+                m2 = self.fn(s, "m2", [b], ["=> [%s, %s, %s];" % (b, b, b)])
+                r = self.nm("p")
+                use = self.fn(s, "us", [r], ["%s[0] := %s[0] + 1;" % (r, r), "=> %s[0] * 10 + |%s|;" % (r, r)])
+                X = self.glob(s, "X", "%s(%d)" % (m1, self.ri(0, 9)))
+                Y = self.glob(s, "Y", "%s(%d)" % (m2, self.ri(0, 9)))
+                s.head.append(">> %s(%s) + %s(%s); >> %s; >> %s; >> %s = %s;" % (use, X, use, Y, X, Y, X, Y))
+                if self.ch(0.5):
+                    Z = self.glob(s, "Z", "[%s, %s]" % (X, Y))
+                    x = self.nm("x")
+                    s.head.append("(%s : %s) @ >> %s(%s);" % (x, Z, use, x))
+            elif part == "nullflip":
+                a = self.nm("p")
+                mk = self.fn(s, "mk", [a], ["=> [%s, [%s, %s]];" % (a, a, a)])
+                N = self.glob(s, "N", "%s(%d)" % (mk, self.ri(0, 9)))
+                s.head.append(">> %s[1][0]; %s := []; >> %s = []; >> |%s|; %s := %s(%d); >> %s[0] + %s[1][1];"
+                              % (N, N, N, N, N, mk, self.ri(0, 9), N, N))
+                q = self.nm("p")
+                g = self.fn(s, "nf", [q], ["(%s = []) ? => -1;" % q, "=> %s[0];" % q])
+                s.head.append(">> %s(%s) + %s([]) + %s(%s(%d));" % (g, N, g, g, mk, self.ri(0, 9)))
+            elif part == "union":
+                kv = self.read(s, 0, 1, "kv")
+                R = self.glob(s, "R", "[0, 0, 0]")
+                s.head.append("(%s) ? %s := [%d, %d, %d]; : %s := [%d, [%d]];"
+                              % (kv, R, self.ri(0, 9), self.ri(0, 9), self.ri(0, 9), R, self.ri(0, 9), self.ri(0, 9)))
+                s.head.append(">> %s[0]; >> %s; >> |%s|; %s[0] := %s[0] + 1; >> %s;" % (R, R, R, R, R, R))
+            elif part == "mutual":
+                X = self.glob(s, "X", "[%d, []]" % self.ri(0, 9))
+                Y = self.glob(s, "Y", "[[], %d]" % self.ri(0, 9))
+                s.head.append("%s[1] := %s; %s[0] := [%d, []]; >> %s; >> %s[1][0][0] + %s[1][1];"
+                              % (X, Y, Y, self.ri(0, 9), X, X, X))
+                s.head.append("%s[0][1] := [[], %d]; >> %s; >> %s = %s;" % (Y, self.ri(0, 9), X, X, X))
+            elif part == "popped":
+                a = self.nm("p")
+                mk = self.fn(s, "mk", [a], ["=> [%s, [%s]];" % (a, a)])
+                RL = self.glob(s, "RL", "[%s(%d), %s(%d), %s(%d)]" % (mk, self.ri(0, 9), mk, self.ri(0, 9),
+                                                                     mk, self.ri(0, 9)))
+                R = self.glob(s, "R", "-%s" % RL)
+                s.head.append("%s[0] := %d; %s[1] :+ %d; >> %s; >> %s; >> %s[0] = %s;"
+                              % (R, self.ri(0, 9), R, self.ri(0, 9), RL, R, RL, R))
+                x = self.nm("x")
+                s.head.append("(%s : %s) @ %s[0] := %s[0] + %s[1][0];" % (x, RL, x, x, x))
+                s.head.append(">> %s;" % RL)
+            else:
+                C = self.glob(s, "C", "0")
+                i = self.nm("i")
+                s.head.append("(%s := 0; %s < %d; %s := %s + 1;) @ %s := [%s, %s];" % (i, i, self.ri(0, 8), i, i, C, i, C))
+                p = self.glob(s, "pw", C)
+                c = self.glob(s, "cw", "0")
+                s.head.append("(%s != 0) @ { %s := %s + %s[0]; %s := %s[1]; }" % (p, c, c, p, p, p))
+                s.head.append(">> %s; >> %s;" % (C, c))
         return s
 
     # ================================================================== glue
