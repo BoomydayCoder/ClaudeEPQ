@@ -1,0 +1,16 @@
+// an append of an arithmetic value through a function
+// bytes: no
+f := [0, 0, 1, 1]; // FLAG
+(i := 0; i < 40; i := i + 1;) @ f :+ (i < 20);
+add := (l, v) => { l :+ v * 2; };
+c := 0;
+(x : f) @ c := c + x;
+>> c;
+>> f;
+add(f, 150);
+>> f;
+>> f[3];
+c := 0;
+(x : f) @ c := c + x;
+>> c;
+

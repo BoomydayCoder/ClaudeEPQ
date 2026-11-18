@@ -2,7 +2,8 @@
 //   definite-assignment, constants, demote-globals   global-variable passes (§2.6)
 //   fold                                              constant folding (tir.cpp)
 //   region-info                                       analysis (§5.2 inputs)
-//   simplify, inline, pairs, ifconv, listopt, simplify2, reclaim   optimisation passes
+//   simplify, litcmp, inline, recur, pairs, ifconv, appendopt, listopt, simplify2, reclaim,
+//   bytes                                             optimisation passes
 // --no-pass=a,b / EPQ_NO_PASS=a,b disable passes (any of the above);
 // --only-pass=a,b runs only the named optimisation passes (the infrastructure
 // passes above them still run unless disabled). --verify-tir / EPQ_VERIFY_TIR=1
@@ -35,6 +36,7 @@ const Pass kPipeline[] = {
     {"listopt", "header caching and check elision (§5.2/§5.3)", pass_listopt},
     {"simplify2", "local simplification, late (§5.6; same implementation as simplify)", pass_simplify},
     {"reclaim", "static reclamation: Free dead lists (§5.7)", pass_reclaim},
+    {"bytes", "byte lists: one byte per element where every stored value is in 0..255 (§5.12)", pass_bytes},
 };
 constexpr size_t kFirstOpt = 5;
 

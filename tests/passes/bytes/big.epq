@@ -1,0 +1,15 @@
+// a byte list grown to 3 million elements by appends, then sieved
+// bytes: yes
+n := 3000000;
+f := []; // FLAG
+(i := 0; i < n; i := i + 1;) @ f :+ 1;
+f[0] := 0; f[1] := 0;
+(i := 2; i * i < n; i := i + 1;) @ (f[i]) ? {
+    (j := i * i; j < n; j := j + i;) @ f[j] := 0;
+}
+c := 0;
+(x : f) @ c := c + x;
+>> c;
+>> |f|;
+>> f[2999999];
+>> f[2999957];

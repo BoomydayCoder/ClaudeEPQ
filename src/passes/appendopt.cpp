@@ -95,7 +95,7 @@ struct AppendOpt {
         if (L->a == Ml->a) return nullptr;
         uint32_t rl = L->type.a, rm = Ml->type.a;
         if (M.regions[rl].pair || M.regions[rm].pair) return nullptr;
-        if (elem_of(M, L->type) != elem_of(M, Ml->type) || M.elem_is_i32(rl) != M.elem_is_i32(rm)) return nullptr;
+        if (elem_of(M, L->type) != elem_of(M, Ml->type) || M.elem_width(rl) != M.elem_width(rm)) return nullptr;
         if (ap->kids[1]->type != elem_of(M, L->type)) return nullptr;
         // b must not observe L's growth: no value of L's region in b except M itself.
         bool bad = false;

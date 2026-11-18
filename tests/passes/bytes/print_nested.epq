@@ -1,0 +1,17 @@
+// byte lists printed alone, inside other lists, and in records
+// bytes: yes
+f := [0, 1, 255, 0, 128]; // FLAG
+>> f;
+>> [f, f];
+o := [f, [7, 8]];
+>> o;
+>> o[1];
+r := [5, f];
+>> r;
+>> r[1][2];
+>> [];
+g := [];
+>> g;
+g :+ 1;
+>> g;
+>> [[f]];

@@ -1,0 +1,12 @@
+// lists of 0/1 produced by comparisons
+// bytes: yes
+f := []; // FLAG
+(i := 0; i < 20; i := i + 1;) @ f :+ (i < 7);
+(i := 0; i < 20; i := i + 1;) @ f :+ (i = i / 2 * 2);
+(i := 0; i < 20; i := i + 1;) @ f :+ !(i > 15);
+l1 := [1, 2]; l2 := [1, 2];
+f :+ (l1 = l2);
+f :+ (l1 < l2);
+f :+ (l1 != []);
+>> f;
+>> |f|;

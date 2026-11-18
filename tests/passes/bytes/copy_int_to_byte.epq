@@ -1,0 +1,14 @@
+// copy loops from an int list holding only 0..9 into another list: both bytes
+// bytes: yes
+src := []; // FLAG
+(i := 0; i < 60; i := i + 1;) @ src :+ 9;
+(i := 0; i < 60; i := i + 2;) @ src[i] := 3;
+dst := [7];
+(i := 0; i < |src|; i := i + 1;) @ dst :+ src[i];
+>> dst;
+part := [];
+(i := 10; i < 30; i := i + 1;) @ part :+ dst[i];
+>> part;
+(i := 0; i < 5; i := i + 1;) @ part :+ part[i];
+>> part;
+>> |part|;

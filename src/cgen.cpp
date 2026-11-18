@@ -29,10 +29,15 @@ struct CGen {
         case TK::List: return "EList*";
         case TK::Any: return "EAny";
         case TK::Pair: return "EPair";
-        case TK::Ptr: return M.elem_is_i32(t.a) ? "EI32*" : "EW64*";
+        case TK::Ptr: return std::string(elem_struct(t.a)) + "*";
         case TK::Rec: return "ERec*";  // records (cgen_rec.inc)
         default: return "int32_t";
         }
+    }
+    // C element struct of lists of region r (runtime/epq_rt.h): EU8 / EI32 / EW64.
+    const char* elem_struct(uint32_t r) const {
+        uint32_t w = M.elem_width(r);
+        return w == 1 ? "EU8" : w == 4 ? "EI32" : "EW64";
     }
     std::string tmp() { return "_t" + std::to_string(tmpn++); }
     static std::string num(int64_t v) {
@@ -215,26 +220,30 @@ struct CGen {
         case Op::Index: {
             Kids k = kids(n, 0, 2);
             uint32_t r = n->kids[0]->type.a;
-            if (M.elem_is_i32(r)) return se(k.pre, "epq_ld_i32(" + k.v[0] + ", " + k.v[1] + ")");
+            if (M.elem_width(r) == 1) return se(k.pre, "epq_ld_u8(" + k.v[0] + ", " + k.v[1] + ")");
+            if (M.elem_width(r) == 4) return se(k.pre, "epq_ld_i32(" + k.v[0] + ", " + k.v[1] + ")");
             return se(k.pre, from_word(n->type, "epq_ld_w(" + k.v[0] + ", " + k.v[1] + ")"));
         }
         case Op::SetIndex: {
             Kids k = kids(n, 0, 3);
             uint32_t r = n->kids[0]->type.a;
-            if (M.elem_is_i32(r)) return se(k.pre, "epq_st_i32(" + k.v[0] + ", " + k.v[1] + ", " + k.v[2] + ")");
+            if (M.elem_width(r) == 1) return se(k.pre, "epq_st_u8(" + k.v[0] + ", " + k.v[1] + ", " + k.v[2] + ")");
+            if (M.elem_width(r) == 4) return se(k.pre, "epq_st_i32(" + k.v[0] + ", " + k.v[1] + ", " + k.v[2] + ")");
             std::string w = word(n->kids[2]->type, k.v[2], is_pure(n->kids[2]));
             return se(k.pre, from_word(n->type, "epq_st_w(" + k.v[0] + ", " + k.v[1] + ", " + w + ")"));
         }
         case Op::Append: {
             Kids k = kids(n, 0, 2);
             uint32_t r = n->kids[0]->type.a;
-            if (M.elem_is_i32(r)) return se(k.pre, "epq_push_i32(" + k.v[0] + ", " + k.v[1] + ")");
+            if (M.elem_width(r) == 1) return se(k.pre, "epq_push_u8(" + k.v[0] + ", " + k.v[1] + ")");
+            if (M.elem_width(r) == 4) return se(k.pre, "epq_push_i32(" + k.v[0] + ", " + k.v[1] + ")");
             std::string w = word(n->kids[1]->type, k.v[1], is_pure(n->kids[1]));
             return se(k.pre, "epq_push_w(" + k.v[0] + ", " + w + ")");
         }
         case Op::Pop: {
             uint32_t r = n->kids[0]->type.a;
-            if (M.elem_is_i32(r)) return "epq_pop_i32(" + E(n->kids[0]) + ")";
+            if (M.elem_width(r) == 1) return "epq_pop_u8(" + E(n->kids[0]) + ")";
+            if (M.elem_width(r) == 4) return "epq_pop_i32(" + E(n->kids[0]) + ")";
             return from_word(n->type, "epq_pop_w(" + E(n->kids[0]) + ")");
         }
         case Op::DynIndex: {
@@ -322,7 +331,7 @@ struct CGen {
         }
         if (ta.k == TK::Pair && tb.k == TK::Pair) return low_pair_cmp(c, k.v[0], k.v[1]);
         if (ta.k == TK::Rec || tb.k == TK::Rec) return rec_cmp(n, c, k);  // records (cgen_rec.inc)
-        if (ta.k == TK::List && tb.k == TK::List && M.elem_is_i32(ta.a) && M.elem_is_i32(tb.a)) {
+        if (ta.k == TK::List && tb.k == TK::List && M.elem_width(ta.a) == 4 && M.elem_width(tb.a) == 4) {
             std::string a = k.v[0], b = k.v[1];
             switch (c) {
             case Op::EqI32: return "epq_eq_li(" + a + ", " + b + ")";
@@ -379,14 +388,15 @@ struct CGen {
 
     std::string list_lit(const Node* n) {
         uint32_t r = n->type.a;
-        bool i32 = M.elem_is_i32(r);
-        std::string esz = i32 ? "4" : "8";
+        uint32_t w = M.elem_width(r);
+        bool i32 = w <= 4;  // integer elements (EI32 or EU8): stored as values, not words
+        std::string esz = std::to_string(w), es = elem_struct(r);
         if (n->nkids == 0) return "epq_list_new(0, " + esz + ")";
         Kids k = kids(n, 0, n->nkids, true);
         std::string t = tmp();
         std::string pre = k.pre + "EList* " + t + " = epq_list_new(" + std::to_string(n->nkids) + ", " + esz + "); ";
         std::string d = tmp();
-        pre += std::string(i32 ? "EI32* " : "EW64* ") + d + " = (" + (i32 ? "EI32*" : "EW64*") + ")" + t + "->data; ";
+        pre += es + "* " + d + " = (" + es + "*)" + t + "->data; ";
         for (uint32_t i = 0; i < n->nkids; ++i) {
             std::string v = i32 ? k.v[i] : word(n->kids[i]->type, k.v[i], true);
             pre += d + "[" + std::to_string(i) + "].v = " + v + "; ";

@@ -86,7 +86,7 @@ uint32_t Module::desc_of(Type t) {
         uint32_t id = (uint32_t)descs.size();
         descs.push_back({3, 0});
         region_desc_memo[t.a] = (int32_t)id;
-        uint32_t e = desc_of(regions[t.a].elem);
+        uint32_t e = regions[t.a].bytes ? desc_int8() : desc_of(regions[t.a].elem);
         descs[id].elem = e;
         return id;
     }
@@ -106,6 +106,14 @@ uint32_t Module::desc_of(Type t) {
     }
     }
     return 1;
+}
+
+uint32_t Module::desc_int8() {
+    desc_of(Type::i32());  // the four fixed descriptors first
+    for (size_t i = 4; i < descs.size(); ++i)
+        if (descs[i].kind == 0 && descs[i].elem == 1) return (uint32_t)i;
+    descs.push_back({0, 1});
+    return (uint32_t)descs.size() - 1;
 }
 
 uint32_t Module::new_temp(Func* f, Type t) {
@@ -240,7 +248,7 @@ void dump(std::string& o, const Module& m) {
     }
     o += "regions:\n";
     for (size_t r = 0; r < m.regions.size(); ++r) {
-        o += "  L" + std::to_string(r) + " elem " + type_str(m, m.regions[r].elem);
+        o += "  L" + std::to_string(r) + " elem " + (m.regions[r].bytes ? std::string("Int8") : type_str(m, m.regions[r].elem));
         if (m.regions[r].header_mutated) o += " header-mutated";
         if (m.regions[r].elem_stored) o += " elem-stored";
         if (m.regions[r].pair) o += " pair";
@@ -257,7 +265,7 @@ void dump(std::string& o, const Module& m) {
     o += "descs:";
     for (size_t i = 0; i < m.descs.size(); ++i) {
         static const char* kn[] = {"INT", "ANY", "FN", "LIST", "PAIR", "RECORD", "FIELD"};
-        o += " " + std::to_string(i) + "=" + kn[m.descs[i].kind];
+        o += " " + std::to_string(i) + "=" + (m.descs[i].kind == 0 && m.descs[i].elem == 1 ? "INT8" : kn[m.descs[i].kind]);
         if (m.descs[i].kind == 3 || m.descs[i].kind == 6) o += "(" + std::to_string(m.descs[i].elem) + ")";
         if (m.descs[i].kind == 5) o += "(" + std::to_string(m.descs[i].elem & 0xffff) + (m.descs[i].elem >> 16 ? "?)" : ")");
     }

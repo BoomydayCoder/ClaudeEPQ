@@ -1,0 +1,13 @@
+// a byte list next to dynamic code: an Any list is never a byte list
+// bytes: yes
+f := [1, 0, 1]; // FLAG
+h := [1, [2, 3], f[0]];
+h[1] :+ 400;
+>> h;
+k := h[1];
+>> -k;
+>> f;
+g := (x) => { => x; };
+fs := [g, 0];
+>> fs[0](f[1]);
+>> fs[0](5) + f[2];

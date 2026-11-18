@@ -1,0 +1,9 @@
+// copy loop from an int list with large values into the flag list: no bytes
+// bytes: no
+f := [0, 1, 1, 0]; // FLAG
+big := [];
+(i := 0; i < 20; i := i + 1;) @ big :+ i * 100;
+(i := 0; i < |big|; i := i + 1;) @ f :+ big[i];
+>> f;
+(i := 0; i < 4; i := i + 1;) @ big :+ f[i];
+>> big;

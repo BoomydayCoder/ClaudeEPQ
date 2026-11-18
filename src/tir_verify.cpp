@@ -27,6 +27,13 @@ struct Verifier {
     std::vector<int32_t> labels;          // enclosing InlineBlock labels
     std::vector<const Node*> path;
 
+    // A constant stored into a byte region (§5.12) must be in 0..255 (a cheap
+    // check that no later rewrite broke what pass "bytes" proved).
+    void byte_val(const Node* n, Type lt, uint32_t i) {
+        if (!(lt.k == TK::List || lt.k == TK::Ptr) || !M.regions[lt.a].bytes) return;
+        const Node* v = n->kids[i];
+        if (v->op == Op::ConstInt && (v->a < 0 || v->a > 255)) fail(n, "constant " + std::to_string(v->a) + " stored into byte region");
+    }
     [[noreturn]] void fail(const Node* n, const std::string& what) {
         std::string p;
         for (const Node* q : path) {
@@ -235,7 +242,7 @@ struct Verifier {
         case Op::ListLit: {
             if (n->type.k != TK::List) fail(n, "ListLit of non-list type " + ts(n->type));
             Type e = elem_of(M, n->type);
-            for (uint32_t i = 0; i < n->nkids; ++i) kid_is(n, i, e);
+            for (uint32_t i = 0; i < n->nkids; ++i) kid_is(n, i, e), byte_val(n, n->type, i);
             break;
         }
         case Op::Len: nk(n, 1); kid_kind(n, 0, TK::List, "List"); res_int(n); break;
@@ -243,9 +250,9 @@ struct Verifier {
             nk(n, 2); kid_kind(n, 0, TK::List, "List"); kid_int(n, 1); res(n, elem_of(M, n->kids[0]->type)); break;
         case Op::SetIndex:
             nk(n, 3); kid_kind(n, 0, TK::List, "List"); kid_int(n, 1);
-            kid_is(n, 2, elem_of(M, n->kids[0]->type)); res(n, elem_of(M, n->kids[0]->type)); break;
+            kid_is(n, 2, elem_of(M, n->kids[0]->type)); res(n, elem_of(M, n->kids[0]->type)); byte_val(n, n->kids[0]->type, 2); break;
         case Op::Append:
-            nk(n, 2); kid_kind(n, 0, TK::List, "List"); kid_is(n, 1, elem_of(M, n->kids[0]->type));
+            nk(n, 2); kid_kind(n, 0, TK::List, "List"); kid_is(n, 1, elem_of(M, n->kids[0]->type)); byte_val(n, n->kids[0]->type, 1);
             res(n, n->kids[0]->type); break;
         case Op::Pop: nk(n, 1); kid_kind(n, 0, TK::List, "List"); res(n, elem_of(M, n->kids[0]->type)); break;
         case Op::DynIndex: {
@@ -317,7 +324,7 @@ struct Verifier {
             nk(n, 2); kid_kind(n, 0, TK::Ptr, "Ptr"); kid_int(n, 1); res(n, elem_of(M, n->kids[0]->type)); break;
         case Op::ElemStore:
             nk(n, 3); kid_kind(n, 0, TK::Ptr, "Ptr"); kid_int(n, 1);
-            kid_is(n, 2, elem_of(M, n->kids[0]->type)); res(n, elem_of(M, n->kids[0]->type)); break;
+            kid_is(n, 2, elem_of(M, n->kids[0]->type)); res(n, elem_of(M, n->kids[0]->type)); byte_val(n, n->kids[0]->type, 2); break;
         case Op::CheckIndex: nk(n, 2); kid_int(n, 0); kid_int(n, 1); res_int(n); break;
         case Op::Free: nk(n, 1); kid_kind(n, 0, TK::List, "List"); break;
         case Op::SameList: nk(n, 2); kid_kind(n, 0, TK::List, "List"); kid_kind(n, 1, TK::List, "List"); res_int(n); break;
@@ -329,8 +336,8 @@ struct Verifier {
         case Op::AppendRange:
             nk(n, 4); kid_kind(n, 0, TK::List, "List"); kid_kind(n, 1, TK::List, "List"); kid_int(n, 2); kid_int(n, 3); res_int(n);
             if (elem_of(M, n->kids[0]->type) != elem_of(M, n->kids[1]->type) ||
-                M.elem_is_i32(n->kids[0]->type.a) != M.elem_is_i32(n->kids[1]->type.a))
-                fail(n, "lists have different element types");
+                M.elem_width(n->kids[0]->type.a) != M.elem_width(n->kids[1]->type.a))
+                fail(n, "lists have different element types or widths");
             break;
         // ---- end appendopt ----
         // ---- records (§5.11) ----
@@ -410,6 +417,16 @@ void verify(Module& m, const char* after_pass) {
             if (!ok) std::fprintf(stderr, "epq: TIR verifier (after %s): malformed record region %zu\n", V.after, r), std::abort();
         } else if (R.nullable || !R.fields.empty()) {
             std::fprintf(stderr, "epq: TIR verifier (after %s): region %zu has record fields but is not a record\n", V.after, r), std::abort();
+        }
+        // byte regions (§5.12, pass "bytes"): Int elements, plain lists, and their
+        // LIST descriptor (if any) has the INT8 element descriptor; an ordinary
+        // Int region's has INT.
+        if (R.bytes && (R.elem.k != TK::Int || R.pair || R.record))
+            std::fprintf(stderr, "epq: TIR verifier (after %s): byte region %zu is not a plain Int region\n", V.after, r), std::abort();
+        if (r < m.region_desc_memo.size() && m.region_desc_memo[r] >= 4 && !R.pair && !R.record && R.elem.k == TK::Int) {
+            const Desc& d = m.descs[(size_t)m.region_desc_memo[r]];
+            bool ok = d.kind == 3 && d.elem < m.descs.size() && m.descs[d.elem].kind == 0 && m.descs[d.elem].elem == (R.bytes ? 1u : 0u);
+            if (!ok) std::fprintf(stderr, "epq: TIR verifier (after %s): region %zu: LIST descriptor does not match its element width\n", V.after, r), std::abort();
         }
     }
     for (size_t i = 0; i < m.funcs.size(); ++i) {

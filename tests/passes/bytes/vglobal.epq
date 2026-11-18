@@ -1,0 +1,16 @@
+// a store of a global holding 300, from a function
+// bytes: no
+f := [0, 0, 1, 1]; // FLAG
+(i := 0; i < 40; i := i + 1;) @ f :+ (i < 20);
+G := 300; put := () => { f[3] := G; };
+c := 0;
+(x : f) @ c := c + x;
+>> c;
+>> f;
+put();
+>> f;
+>> f[3];
+c := 0;
+(x : f) @ c := c + x;
+>> c;
+

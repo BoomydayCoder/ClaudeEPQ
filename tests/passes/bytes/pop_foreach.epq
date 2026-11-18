@@ -1,0 +1,15 @@
+// pop and for-each on a byte list
+// bytes: yes
+f := [1, 0, 1, 1, 0, 255]; // FLAG
+s := 0;
+(x : f) @ s := s + x;
+>> s;
+>> -f;
+>> -f;
+>> f;
+(x : f) @ { (x) ? f :+ 0; }
+>> f;
+(|f| > 0) @ s := s + -f;
+>> s;
+>> f;
+>> -f;

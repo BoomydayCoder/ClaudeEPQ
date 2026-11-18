@@ -1,0 +1,13 @@
+// byte lists inside records and next to pairs
+// bytes: yes
+mk := (k) => { fl := [0, 0, 0]; fl[k] := 1; => [k, fl]; };
+rs := [mk(0), mk(2), mk(1)];
+>> rs;
+(r : rs) @ { r[1][0] := 1; }
+>> rs;
+>> rs[0] = [0, [1, 0, 0]];
+>> rs[1] < rs[2];
+p := [3, 4];
+>> p = [3, 4];
+f := [1, 1, 0]; // FLAG
+>> [p, f];

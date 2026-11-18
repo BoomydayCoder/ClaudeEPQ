@@ -1,0 +1,16 @@
+// a store inside a function reached only by a dynamic call
+// bytes: no
+f := [0, 0, 1, 1]; // FLAG
+(i := 0; i < 40; i := i + 1;) @ f :+ (i < 20);
+bad := () => { f[3] := 777; => 0; }; h := [bad, 1]; k := h[0];
+c := 0;
+(x : f) @ c := c + x;
+>> c;
+>> f;
+k();
+>> f;
+>> f[3];
+c := 0;
+(x : f) @ c := c + x;
+>> c;
+

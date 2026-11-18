@@ -1,0 +1,22 @@
+// polymorphic functions called with byte lists and with int lists
+// bytes: yes
+sum := (l) => { s := 0; (x : l) @ s := s + x; => s; };
+first := (l) => { => l[0]; };
+same := (a, b) => { => a = b; };
+cpy := (l) => { r := []; (x : l) @ r :+ x; => r; };
+f := [1, 1, 0, 1]; // FLAG
+g := [100, 200, 300];
+>> sum(f);
+>> sum(g);
+>> first(f);
+>> first(g);
+>> same(f, [1, 1, 0, 1]);
+>> same(g, [100, 200, 300]);
+>> same(f, g);
+h := cpy(f);
+>> h;
+>> cpy(g);
+h[0] := 0;
+>> h;
+>> f;
+>> same(cpy(f), f);

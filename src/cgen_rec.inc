@@ -50,7 +50,8 @@ std::string rec_dyn(const char* fn, Type a, Type b, const std::string& x, const 
 // Element j of a value x of list-like type t (j: C expression), as its static type.
 std::string rec_elem(Type t, const std::string& x, const std::string& j, uint32_t pos) {
     if (t.k == TK::Rec) return from_word(M.regions[t.a].fields[pos], x + "[" + j + "].v");
-    if (M.elem_is_i32(t.a)) return "((EI32*)" + x + "->data)[" + j + "].v";
+    if (M.elem_width(t.a) == 1) return "((int32_t)((EU8*)" + x + "->data)[" + j + "].v)";
+    if (M.elem_width(t.a) == 4) return "((EI32*)" + x + "->data)[" + j + "].v";
     return from_word(M.regions[t.a].elem, "((EW64*)" + x + "->data)[" + j + "].v");
 }
 Type rec_elem_type(Type t, uint32_t pos) { return t.k == TK::Rec ? M.regions[t.a].fields[pos] : M.regions[t.a].elem; }
@@ -69,7 +70,7 @@ std::string rec_c3(Type a, Type b, const std::string& x, const std::string& y) {
     if (a.k == TK::Pair && b.k == TK::Pair) return "epq_c3p(" + x + ", " + y + ")";
     if (a.is_int_like() || b.is_int_like()) return "epq_c3_invalid()";  // int against a list
     if (a.k == TK::Pair || b.k == TK::Pair) return rec_dyn("epq_c3_dyn", a, b, x, y);
-    if (a.k == TK::List && b.k == TK::List && M.elem_is_i32(a.a) && M.elem_is_i32(b.a)) return "epq_c3_li(" + x + ", " + y + ")";
+    if (a.k == TK::List && b.k == TK::List && M.elem_width(a.a) == 4 && M.elem_width(b.a) == 4) return "epq_c3_li(" + x + ", " + y + ")";
     return rec_fn(false, a, b) + "(" + x + ", " + y + ")";
 }
 // Equality expression (0/1) of x : a with y : b. Never fails.
@@ -80,7 +81,7 @@ std::string rec_q(Type a, Type b, const std::string& x, const std::string& y) {
     if (a.k == TK::Pair && b.k == TK::Pair) return "(" + x + " == " + y + ")";
     if (a.is_int_like() || b.is_int_like()) return "0";
     if (a.k == TK::Pair || b.k == TK::Pair) return rec_dyn("epq_eq", a, b, x, y);
-    if (a.k == TK::List && b.k == TK::List && M.elem_is_i32(a.a) && M.elem_is_i32(b.a)) return "epq_eq_li(" + x + ", " + y + ")";
+    if (a.k == TK::List && b.k == TK::List && M.elem_width(a.a) == 4 && M.elem_width(b.a) == 4) return "epq_eq_li(" + x + ", " + y + ")";
     return rec_fn(true, a, b) + "(" + x + ", " + y + ")";
 }
 // Name of the generated function comparing two list-like static types.

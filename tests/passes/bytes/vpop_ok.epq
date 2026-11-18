@@ -1,0 +1,16 @@
+// values popped from another byte list (bytes: yes)
+// bytes: yes
+f := [0, 0, 1, 1]; // FLAG
+(i := 0; i < 40; i := i + 1;) @ f :+ (i < 20);
+g := [1, 2, 3, 200];
+c := 0;
+(x : f) @ c := c + x;
+>> c;
+>> f;
+f[3] := -g; f[2] := -g;
+>> f;
+>> f[3];
+c := 0;
+(x : f) @ c := c + x;
+>> c;
+

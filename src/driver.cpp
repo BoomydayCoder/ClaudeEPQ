@@ -362,7 +362,6 @@ int run_backend(const Program& prog, const Options& opts_in) {
         std::string s;
         infer::dump_types(s, R);
         write_all(1, s);
-        return 0;
     }
     BuildOptions bo;
     bo.definite_assignment = !disabled(opts, "definite-assignment");
@@ -370,6 +369,24 @@ int run_backend(const Program& prog, const Options& opts_in) {
     bo.constants = !disabled(opts, "constants");
     tir::Module M;
     build_tir(prog, R, bo, M);
+    if (opts.dump_types) {  // element layout of the TIR regions after the passes (byte lists, §5.12)
+        tir::PassOptions po;
+        po.disabled = opts.no_pass;
+        po.only = opts.only_pass;
+        po.enabled = opts.enable_pass;
+        tir::run_passes(M, po);
+        std::string s = "layout (TIR regions after passes):\n";
+        for (size_t r = 0; r < M.regions.size(); ++r) {
+            const tir::Region& g = M.regions[r];
+            if (g.record) continue;
+            s += "  List(L" + std::to_string(r) + ": " +
+                 (g.bytes ? std::string("Int8") : g.pair ? std::string("Pair") : tir::type_str(M, g.elem)) + ")  sites:";
+            for (auto& st : g.sites) s += " line" + std::to_string(st.line) + "/len" + std::to_string(st.len);
+            s += "\n";
+        }
+        write_all(1, s);
+        return 0;
+    }
     uint64_t Tb = now_us();
     if (opts.verbose)
         std::fprintf(stderr, "epq: infer %llu us, build %llu us\n", (unsigned long long)(Ti - T0), (unsigned long long)(Tb - Ti));

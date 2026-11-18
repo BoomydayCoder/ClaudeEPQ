@@ -1,0 +1,16 @@
+// distant store of 255 is still a byte (bytes: yes)
+// bytes: yes
+f := [0, 0, 1, 1]; // FLAG
+(i := 0; i < 40; i := i + 1;) @ f :+ (i < 20);
+
+c := 0;
+(x : f) @ c := c + x;
+>> c;
+>> f;
+f[3] := 255;
+>> f;
+>> f[3];
+c := 0;
+(x : f) @ c := c + x;
+>> c;
+

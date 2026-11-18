@@ -24,6 +24,8 @@
  * List header (16 bytes, 16-aligned):  { void* data; int32_t len; int32_t cap; }
  *   The element layout is fixed per region by the static element type:
  *     element type Int / Bot   -> data is EI32[]  (4 bytes per element)
+ *     byte region (pass "bytes", DESIGN.md 5.12: Int elements all provably in
+ *       0..255)                -> data is EU8[]   (1 byte per element)
  *     anything else            -> data is EW64[]  (8 bytes; always a valid EAny word:
  *                                 lists as pointers, functions as tagged words)
  *   Soundness invariant of the inference: a list reachable from an Any value
@@ -37,6 +39,9 @@
  * Descriptors (EDesc table, set in epq_rt_desc by the program's entry): static
  * type descriptions for deep equality / ordering / printing.
  *   index 0 = INT, 1 = ANY, 2 = LIST of ANY, 3 = FN; others LIST(elem index).
+ *   INT8 = { EPQ_K_INT, 1 }: an integer stored in one byte. It only ever appears
+ *   as the element descriptor of a byte list's LIST descriptor; used as the
+ *   descriptor of a value it is exactly INT (every test looks at the kind).
  *   Descriptor-driven helpers take values as EAny-sized "words":
  *     INT desc -> (uint32_t)value in the low bits, LIST -> pointer,
  *     FN desc  -> tagged function word, ANY -> tagged word.
@@ -77,6 +82,15 @@
 typedef uint64_t EAny;
 typedef struct EI32 { int32_t v; } EI32;
 typedef struct EW64 { EAny v; } EW64;
+/* Byte-list elements (pass "bytes"). unsigned _BitInt(8) is not a character
+ * type, so (unlike unsigned char) a byte store does not alias list headers for
+ * type-based alias analysis. C++ (the JIT's runtime bridge) uses uint8_t. */
+#if !defined(__cplusplus) && defined(__BITINT_MAXWIDTH__)
+__extension__ typedef unsigned _BitInt(8) epq_u8_t;
+#else
+typedef uint8_t epq_u8_t;
+#endif
+typedef struct EU8 { epq_u8_t v; } EU8;
 typedef struct __attribute__((aligned(16))) EList {
     void* data;
     int32_t len;
@@ -641,6 +655,29 @@ EPQ_INLINE EAny epq_st_w(EList* l, int32_t i, EAny v) {
     d[i].v = v;
     return v;
 }
+/* byte lists (pass "bytes"): values are in 0..255; loads zero-extend */
+EPQ_INLINE int32_t epq_ld_u8(EList* l, int32_t i) {
+    EU8* d = (EU8*)l->data;
+    if (EPQ_UNLIKELY(((uint32_t)i >= (uint32_t)l->len) | (d == 0))) epq_fail(EPQ_E_INDEX_OOB);
+    return (int32_t)d[i].v;
+}
+EPQ_INLINE int32_t epq_st_u8(EList* l, int32_t i, int32_t v) {
+    EU8* d = (EU8*)l->data;
+    if (EPQ_UNLIKELY(((uint32_t)i >= (uint32_t)l->len) | (d == 0))) epq_fail(EPQ_E_INDEX_OOB);
+    d[i].v = (epq_u8_t)v;
+    return v;
+}
+EPQ_INLINE EList* epq_push_u8(EList* l, int32_t v) {
+    int32_t n = l->len;
+    if (EPQ_UNLIKELY(n == l->cap)) epq_list_grow(l, 1);
+    ((EU8*)l->data)[n].v = (epq_u8_t)v;
+    l->len = n + 1;
+    return l;
+}
+EPQ_INLINE int32_t epq_pop_u8(EList* l) {
+    if (EPQ_UNLIKELY(l->len == 0)) epq_fail(EPQ_E_LIST_EMPTY);
+    return (int32_t)((EU8*)l->data)[--l->len].v;
+}
 EPQ_INLINE EList* epq_push_i32(EList* l, int32_t v) {
     int32_t n = l->len;
     if (EPQ_UNLIKELY(n == l->cap)) epq_list_grow(l, 4);
@@ -760,8 +797,16 @@ EPQ_INLINE void epq_norm(uint32_t* d, EAny* w) {
     }
 }
 EPQ_INLINE EAny epq_elem_word(uint32_t ed, EList* l, int32_t k) {
-    if (epq_rt_desc[ed].kind == EPQ_K_INT) return (uint32_t)((EI32*)l->data)[k].v;
+    if (epq_rt_desc[ed].kind == EPQ_K_INT) {
+        if (epq_rt_desc[ed].elem) return (uint32_t)((EU8*)l->data)[k].v; /* INT8: byte list */
+        return (uint32_t)((EI32*)l->data)[k].v;
+    }
     return ((EW64*)l->data)[k].v;
+}
+/* Element width in bytes of a list whose element descriptor is ed. */
+EPQ_INLINE uint32_t epq_elem_width(uint32_t ed) {
+    if (epq_rt_desc[ed].kind == EPQ_K_INT) return epq_rt_desc[ed].elem ? 1 : 4;
+    return 8;
 }
 
 /* A list-like view of a LIST or PAIR (desc, word), for mixed comparisons. */
@@ -815,6 +860,13 @@ EPQ_INLINE int epq_cmp3_li(EList* a, EList* b) {
         if (pa[k].v != pb[k].v) return pa[k].v < pb[k].v ? -1 : 1;
     return (na > nb) - (na < nb);
 }
+/* Two byte lists: bytes are unsigned values 0..255, so memcmp order is value order. */
+EPQ_INLINE int epq_cmp3_lb(EList* a, EList* b) {
+    int32_t na = a->len, nb = b->len, n = na < nb ? na : nb;
+    int c = n ? memcmp(a->data, b->data, (size_t)n) : 0;
+    if (c) return c < 0 ? -1 : 1;
+    return (na > nb) - (na < nb);
+}
 /* PAIR on at least one side (both already normalised). */
 EPQ_RT_API int epq_cmp3_pair(uint32_t da, EAny a, uint32_t db, EAny b) {
     uint32_t ka = epq_rt_desc[da].kind, kb = epq_rt_desc[db].kind;
@@ -842,7 +894,11 @@ EPQ_RT_API int epq_cmp3(uint32_t da, EAny a, uint32_t db, EAny b) {
     EList* lb = (EList*)(uintptr_t)b;
     uint32_t ea = epq_rt_desc[da].elem, eb = epq_rt_desc[db].elem;
     uint32_t kea = epq_rt_desc[ea].kind, keb = epq_rt_desc[eb].kind;
-    if (kea == EPQ_K_INT && keb == EPQ_K_INT) return epq_cmp3_li(la, lb);
+    if (kea == EPQ_K_INT && keb == EPQ_K_INT) {
+        uint32_t wa = epq_elem_width(ea), wb = epq_elem_width(eb);
+        if (wa == 4 && wb == 4) return epq_cmp3_li(la, lb);
+        if (wa == 1 && wb == 1) return epq_cmp3_lb(la, lb);
+    }
     int32_t na = la->len, nb = lb->len, n = na < nb ? na : nb;
     if (kea == EPQ_K_ANY && keb == EPQ_K_ANY) {
         /* Common dynamic case: inline the both-integer element test. */
@@ -895,8 +951,11 @@ EPQ_RT_API int epq_eq(uint32_t da, EAny a, uint32_t db, EAny b) {
     if (la->len != lb->len) return 0;
     uint32_t ea = epq_rt_desc[da].elem, eb = epq_rt_desc[db].elem;
     uint32_t kea = epq_rt_desc[ea].kind, keb = epq_rt_desc[eb].kind;
-    if (kea == EPQ_K_INT && keb == EPQ_K_INT)
-        return memcmp(la->data, lb->data, (size_t)la->len * 4) == 0;
+    if (kea == EPQ_K_INT && keb == EPQ_K_INT) {
+        uint32_t wa = epq_elem_width(ea), wb = epq_elem_width(eb);
+        if (wa == wb) return memcmp(la->data, lb->data, (size_t)la->len * wa) == 0;
+        /* a byte list against an int list: by value, below */
+    }
     if (kea == EPQ_K_ANY && keb == EPQ_K_ANY) {
         /* litcmp: words equal => values equal (same int, same list, same fn); two
          * ints that differ are unequal; only otherwise recurse. */
@@ -992,6 +1051,25 @@ static __attribute__((noinline, unused)) void epq_print_ilist_val(const EList* l
     epq_ocommit(o);
 }
 
+/* [a, b, c] for a byte list (pass "bytes"). */
+static __attribute__((noinline, unused)) void epq_print_blist_val(const EList* l) {
+    const EU8* p = (const EU8*)l->data;
+    int32_t n = l->len;
+    char* o = epq_oreserve(1 + 11 + 1);
+    *o++ = '[';
+    if (n > 0) {
+        o = epq_fmt_i32(o, (int32_t)p[0].v);
+        for (int32_t i = 1; i < n; i++) {
+            o = epq_oroom(o, EPQ_ELEM_MAX);
+            memcpy(o, ", ", 2);
+            o = epq_fmt_i32(o + 2, (int32_t)p[i].v);
+        }
+        o = epq_oroom(o, 1);
+    }
+    *o++ = ']';
+    epq_ocommit(o);
+}
+
 /* [ ... ] for an Any-element list (the elements are tagged words). */
 static __attribute__((noinline, unused)) void epq_print_alist_val(const EList* l) {
     const EW64* p = (const EW64*)l->data;
@@ -1040,7 +1118,9 @@ EPQ_RT_API void epq_print_val(uint32_t d, EAny w) {
         const EList* l = (const EList*)(uintptr_t)w;
         uint32_t e = epq_rt_desc[d].elem;
         uint32_t ek = epq_rt_desc[e].kind;
-        if (ek == EPQ_K_INT) {
+        if (ek == EPQ_K_INT && epq_rt_desc[e].elem) {
+            epq_print_blist_val(l); /* byte list */
+        } else if (ek == EPQ_K_INT) {
             epq_print_ilist_val(l);
         } else if (ek == EPQ_K_ANY) {
             epq_print_alist_val(l);

@@ -8,9 +8,9 @@ ClaudeEPQ is a new implementation of the EPQ language (original: BoomydayCoder/E
 - Front end (lexer, parser, resolver) matching the original exactly, including `-e` AST dumps.
 - Whole-program type inference with call-site specialisation, records (per-position types for
   fixed-shape lists, nullable records for trees), and a typed IR (TIR) with a verifier (`--verify-tir`).
-- Ten optimisation passes, **all on by default** (`build/epq --list-passes`): simplify, litcmp, inline,
+- Eleven optimisation passes, **all on by default** (`build/epq --list-passes`): simplify, litcmp, inline,
   recur, pairs, ifconv (scalar bodies only; element stores behind `EPQ_IFCONV_STORES=1`), appendopt,
-  listopt, simplify2, reclaim. The default-off list (`kDefaultOff` in src/passes/registry.cpp) is empty.
+  listopt, simplify2, reclaim, bytes (one byte per element for lists of values in 0–255, §5.12). The default-off list (`kDefaultOff` in src/passes/registry.cpp) is empty.
 - Shared runtime (buffered I/O, three-way deep compare, grow-in-place lists, static reclamation).
 - Two engines. The **ARM64 JIT** covers every TIR op and type. The **C engine** (`--engine=aot`) emits C,
   compiles it with cc and caches the dylib. Batch mode (`--batch`) serves the test tools.
@@ -40,8 +40,6 @@ ClaudeEPQ is a new implementation of the EPQ language (original: BoomydayCoder/E
 
 ## Known gaps
 
-- **Byte lists** (DESIGN §5.12: one byte per element for 0–255 flag arrays) are not merged yet. The
-  work is on a separate branch.
 - No garbage collector. Static reclamation is the only memory reuse; a program that allocates without
   bound in a long loop can run out of memory. The original has the same limit (it never frees).
 - The JIT is about 0.9× the C engine's speed on its own execution time (geomean). The main remaining

@@ -1,0 +1,16 @@
+// a store through an element of an outer list
+// bytes: no
+f := [0, 0, 1, 1]; // FLAG
+(i := 0; i < 40; i := i + 1;) @ f :+ (i < 20);
+outer := [f, [5, 6]];
+c := 0;
+(x : f) @ c := c + x;
+>> c;
+>> f;
+outer[0][3] := 999; >> outer;
+>> f;
+>> f[3];
+c := 0;
+(x : f) @ c := c + x;
+>> c;
+

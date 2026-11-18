@@ -59,6 +59,7 @@ records. The program becomes a typed IR (TIR), optimised by these passes, all on
 - **appendopt**: append loops get capacity reservations; copy loops become bulk copies.
 - **listopt**: keeps list lengths and data pointers in registers; removes redundant bounds checks.
 - **reclaim**: frees lists at points where the compiler proves they are dead (static reclamation).
+- **bytes**: lists whose stored values are all provably 0–255 (flags, marks) use one byte per element.
 
 The JIT then emits ARM64 code directly. The C engine compiles the same optimised TIR. Details:
 [docs/DESIGN.md](docs/DESIGN.md) (architecture) and [docs/LANGUAGE.md](docs/LANGUAGE.md) (the language as
