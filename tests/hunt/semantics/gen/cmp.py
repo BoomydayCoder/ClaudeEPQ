@@ -9,8 +9,8 @@ sys.path.insert(0, os.path.join(REPO, 'tools'))
 from epqlib import require_baseline  # noqa: E402
 REF = require_baseline()
 EPQ = os.path.join(REPO, 'build', 'epq')
-env = dict(os.environ, EPQ_CACHE_DIR=os.path.join(W, 'cache'), EPQ_CFLAGS='-O1')
-TD = os.path.join(W, 't')
+env = dict(os.environ, EPQ_CACHE_DIR=os.path.join(REPO, 'build', 'hunt-cmp', 'cache'), EPQ_CFLAGS='-O1')
+TD = os.path.join(REPO, 'build', 'hunt-cmp', 't')
 os.makedirs(TD, exist_ok=True)
 
 def run(cmd, f):
