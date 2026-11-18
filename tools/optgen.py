@@ -481,7 +481,7 @@ class OptGen:
     # ================================================================== recur
     def f_recur(self):
         s = Snip("recur")
-        kinds = self.r.sample(["fib", "binom", "gcd", "acc", "swapt", "impure", "fail", "cnt", "fibl"],
+        kinds = self.r.sample(["fib", "binom", "gcd", "acc", "swapt", "impure", "fail", "cnt", "fibl", "tlist"],
                               self.ri(2, 4))
         for kd in kinds:
             if kd == "fib":
@@ -566,6 +566,21 @@ class OptGen:
                 arg = self.size(s, -off - 1, 10) if self.ch(0.5) else str(self.ri(-off + 1, 10))
                 # arg = -off -> division by zero; base cases reach n-1 >= -1
                 s.head.append(">> %s(%s) + %s(%s);" % (f, arg, f, arg))
+            elif kd == "tlist":
+                n, acc, t = self.params(3)
+                f = self.nm("tl")
+                s.nglob += 1
+                if self.ch(0.5):
+                    s.head.append("%s := (%s, %s) => { (%s < 1) ? => %s; %s := [%s, %s * 2]; %s :+ %s; => %s(%s - 1, %s); };"
+                                  % (f, n, acc, n, acc, t, n, n, acc, t, f, n, acc))
+                    tr = self.nm("tr")
+                    s.head.append("%s := %s(%s, []); %s := [5, 5, 5]; >> %s; >> %s(%d, [[0]]);"
+                                  % (tr, f, self.size(s, -1, 12), self.nm("jk"), tr, f, self.ri(0, 5)))
+                    s.nglob += 2
+                else:
+                    s.head.append("%s := (%s, %s) => { (%s < 1) ? => %s; %s := [%s, %s]; => %s(%s - 1, %s + %s[0] + |%s|); };"
+                                  % (f, n, acc, n, acc, t, n, n, f, n, acc, t, t))
+                    s.head.append(">> %s(%s, 0);" % (f, self.size(s, -1, 40)))
             else:
                 # tail-recursive counting loop through two parameters, and a list accumulator
                 l, n = self.params(2)
@@ -897,7 +912,7 @@ class OptGen:
                          "(%s > %d) ? %s[0] := %s + %s[|%s| - 1][1];" % (sm, self.ri(0, 30), t, sm, v, v)
                          if self.ch(0.5) else "%s := %s + |%s|;" % (sm, sm, v)]
             ret = self.pick(["int", "int", "t", "u", "alias", "store", "storeel", "idret", "pick", "nested",
-                             "aliasx", "aliasx"])
+                             "aliasx", "aliasx", "elemret", "setelret"])
             # self-recursion through a depth parameter: never inlined, so reclaim sees it
             if ret in ("int", "store", "storeel"):
                 body.append("(%s > 0) ? %s[0] := %s[0] + %s(%s + 1, %s - 1);" % (dp, u, u, f, n, dp))
@@ -917,6 +932,10 @@ class OptGen:
                 body += ["%s := [%s, 1];" % (w, t), "%s :+ %s;" % (keep, w), "=> 0;"]
             elif ret == "idret":
                 body.append("=> %s(%s);" % (idf, self.pick([t, u])))
+            elif ret == "elemret":
+                body += ["%s := [%s];" % (w, n), "%s :+ %s;" % (w, t), "=> %s;" % w]
+            elif ret == "setelret":
+                body += ["%s := [0, 0];" % w, "%s[%d] := %s;" % (w, self.ri(0, 1), u), "=> %s;" % w]
             elif ret == "aliasx":
                 body.append("=> %s;" % self.alias_expr(self.pick([t, u]), (idf, "[%s]" % t)))
             elif ret == "pick":
@@ -926,6 +945,18 @@ class OptGen:
             s.nglob += 1
             s.head.append("%s := (%s, %s) => { %s };" % (f, n, dp, " ".join(body)))
             fns.append((f, ret))
+        if self.ch(0.5):
+            pl, pn, pt, pd, pw = self.params(5)
+            ps = self.nm("pst")
+            how = self.pick(["%s :+ %s;" % (pl, pt), "(|%s| > 0) ? %s[0] := %s;" % (pl, pl, pt),
+                             "%s :+ [%s];" % (pl, pt)])
+            s.nglob += 1
+            s.head.append("%s := (%s, %s, %s) => { %s := [%s, %s * 3]; %s (%s > 0) ? %s := %s(%s, %s + 1, %s - 1); "
+                          "=> |%s|; };" % (ps, pl, pn, pd, pt, pn, pn, how, pd, pw, ps, pl, pn, pd, pt))
+            G = self.glob(s, "pg", "[[%d]]" % self.ri(0, 9))
+            s.head.append(">> %s(%s, %d, %d); %s := [77, 77]; >> %s;" % (ps, G, self.ri(0, 9), self.ri(0, 3),
+                                                                         self.nm("jk"), G))
+            s.nglob += 1
         # a driver function calling the helpers (frees happen in non-main functions)
         dn, di, ds, dt = self.params(4)
         dbody = ["%s := 0;" % ds, "%s := [%s, %s];" % (dt, dn, dn)]
