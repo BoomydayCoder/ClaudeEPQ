@@ -5,7 +5,9 @@
 //              environment, --no-pass/--mono/--no-dedup); one open() of
 //              $CACHE/tier/<key>.ready decides hit or miss.
 //   hit        dlopen the (already helper-warmed) dylib, run it through the
-//              driver's AOT run path (run_dylib_entry).
+//              driver's AOT run path (run_dylib_entry) -- unless <key>.stats
+//              shows that the artefact is no faster end to end than the JIT
+//              (best of >= 2 hit runs vs best JIT run past the threshold).
 //   miss       the normal engine runs; a sleeping thread spawns, once, a
 //              detached utility-QoS helper `epq --tier-compile FILE` if the
 //              program is still running after EPQ_TIER_MS (default 20) ms.
@@ -42,6 +44,11 @@ bool command(int argc, char** argv, int* rc);
 // On a miss arms the background trigger and returns false: the normal
 // pipeline then runs.
 bool start(CompileUnit& cu, const Options& opts, int argc, char** argv, int* rc);
+
+// Called by main() when the program has finished normally: a run that passed
+// the threshold on the JIT records its time, so later runs can tell whether the
+// artefact is really faster (tierup.cpp, "run statistics").
+void finish(int rc);
 
 }  // namespace tierup
 }  // namespace epq

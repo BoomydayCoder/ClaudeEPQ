@@ -330,6 +330,8 @@ Options normalise(const Options& in) {
 
 }  // namespace
 
+bool g_ran_on_jit = false;
+
 // ---- tier-up hook (src/tierup.cpp): run an already dlopen'ed dylib ----------
 int run_dylib_entry(void* h, const Options& opts) {
     auto entry = (int (*)(void))dlsym(h, "epq_entry");
@@ -417,6 +419,7 @@ int run_module(tir::Module& M, const Options& opts_in) {
         jc.stats = opts.jit_stats;
         jc.verbose = opts.verbose;
         if (opts.verbose) std::fprintf(stderr, "epq: passes %llu us\n", (unsigned long long)(T1 - Tb));
+        g_ran_on_jit = true;
         return jitcg::run(M, jc);
     }
     std::string c = emit_c(M);

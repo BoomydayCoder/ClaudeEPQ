@@ -46,6 +46,9 @@ struct Options {
     std::string dump_tir_after;          // --dump-tir-after=NAME
 };
 
+// Set by run_module when the program ran on the JIT (read by tier-up).
+extern bool g_ran_on_jit;
+
 // Runs the resolved program. Returns the process exit status.
 int run_backend(const Program& prog, const Options& opts);
 

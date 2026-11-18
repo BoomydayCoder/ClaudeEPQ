@@ -14,6 +14,7 @@ Scenarios (each in its own EPQ_CACHE_DIR under build/tierup/test/):
               helper holds no pipe and its stdio is /dev/null
   status      --tier-status / --tier-clear; EPQ_CFLAGS and --no-pass are in the key
   evict       oldest-first eviction beyond EPQ_TIER_CACHE_MB
+  measured    <key>.stats: an artefact no faster than the JIT stops being used
 --suites additionally runs tests/conformance and tests/core in auto mode with a
 cold cache, a warm cache and EPQ_TIER_MS=0 (EPQ_CFLAGS=-O1).
 """
@@ -358,6 +359,42 @@ def t_evict():
     check(r[:2] == expected(c, LONG), "output after eviction")
 
 
+def t_measured():
+    """<key>.stats: JIT runs past the threshold and hits record their best end-to-end
+    time; after two hits an artefact that is not faster than the JIT is no longer used."""
+    c = fresh("measured")
+    exp = expected(c, LONG)
+    env = env_for(c, EPQ_TIER_MS=0)
+    r = run([LONG], env)
+    check(r[:2] == exp, "first run output")
+    check(wait_idle(c), "helper did not finish")
+    st = tier_files(c, ".stats")
+    check(len(st) == 1, "no stats file after a JIT run past the threshold")
+    for i in range(2):
+        r = run(["--verbose", LONG], env)
+        check("tier-up hit" in r[2] and r[:2] == exp, "hit %d" % (i + 1))
+    if not st:
+        return
+    with open(st[0]) as f:
+        lines = f.read().splitlines()
+    jit, aot, n = (int(x) for x in lines[1].split())
+    print("    best end to end: JIT %.1f ms, artefact %.1f ms (%d hits)" % (jit / 1000, aot / 1000, n))
+    check(n == 2 and jit > 0 and aot > 0, "stats after two hits: %r" % lines)
+    with open(st[0], "w") as f:   # pretend the JIT was faster
+        f.write("%s\n%d %d %d\n" % (lines[0], aot - 1, aot, n))
+    r = run(["--verbose", LONG], env)
+    check("not faster than the JIT" in r[2] and "tier-up hit" not in r[2] and r[:2] == exp,
+          "artefact used although the JIT was faster")
+    check(len(events(c, "spawn")) == 1, "prefer-jit run spawned a helper")
+    with open(st[0], "w") as f:   # and now the artefact
+        f.write("%s\n%d %d %d\n" % (lines[0], aot + 1, aot, n))
+    r = run(["--verbose", LONG], env)
+    check("tier-up hit" in r[2] and r[:2] == exp, "artefact not used although faster")
+    short = run([SHORT], env_for(c, EPQ_TIER_MS=10 ** 6))
+    check(short[:2] == expected(c, SHORT), "short program output")
+    check(len(tier_files(c, ".stats")) == 1, "a run that finished before the threshold wrote stats")
+
+
 def suite(name, env, jobs):
     ok = True
     for s in ("conformance", "core"):
@@ -414,7 +451,7 @@ def main():
     EPQ = os.path.abspath(a.epq)
     os.makedirs(WORK, exist_ok=True)
     tests = [("threshold", t_threshold), ("short", t_short), ("concurrent", t_concurrent), ("corrupt", t_corrupt),
-             ("disabled", t_disabled), ("pipe", t_pipe), ("status", t_status), ("evict", t_evict)]
+             ("disabled", t_disabled), ("pipe", t_pipe), ("status", t_status), ("evict", t_evict), ("measured", t_measured)]
     if a.suites:
         tests.append(("suites", lambda: t_suites(a.j)))
     for name, fn in tests:

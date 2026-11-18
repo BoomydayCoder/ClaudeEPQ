@@ -349,7 +349,11 @@ int main(int argc, char** argv) {
     // Small sources cannot nest deeply enough to threaten the main thread's
     // stack. Larger ones run the whole pipeline on a thread whose (lazily
     // committed) stack grows with the source, so deep nesting never crashes.
-    if (cu.source.size() <= 4096) return pipeline(cu, opts, t0, t_read);
+    if (cu.source.size() <= 4096) {
+        int rc = pipeline(cu, opts, t0, t_read);
+        tierup::finish(rc);
+        return rc;
+    }
     size_t stack = (64u << 20) + cu.source.size() * 4096;
     if (stack > (size_t(32) << 30)) stack = size_t(32) << 30;
     cu.stack_bytes = stack;
@@ -374,5 +378,6 @@ int main(int argc, char** argv) {
         return pipeline(cu, opts, t0, t_read);
     }
     pthread_join(th, nullptr);
+    tierup::finish(job.rc);
     return job.rc;
 }

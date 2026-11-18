@@ -31,6 +31,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cerrno>
 #include <cstdarg>
 #include <climits>
@@ -264,8 +265,61 @@ int read_marker(const std::string& dir, const std::string& key, Marker& m, std::
 
 void drop_artefact(const std::string& dir, const std::string& key, const Marker* m) {
     ::unlink((dir + "/" + key + ".ready").c_str());
+    ::unlink((dir + "/" + key + ".stats").c_str());
     if (m && !m->dylib.empty() && m->dylib.find('/') == std::string::npos) ::unlink((dir + "/" + m->dylib).c_str());
 }
+
+// ---- run statistics: is the artefact actually faster than the JIT? ------------
+//
+// <key>.stats records the best end-to-end time (from the cache probe to the end
+// of the program, so the JIT side includes the front end and the JIT compile and
+// the hit side the probe and the dlopen) of JIT runs that passed the threshold
+// and of runs that used the artefact. Once there are kMinHitSamples artefact
+// runs, a hit is only taken if the artefact's best time beats the JIT's best:
+// programs on which the C code is no faster than the JIT (or where the dlopen
+// costs more than the front end saves) stay on the JIT.
+
+constexpr const char* kStatsMagic = "epq-tier-stats 1";
+constexpr unsigned kMinHitSamples = 2;
+
+struct Stats {
+    unsigned long long jit_us = 0, aot_us = 0;  // best times, 0 = no sample
+    unsigned aot_n = 0;
+};
+
+bool read_stats(const std::string& dir, const std::string& key, Stats& st) {
+    int fd = ::open((dir + "/" + key + ".stats").c_str(), O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return false;
+    char buf[128];
+    ssize_t n = ::read(fd, buf, sizeof buf - 1);
+    ::close(fd);
+    if (n <= 0) return false;
+    buf[n] = 0;
+    size_t ml = std::strlen(kStatsMagic);
+    if (std::strncmp(buf, kStatsMagic, ml) != 0 || buf[ml] != '\n') return false;
+    return std::sscanf(buf + ml + 1, "%llu %llu %u", &st.jit_us, &st.aot_us, &st.aot_n) == 3;
+}
+
+// Folds one sample into <key>.stats (atomic replace; concurrent runs: last wins).
+void record_sample(const std::string& dir, const std::string& key, bool aot, unsigned long long us) {
+    Stats st;
+    read_stats(dir, key, st);
+    unsigned long long& best = aot ? st.aot_us : st.jit_us;
+    if (best == 0 || us < best) best = us;
+    if (aot) ++st.aot_n;
+    char buf[128];
+    int n = std::snprintf(buf, sizeof buf, "%s\n%llu %llu %u\n", kStatsMagic, st.jit_us, st.aot_us, st.aot_n);
+    char uniq[64];
+    std::snprintf(uniq, sizeof uniq, ".tmp-%d-stats", (int)getpid());
+    std::string tmp = dir + "/" + key + uniq, fin = dir + "/" + key + ".stats";
+    int fd = ::open(tmp.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+    if (fd < 0) return;
+    bool ok = ::write(fd, buf, (size_t)n) == n;
+    ok = ::close(fd) == 0 && ok;
+    if (!ok || ::rename(tmp.c_str(), fin.c_str()) != 0) ::unlink(tmp.c_str());
+}
+
+bool jit_preferred(const Stats& st) { return st.aot_n >= kMinHitSamples && st.jit_us > 0 && st.aot_us >= st.jit_us; }
 
 // ---- spawning ----------------------------------------------------------------
 
@@ -336,6 +390,7 @@ struct Trigger {
     unsigned ms = kDefaultTierMs;
     uint64_t t0 = 0;
     pid_t pid = 0;  // helper already launched (EPQ_TIER_MS=0)
+    std::atomic<bool> fired{false};  // the threshold passed while the program was running
 };
 
 pid_t launch_helper(const Trigger& t) {
@@ -385,6 +440,7 @@ void* trigger_thread(void* p) {
         struct timespec ts = {(time_t)(t->ms / 1000), (long)(t->ms % 1000) * 1000000L};
         while (nanosleep(&ts, &ts) != 0 && errno == EINTR) {
         }
+        t->fired.store(true, std::memory_order_relaxed);
         t->pid = launch_helper(*t);
     }
     // Reap the helper if we are still alive when it finishes (no zombie); if
@@ -520,6 +576,7 @@ void housekeeping(const std::string& dir, const std::string& keep_key) {
         if (e.key == keep_key) continue;
         ::unlink((dir + "/" + e.key + ".ready").c_str());  // marker first: no reader sees a dangling one
         ::unlink((dir + "/" + e.key + ".dylib").c_str());
+        ::unlink((dir + "/" + e.key + ".stats").c_str());
         total -= (unsigned long long)e.size;
         tier_log("evict %s", e.key.c_str());
     }
@@ -657,6 +714,8 @@ bool engine_forced(int argc, char** argv) {
     return false;
 }
 
+Trigger* g_armed = nullptr;  // this run's trigger (miss path), for finish()
+
 int status_main(CompileUnit& cu, const Options& opts) {
     std::string dir = tier_dir();
     std::string key = compute_key(cu.source, opts);
@@ -675,6 +734,14 @@ int status_main(CompileUnit& cu, const Options& opts) {
 }
 
 }  // namespace
+
+void finish(int rc) {
+    Trigger* t = g_armed;
+    if (!t || rc != 0 || !t->fired.load(std::memory_order_relaxed)) return;
+    if (!g_ran_on_jit) return;  // only JIT runs count (not the C fallback)
+    if (::access(t->dir.c_str(), W_OK) != 0) return;
+    record_sample(t->dir, t->key, false, now_us() - t->t0);
+}
 
 bool is_flag(const char* a) {
     return !std::strcmp(a, "--tier-compile") || !std::strcmp(a, "--tier-status") || !std::strcmp(a, "--tier-clear");
@@ -719,6 +786,16 @@ bool start(CompileUnit& cu, const Options& opts, int argc, char** argv, int* rc)
     std::string dpath;
     int r = read_marker(dir, key, m, &dpath);
     uint64_t t1 = now_us();
+    Stats stats;
+    if (r == 1 && read_stats(dir, key, stats) && jit_preferred(stats)) {
+        // The artefact was measured and is no faster than the JIT: run the JIT,
+        // and do not arm the trigger (there is nothing left to compile).
+        tier_log("prefer-jit %s jit %llu us aot %llu us", key.c_str(), stats.jit_us, stats.aot_us);
+        if (opts.verbose)
+            std::fprintf(stderr, "epq: tier-up artefact not faster than the JIT (best %llu us vs %llu us); using the JIT\n",
+                         stats.aot_us, stats.jit_us);
+        return false;
+    }
     if (r == 1) {
         void* h = dlopen(dpath.c_str(), RTLD_NOW | RTLD_LOCAL);
         uint64_t t2 = now_us();
@@ -729,6 +806,7 @@ bool start(CompileUnit& cu, const Options& opts, int argc, char** argv, int* rc)
             tier_log("hit %s", key.c_str());
             int st = run_dylib_entry(h, opts);
             if (st >= 0) {
+                record_sample(dir, key, true, now_us() - t0);
                 *rc = st;
                 return true;
             }
@@ -761,7 +839,10 @@ bool start(CompileUnit& cu, const Options& opts, int argc, char** argv, int* rc)
     if (const char* ms = std::getenv("EPQ_TIER_MS"); ms && *ms) t->ms = (unsigned)std::strtoul(ms, nullptr, 10);
     // EPQ_TIER_MS=0 (testing): launch before the program starts, so even a
     // program that ends at once tiers up; the thread then only reaps.
-    if (t->ms == 0) t->pid = launch_helper(*t);
+    if (t->ms == 0) {
+        t->fired.store(true, std::memory_order_relaxed);
+        t->pid = launch_helper(*t);
+    }
     pthread_attr_t attr;
     pthread_attr_init(&attr);
     // A static stack: saves pthread_create's stack mapping (measured ~5 us).
@@ -770,7 +851,10 @@ bool start(CompileUnit& cu, const Options& opts, int argc, char** argv, int* rc)
     pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
     pthread_t th;
     unsigned ms = t->ms;
-    if (pthread_create(&th, &attr, trigger_thread, t) != 0) delete t;
+    if (pthread_create(&th, &attr, trigger_thread, t) != 0)
+        delete t;
+    else
+        g_armed = t;
     pthread_attr_destroy(&attr);
     if (opts.verbose)
         std::fprintf(stderr, "epq: tier-up trigger armed (%u ms) in %llu us\n", ms,
