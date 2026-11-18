@@ -10,7 +10,44 @@ the original on the same machine and inputs.
 
 ## Benchmarks
 
-<!-- BENCHMARK TABLE: filled in from tools/bench.py after the final run -->
+Measured on an Apple M5 (macOS 26) with `tools/bench.py`, 17 Nov 2026: the original (built as its README
+says, with the one evaluation-order fix that `tools/build_reference.sh` applies) against
+ClaudeEPQ's default engine (the JIT) and its C backend. Every output was checked against the original's.
+Best of 7–15 runs. The machine was in ordinary use, not idle (1-minute load fell from about 17 to 4 over
+the run).
+
+Two numbers per engine: **run** is execution time only (`-t`), **total** is wall-clock from starting the
+process to its exit, which includes about 1.5 ms of process start-up that no implementation can avoid.
+
+The six example programs from the original repository:
+
+| Program | Original run | JIT run | Speedup | Original total | JIT total | Speedup |
+|---|---|---|---|---|---|---|
+| bubblesort (5,000) | 1,256 ms | 16.9 ms | 74× | 1,259 ms | 20.9 ms | 60× |
+| dijkstra (20,000 vertices, 100,000 edges) | 572 ms | 7.5 ms | 76× | 583 ms | 12.0 ms | 49× |
+| eratosthenes (n = 2,000,000) | 416 ms | 5.5 ms | 75× | 421 ms | 9.7 ms | 43× |
+| heapsort (5,000) | 16.9 ms | 0.32 ms | 52× | 20.8 ms | 5.6 ms | 3.7× |
+| mergesort (5,000) | 12.9 ms | 0.48 ms | 27× | 17.2 ms | 5.2 ms | 3.3× |
+| fibonacci (n = 40, iterative) | 0.02 ms | 0.01 ms | – | 3.7 ms | 4.1 ms | 0.9× |
+
+The last three finish in under a millisecond once compiled, so their totals are almost entirely process
+start-up; iterative fibonacci is too short to speed up and is slightly slower end to end.
+
+Across all 24 benchmarks (the six above plus 18 larger programs in `bench/extra`):
+
+| | JIT (default) | C backend (`--engine=aot`) |
+|---|---|---|
+| Execution time, geometric mean over 22 programs | 48× (range 19×–120×) | 54× |
+| Total time, geometric mean over 23 programs | 24× | 25× |
+
+Those means leave out two programs so they are not flattering: iterative fibonacci (too short to
+measure) and recursive fibonacci, where merging duplicate calls of a pure function changes the amount of
+work and gives about 15,000× (410 ms → 0.03 ms). The C backend figures are with its compiled code already
+cached; its first run of a program costs a C compile on top. The slowest relative results are the
+recursion-heavy `tak` (19×) and the pair-record sort (24×).
+
+The full per-program table is in [docs/BENCHMARKS.md](docs/BENCHMARKS.md). Reproduce with
+`tools/build_reference.sh` and `python3 tools/bench.py` (see "How it is tested").
 
 ## Requirements
 
