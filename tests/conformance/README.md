@@ -1,7 +1,7 @@
 # Conformance corpus
 
 Small, focused EPQ programs whose expected behaviour was captured from the baseline
-(`refbuild/epq_ref`, the original implementation with the comparison-order fix, see
+(`epq_ref` from `tools/build_reference.sh`, the original implementation with the comparison-order fix, see
 `docs/LANGUAGE.md` §9.7). Every program is inside the well-defined subset (`LANGUAGE.md` §9),
 deterministic, and finishes on the baseline in well under 0.2 s.
 
@@ -49,9 +49,9 @@ python3 tests/conformance/run.py -k lists/ -k poly_ -- ./engine     # filter by 
 
 # regenerate .out/.code from a baseline binary (5 s timeout per test; refuses to record
 # expectations for runs that time out or die from a signal)
-python3 tests/conformance/regen.py refbuild/epq_ref
-python3 tests/conformance/regen.py refbuild/epq_ref --check          # verify, write nothing
-python3 tests/conformance/regen.py refbuild/epq_ref tests/conformance/lists/*.epq
+python3 tests/conformance/regen.py "$EPQ_BASELINE"
+python3 tests/conformance/regen.py "$EPQ_BASELINE" --check          # verify, write nothing
+python3 tests/conformance/regen.py "$EPQ_BASELINE" tests/conformance/lists/*.epq
 ```
 
 `run.py` against the baseline itself passes 100%.

@@ -1,6 +1,6 @@
 // Resolver: LANGUAGE.md section 4 (globals, locals, scopes) and the original's
 // compile-time errors, reproduced in the order the original compiler
-// (reference/EPQ/compiler.cc) would hit them.
+// (the original's compiler.cc) would hit them.
 //
 // Output, all attached to / indexed from the AST:
 //   * every Id use and assignment target: Node::flags has NF_GLOBAL or NF_LOCAL

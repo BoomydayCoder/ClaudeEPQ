@@ -21,9 +21,9 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))
 PROGS = os.path.join(HERE, "progs")
-REF = os.environ.get("EPQ_BASELINE") or os.path.join(REPO, "..", "refbuild", "epq_ref")
-if not os.path.exists(REF):
-    REF = os.path.join(REPO, "..", "..", "..", "..", "refbuild", "epq_ref")
+sys.path.insert(0, os.path.join(REPO, "tools"))
+from epqlib import require_baseline  # noqa: E402
+REF = require_baseline()
 
 BIG = 64 * 1024
 INT_MIN = "(-2147483647 - 1)"

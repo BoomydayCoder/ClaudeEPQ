@@ -7,14 +7,16 @@ still parses and compiles the whole program).
 """
 
 import os
+import sys
 import re
 import subprocess
 import threading
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))
-ROOT = os.path.dirname(REPO)
-REF = os.environ.get("EPQ_REF", os.path.join(ROOT, "refbuild", "epq_ref"))
+sys.path.insert(0, os.path.join(REPO, "tools"))
+from epqlib import require_baseline  # noqa: E402
+REF = os.environ.get("EPQ_REF") or require_baseline()
 EPQ = os.environ.get("EPQ_BIN", os.path.join(REPO, "build", "epq"))
 WORK = os.path.join(REPO, "build", "frontend", "work")
 TIMEOUT = 5.0

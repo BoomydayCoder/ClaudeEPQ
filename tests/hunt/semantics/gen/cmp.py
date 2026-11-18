@@ -4,9 +4,10 @@
 import os, subprocess, sys
 from concurrent.futures import ThreadPoolExecutor
 W = os.path.dirname(os.path.abspath(__file__))
-REPO = os.path.abspath(os.path.join(W, '..', '..'))
-ROOT = os.path.abspath(os.path.join(REPO, '..', '..', '..', '..'))
-REF = os.path.join(ROOT, 'refbuild', 'epq_ref')
+REPO = os.path.abspath(os.path.join(W, '..', '..', '..', '..'))
+sys.path.insert(0, os.path.join(REPO, 'tools'))
+from epqlib import require_baseline  # noqa: E402
+REF = require_baseline()
 EPQ = os.path.join(REPO, 'build', 'epq')
 env = dict(os.environ, EPQ_CACHE_DIR=os.path.join(W, 'cache'), EPQ_CFLAGS='-O1')
 TD = os.path.join(W, 't')

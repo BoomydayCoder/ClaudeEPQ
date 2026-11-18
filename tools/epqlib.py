@@ -18,15 +18,28 @@ REPO = os.path.dirname(TOOLS)
 BUILD = os.path.join(REPO, "build")
 NEW_BIN = os.path.join(BUILD, "epq")
 
-# baseline search order: $EPQ_BASELINE, ../refbuild/epq_ref (next to the repo), build/tools/ref/epq_ref
+# The baseline (the original implementation, the oracle): $EPQ_BASELINE, else
+# build/tools/ref/epq_ref (where tools/build_reference.sh puts it by default).
+BASELINE_HELP = ("the baseline binary (the original EPQ implementation) was not found.\n"
+                 "  Build it:  git clone https://github.com/BoomydayCoder/EPQ ../EPQ && "
+                 "tools/build_reference.sh ../EPQ build/tools/ref\n"
+                 "  or point EPQ_BASELINE at an existing epq_ref binary.")
+
+
 def find_baseline():
-    cands = [os.environ.get("EPQ_BASELINE"),
-             os.path.join(os.path.dirname(REPO), "refbuild", "epq_ref"),
-             os.path.join(BUILD, "tools", "ref", "epq_ref")]
-    for c in cands:
+    for c in (os.environ.get("EPQ_BASELINE"), os.path.join(BUILD, "tools", "ref", "epq_ref")):
         if c and os.path.isfile(c) and os.access(c, os.X_OK):
             return c
     return None
+
+
+def require_baseline():
+    """The baseline's path, or exit 2 with instructions."""
+    b = find_baseline()
+    if not b:
+        sys.stderr.write("error: " + BASELINE_HELP + "\n")
+        sys.exit(2)
+    return b
 
 
 class Engine:
@@ -58,6 +71,8 @@ def default_engines(include_pyref=False):
     b = find_baseline()
     if b:
         out.append(Engine("baseline", [b]))
+    else:
+        sys.stderr.write("warning: " + BASELINE_HELP + "\n  Comparing the other engines with each other only.\n")
     if os.path.isfile(NEW_BIN) and os.access(NEW_BIN, os.X_OK):
         out.append(Engine("jit", [NEW_BIN, "--engine=jit"]))
         out.append(Engine("aot", [NEW_BIN, "--engine=aot"]))

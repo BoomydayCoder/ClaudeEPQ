@@ -22,10 +22,10 @@ import harness  # noqa: E402
 
 def corpus():
     cases = []
-    ex = sorted(glob.glob(os.path.join(harness.ROOT, "reference", "EPQ", "examples", "**", "*.txt"), recursive=True))
+    ex = sorted(glob.glob(os.path.join(harness.REPO, "bench", "original", "*.epq")))  # the original's examples
     for p in ex:
         with open(p, "r", encoding="utf-8") as f:
-            cases.append(("example " + os.path.relpath(p, harness.ROOT), f.read()))
+            cases.append(("example " + os.path.relpath(p, harness.REPO), f.read()))
     for fn in ("snippets.txt", "resolver_cases.txt"):
         for name, src in harness.load_cases(os.path.join(harness.HERE, fn)):
             cases.append((fn + ": " + name, src))

@@ -19,9 +19,9 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))
 MICRO = os.path.join(REPO, "build", "rtio", "micro")
-REF = os.environ.get("EPQ_BASELINE") or os.path.join(REPO, "..", "refbuild", "epq_ref")
-if not os.path.exists(REF):  # inside .claude/worktrees/<name>
-    REF = os.path.join(REPO, "..", "..", "..", "..", "refbuild", "epq_ref")
+sys.path.insert(0, os.path.join(REPO, "tools"))
+from epqlib import require_baseline  # noqa: E402
+REF = require_baseline()
 
 PROGS = {
     "ints": "(i := 0; i < 1000000; i := i + 1;) @ >> i - (i / 100) * 100;\n",

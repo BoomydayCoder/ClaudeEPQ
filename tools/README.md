@@ -62,8 +62,9 @@ a bare existing path is taken as one argument. Flags and the program file are
 appended. **The first engine is the reference**; an engine named `baseline` is
 always moved to the front.
 
-Default (no `--engine`): `baseline` = `$EPQ_BASELINE`, else `../refbuild/epq_ref`
-next to the repo, else `build/tools/ref/epq_ref`; plus `jit` = `build/epq --engine=jit`
+Default (no `--engine`): `baseline` = `$EPQ_BASELINE`, else `build/tools/ref/epq_ref`
+(the default output of `build_reference.sh`; a warning says how to get it when neither
+exists); plus `jit` = `build/epq --engine=jit`
 and `aot` = `build/epq --engine=aot` if `build/epq` exists.
 
 Helpers:
@@ -78,15 +79,16 @@ Helpers:
 
 ## build_reference.sh — the baseline binary
 
-    tools/build_reference.sh ../reference/EPQ build/tools/ref      # -> build/tools/ref/epq_ref
+    git clone https://github.com/BoomydayCoder/EPQ ../EPQ      # the original (read-only use)
+    tools/build_reference.sh ../EPQ build/tools/ref              # -> build/tools/ref/epq_ref
 
 Copies the original sources into `OUT/src` (refuses to write inside the original
 repo), applies the single documented patch to the copy of `vm.cc` (the two
 `pop()>pop()` / `pop()<pop()` lines made evaluation-order-explicit; each must match
 exactly once), and builds with the original's flags
 `-std=c++17 -O3 -flto -march=native -DNDEBUG -w -Wno-register`. The pre-generated
-`lex.yy.c`/`parser.tab.cc` are used as-is. Verified: the produced sources are
-identical to `refbuild/src` and the binary is byte-identical to `refbuild/epq_ref`.
+`lex.yy.c`/`parser.tab.cc` are used as-is. Verified: the binary is byte-identical to
+the baseline the test expectations were recorded with.
 
 ## difftest.py — differential runner
 
@@ -110,7 +112,7 @@ Verdicts, saved cases and the reducer are unchanged (the reducer runs its candid
 process). Per-program wall times of batch engines are reported as 0. Use it whenever an
 `aot` engine is in the list:
 
-    tools/fuzz.py --batch --seed 1 --count 5000 --engine baseline=../refbuild/epq_ref \
+    tools/fuzz.py --batch --seed 1 --count 5000 --engine "baseline=$EPQ_BASELINE" \
         --engine "aot=build/epq --engine=aot" --engine "aot-nolist=env EPQ_NO_PASS=listopt build/epq --engine=aot"
 
 ## fuzz.py — random-program differential fuzzer (+ reducer)

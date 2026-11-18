@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Regenerate NAME.out / NAME.code for tests/records/progs/*.epq from the BASELINE.
 
-usage: gen_expected.py [--all] REF_BINARY   (the baseline, e.g. $ROOT/refbuild/epq_ref)
+usage: gen_expected.py [--all] REF_BINARY   (the baseline epq_ref, see tools/build_reference.sh)
 Only (re)generates files whose .out is missing unless --all is given.
 """
 import os

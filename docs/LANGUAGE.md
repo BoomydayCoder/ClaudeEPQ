@@ -6,7 +6,7 @@ ClaudeEPQ must satisfy: for every program in the **well-defined subset** (§9), 
 the exit code must be byte-identical to the original.
 
 Every statement below has been checked by experiment against the baseline binary
-(`refbuild/epq_ref`); `tests/conformance/` holds the corresponding test programs.
+(`epq_ref`, built with `tools/build_reference.sh`); `tests/conformance/` holds the corresponding test programs.
 
 ## 1. Lexical structure
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Regenerate NAME.out / NAME.code for tests/integration/{progs,known}/*.epq from the BASELINE.
 
-usage: gen_expected.py [--all] REF_BINARY   (the baseline, e.g. $ROOT/refbuild/epq_ref)
+usage: gen_expected.py [--all] REF_BINARY   (the baseline epq_ref, see tools/build_reference.sh)
 Only (re)generates files whose .out is missing unless --all is given.
 Run the suite with: python3 tools/fasttest.py --epq-arg=--verify-tir tests/integration/progs
 (tests/integration/known holds cases of passes that are OFF by default; run them with

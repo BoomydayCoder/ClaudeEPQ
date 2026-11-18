@@ -1,6 +1,6 @@
 // Parser: hand-written recursive descent (statements) + precedence climbing
 // (expressions) accepting exactly the language of the original bison grammar
-// (reference/EPQ/parser.yy) with bison's conflict resolutions. See parser.cpp
+// (the original's parser.yy) with bison's conflict resolutions. See parser.cpp
 // for the mapping from LR conflict states to parser decisions.
 #pragma once
 

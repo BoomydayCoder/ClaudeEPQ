@@ -12,9 +12,9 @@ import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))
-BASE = os.environ.get("EPQ_BASELINE") or os.path.join(os.path.dirname(REPO), "refbuild", "epq_ref")
-if not os.path.exists(BASE):
-    BASE = os.path.join(REPO, "..", "..", "..", "..", "refbuild", "epq_ref")
+sys.path.insert(0, os.path.join(REPO, "tools"))
+from epqlib import require_baseline  # noqa: E402
+BASE = require_baseline()
 EPQ = os.path.join(REPO, "build", "epq")
 P = os.path.join(REPO, "tests", "conformance", "programs")
 BENCH = os.path.join(REPO, "build", "bench")

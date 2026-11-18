@@ -4,7 +4,7 @@
 usage: run.py [--timeout SEC] [-k SUBSTR] [-j N] [-q] [--max-diff LINES] -- CMD [ARGS...]
 
 The program path is appended to CMD, NAME.in (if present) is fed on stdin.
-Example:  run.py -- ../../refbuild/epq_ref
+Example:  run.py -- "$EPQ_BASELINE"
           run.py -k lists/ -- ./build/epq --some-flag
 Exit status 0 iff every selected test passes.
 """
